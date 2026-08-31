@@ -50,7 +50,7 @@ Env flags (same as `dynamic_run_v2.py:317`):
 
 ## 3. Artifacts
 
-See `docs/ARCHITECTURE.md:3` contract table. Key:
+See `docs/internal/ARCHITECTURE.md:3` contract table. Key:
 
 | File | Source |
 |------|--------|
@@ -73,7 +73,7 @@ See `docs/ARCHITECTURE.md:3` contract table. Key:
 
 ## 5. Snapshot
 
-Orchestrator does NOT auto-revert — operator runs `Restore-VMSnapshot clean-*` after `META.json` + SMB copy (see `docs/VM-ACCESS.md:6`).
+Orchestrator does NOT auto-revert — operator runs `Restore-VMSnapshot clean-*` after `META.json` + SMB copy (see `docs/internal/VM-ACCESS.md:6`).
 
 ## References
 

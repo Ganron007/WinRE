@@ -55,6 +55,18 @@ def _run_oneshot(db_path: str, sql: str, persist: bool, timeout: int = 120) -> d
     p = Path(db_path)
     if not p.is_file():
         return {"ok": False, "error": f"file not found: {db_path}"}
+    # idasql can only query an existing .i64 — auto-create it from a raw
+    # PE/DLL via idat -A headless analysis if needed.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    try:
+        from tools.flarevm_ida_query import _ensure_i64
+    except Exception:
+        _ensure_i64 = None
+    if _ensure_i64:
+        ok, resolved = _ensure_i64(db_path, timeout=timeout)
+        if not ok:
+            return {"ok": False, "error": resolved}
+        db_path = resolved
     cmd = [IDASQL, "-s", db_path, "-q", sql]
     if persist:
         cmd.append("-w")
@@ -184,12 +196,13 @@ class _PersistentServer:
 
 
 # ---------------------------------------------------------------------------
-# Flask app factory
+# HTTP server (stdlib http.server — no flask dependency; VM is offline)
 # ---------------------------------------------------------------------------
-def make_app(persistent_db: str | None, persistent_port: int) -> "Flask":
-    from flask import Flask, request, jsonify  # type: ignore
+def make_app(persistent_db: str | None, persistent_port: int):
+    """Create a stdlib HTTP server around idasql. Returns the ThreadingHTTPServer
+    instance (persistent mode keeps one idasql --http open for a single .i64)."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    app = Flask("idasql_server")
     pserver: _PersistentServer | None = None
     if persistent_db:
         try:
@@ -197,30 +210,55 @@ def make_app(persistent_db: str | None, persistent_port: int) -> "Flask":
         except Exception as e:
             print(f"[idasql_server] persistent mode failed: {e}", file=sys.stderr)
 
-    @app.get("/health")
-    def _h():
-        out = health()
-        out["persistent"] = bool(pserver)
-        if pserver:
-            out["persistent_db"] = pserver.db_path
-        return jsonify(out)
+    class _Handler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):  # noqa: N802
+            sys.stderr.write("[idasql_server] " + (format % args) + "\n")
 
-    @app.post("/query")
-    def _q():
-        body = request.get_json(force=True) or {}
-        sql = body.get("sql")
-        file_ = body.get("file")
-        persist = bool(body.get("persist", False))
-        if not sql or not file_:
-            return jsonify({"ok": False, "error": "sql and file required"}), 400
-        if pserver and Path(file_).resolve() == Path(pserver.db_path).resolve():
-            return jsonify(pserver.query(sql, persist))
-        if body.get("use_http"):
-            return jsonify(_run_http(file_, sql, port=_free_port(),
-                                     persist=persist))
-        return jsonify(_run_oneshot(file_, sql, persist))
+        def _reply(self, code: int, payload: dict):
+            data = json.dumps(payload).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
 
-    return app
+        def do_GET(self):  # noqa: N802
+            if self.path == "/health":
+                out = health()
+                out["persistent"] = bool(pserver)
+                if pserver:
+                    out["persistent_db"] = pserver.db_path
+                self._reply(200, out)
+            else:
+                self._reply(404, {"ok": False, "error": "not found"})
+
+        def do_POST(self):  # noqa: N802
+            if self.path != "/query":
+                self._reply(404, {"ok": False, "error": "not found"})
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b""
+            try:
+                body = json.loads(raw or b"{}")
+            except json.JSONDecodeError as e:
+                self._reply(400, {"ok": False, "error": str(e)})
+                return
+            sql = body.get("sql")
+            file_ = body.get("file")
+            persist = bool(body.get("persist", False))
+            if not sql or not file_:
+                self._reply(400, {"ok": False, "error": "sql and file required"})
+                return
+            if pserver and Path(file_).resolve() == Path(pserver.db_path).resolve():
+                self._reply(200, pserver.query(sql, persist))
+            elif body.get("use_http"):
+                self._reply(200, _run_http(file_, sql, port=_free_port(),
+                                           persist=persist))
+            else:
+                self._reply(200, _run_oneshot(file_, sql, persist))
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", persistent_port if persistent_db else 19300), _Handler)
+    return httpd
 
 
 def main() -> int:
@@ -236,16 +274,17 @@ def main() -> int:
         return 1
 
     persistent_port = args.port + 1 if args.serve_ida_i64 else args.port
-    app = make_app(args.serve_ida_i64, persistent_port)
+    httpd = make_app(args.serve_ida_i64, persistent_port)
     print(f"[idasql_server] listening on http://{args.bind}:{args.port}  "
           f"idasql={IDASQL}  persistent={args.serve_ida_i64 or 'no'}",
           flush=True)
     try:
-        app.run(host=args.bind, port=args.port, debug=False, use_reloader=False)
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
     finally:
-        # graceful shutdown of persistent
-        for rule in app.url_map.iter_rules():
-            pass
+        if httpd:
+            httpd.shutdown()
     return 0
 
 

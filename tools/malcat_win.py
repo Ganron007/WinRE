@@ -40,7 +40,22 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-MALCAT_BIN_DIR = Path(os.environ.get("MALCAT_BIN_DIR", r"C:\tools\malcat\bin"))
+def _find_malcat_bin() -> Path:
+    env = os.environ.get("MALCAT_BIN_DIR")
+    if env:
+        return Path(env)
+    candidates = [
+        Path(r"C:\Users\flare-vm\Downloads\malcat\bin"),
+        Path(r"C:\tools\malcat\bin"),
+        Path(r"C:\Program Files\Malcat\bin"),
+    ]
+    for c in candidates:
+        if (c / "malcat.mcp.py").is_file():
+            return c
+    return candidates[0]
+
+
+MALCAT_BIN_DIR = _find_malcat_bin()
 MALCAT_MCP = MALCAT_BIN_DIR / "malcat.mcp.py"
 MALCAT_LICENSE = Path(os.environ.get(
     "MALCAT_LICENSE",
@@ -215,37 +230,60 @@ def canary(path: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# HTTP serve (shim around malcat.mcp.py)
+# HTTP serve (stdlib http.server shim around malcat.mcp.py — no flask needed)
 # ---------------------------------------------------------------------------
 def serve(port: int) -> int:
-    try:
-        from flask import Flask, request, jsonify  # type: ignore
-    except ImportError:
-        print("ERROR: flask not installed (pip install flask)", file=sys.stderr)
-        return 1
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    app = Flask("malcat_win")
+    class _Handler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):  # noqa: N802
+            sys.stderr.write("[malcat_win] " + (format % args) + "\n")
 
-    @app.get("/health")
-    def _h():
-        return jsonify(health())
+        def _reply(self, code: int, payload: dict):
+            data = json.dumps(payload, default=str).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
 
-    @app.post("/analyze")
-    def _a():
-        body = request.get_json(force=True) or {}
-        p = Path(body.get("path", ""))
-        if not p.is_file():
-            return jsonify({"ok": False, "error": f"sample missing: {p}"}), 400
-        profile = body.get("profile", "triage")
-        views = body.get("views")
-        limits = body.get("limits")
-        aid = int(body.get("analysis_id", int(time.time())))
-        return jsonify(malcat_analyze(p, views=views, profile=profile,
-                                     limits=limits, analysis_id=aid,
-                                     timeout=int(body.get("timeout", 300))))
+        def do_GET(self):  # noqa: N802
+            if self.path == "/health":
+                self._reply(200, health())
+            else:
+                self._reply(404, {"ok": False, "error": "not found"})
+
+        def do_POST(self):  # noqa: N802
+            if self.path != "/analyze":
+                self._reply(404, {"ok": False, "error": "not found"})
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b""
+            try:
+                body = json.loads(raw or b"{}")
+            except json.JSONDecodeError as e:
+                self._reply(400, {"ok": False, "error": str(e)})
+                return
+            p = Path(body.get("path", ""))
+            if not p.is_file():
+                self._reply(400, {"ok": False, "error": f"sample missing: {p}"})
+                return
+            profile = body.get("profile", "triage")
+            views = body.get("views")
+            limits = body.get("limits")
+            aid = int(body.get("analysis_id", int(time.time())))
+            self._reply(200, malcat_analyze(p, views=views, profile=profile,
+                                            limits=limits, analysis_id=aid,
+                                            timeout=int(body.get("timeout", 300))))
 
     print(f"[malcat_win] serving on 127.0.0.1:{port}", flush=True)
-    app.run(host="127.0.0.1", port=port, debug=False, use_reloader=False)
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.shutdown()
     return 0
 
 

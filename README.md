@@ -59,9 +59,9 @@ C:\samples\<sha>.exe  ◄──── analyst copies to both ──►  /opt/sam
 
 - **SQL services** — `idasql_server.py` (:19300) and `flare_ghidra_sql.py --serve` (:19301) expose `/query` so a remote agent can query Windows databases over HTTP.
 - **Debugger MCP** — `x64dbg-MCP` (:9094 x64 / :9095 x86), `windbg_bridge.py` (:9096). Same JSON-RPC shape on every port: `POST / {"jsonrpc":"2.0","method":"tools/call","params":{"name":...,"arguments":{...}}}`.
-- **Artifact contract** — `logs/<sha>/dynamic/` is versioned in `docs/ARCHITECTURE.md`; RevAI reads it with `load_dynamic_pack()` and never writes into it.
+- **Artifact contract** — `logs/<sha>/dynamic/` is versioned (internal: `docs/internal/ARCHITECTURE.md`); RevAI reads it with `load_dynamic_pack()` and never writes into it.
 
-Full breakdown: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · transports + ports: [`docs/VM-ACCESS.md`](docs/VM-ACCESS.md) · tool layout: [`docs/TOOL-INVENTORY.md`](docs/TOOL-INVENTORY.md).
+Full breakdown: `docs/internal/ARCHITECTURE.md` (internal) · transports + ports: `docs/internal/VM-ACCESS.md` (internal) · tool layout: `docs/internal/TOOL-INVENTORY.md` (internal).
 
 ---
 

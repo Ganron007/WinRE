@@ -55,7 +55,7 @@ LLM: DumpModule module=foo filePath=C:\WinRE\logs\<sha>\x64dbg\dump\foo.dmp → 
 LLM: SetBreakpoint target=0x401000 → run → WaitForPause (30s) → GetAllRegisters → ReadMemory address=cip size=64
 ```
 
-WinRE `winre/mcp/x64dbg_client.py` wraps this HTTP — see `docs/ARCHITECTURE.md:4` transport.
+WinRE `winre/mcp/x64dbg_client.py` wraps this HTTP — see `docs/internal/ARCHITECTURE.md:4` transport.
 
 ## 5. Limits
 

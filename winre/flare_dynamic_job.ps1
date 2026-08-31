@@ -5,7 +5,7 @@ param(
   [int]$MaxSeconds = 45,
   [string]$WorkRoot = "",
   [string]$Python = "C:\Python313\python.exe",
-  [string]$FridaScript = "C:\Tools\flarevm-deploy\dynamic\frida_api_trace.py",
+  [string]$FridaScript = "C:\WinRE\tools\frida_api_trace.py",
   [string]$FakeNetExe = "C:\Tools\fakenet\fakenet3.5\fakenet.exe",
   [string]$ProcmonExe = "C:\Tools\sysinternals\Procmon64.exe",
   [string]$PeSieveExe = "C:\ProgramData\chocolatey\bin\pe-sieve.exe",

@@ -6,6 +6,12 @@ __pycache__/
 .venv/
 venv/
 
+# --- Local-only internal artifacts (never commit / never publish) ---
+# Improvement plan, VM access, internal architecture, install wiring.
+# Public release keeps docs/ free of lab IPs, hostnames and keys.
+internal/
+docs/internal/
+
 # --- Runtime state (never commit) ---
 # Secrets / license keys (MALCAT_KEY etc.)
 .env

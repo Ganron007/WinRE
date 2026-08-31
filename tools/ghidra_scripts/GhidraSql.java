@@ -56,28 +56,44 @@ public class GhidraSql extends GhidraScript {
         return sb.toString();
     }
 
-    private static String jsonArray(List<String> items) {
+    // Columns are raw names; escape them for JSON. Rows are already esc()'d
+    // by the emitters — join raw.
+    private static String jsonColumns(List<String> items) {
         StringBuilder sb = new StringBuilder("[");
         for (int i = 0; i < items.size(); i++) {
             if (i > 0) sb.append(',');
-            sb.append(items.get(i));
+            sb.append(esc(items.get(i)));
         }
         sb.append(']');
         return sb.toString();
     }
 
     private static String jsonRow(List<String> cells) {
-        return jsonArray(cells);
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < cells.size(); i++) {
+            if (i > 0) sb.append(',');
+            sb.append(cells.get(i));
+        }
+        sb.append(']');
+        return sb.toString();
     }
 
     @Override
     public void run() throws Exception {
-        String[] args = getScriptArgs();
-        if (args == null || args.length == 0) {
-            System.out.println("{\"ok\":false,\"error\":\"no SQL arg passed via -postScript\"}");
+        // SQL arrives via GHIDRA_SQL_QUERY env (cmd-batch-safe) with the
+        // sentinel arg as fallback for manual runs.
+        String sql = System.getenv("GHIDRA_SQL_QUERY");
+        if (sql == null || sql.trim().isEmpty()) {
+            String[] args = getScriptArgs();
+            if (args != null && args.length > 0 && !"GHIDRA_SQL_QUERY".equals(args[0])) {
+                sql = String.join(" ", args).trim();
+            }
+        }
+        if (sql == null || sql.trim().isEmpty()) {
+            System.out.println("{\"ok\":false,\"error\":\"no SQL arg passed via -postScript or GHIDRA_SQL_QUERY\"}");
             return;
         }
-        String sql = String.join(" ", args).trim();
+        sql = sql.trim();
 
         try {
             // ----- funcs -----
@@ -118,7 +134,7 @@ public class GhidraSql extends GhidraScript {
             count++;
         }
         System.out.println("{\"ok\":true,\"columns\":"
-            + jsonArray(cols) + ",\"rows\":[" + String.join(",", rowsJson) + "],"
+            + jsonColumns(cols) + ",\"rows\":[" + String.join(",", rowsJson) + "],"
             + "\"row_count\":" + count + ",\"table\":\"funcs\","
             + "\"note\":\"fallback_no_libhost\"}");
     }
@@ -144,7 +160,7 @@ public class GhidraSql extends GhidraScript {
             count++;
         }
         System.out.println("{\"ok\":true,\"columns\":"
-            + jsonArray(cols) + ",\"rows\":[" + String.join(",", rowsJson) + "],"
+            + jsonColumns(cols) + ",\"rows\":[" + String.join(",", rowsJson) + "],"
             + "\"row_count\":" + count + ",\"table\":\"imports\","
             + "\"note\":\"fallback_no_libhost\"}");
     }

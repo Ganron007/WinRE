@@ -19,6 +19,42 @@ from pathlib import Path
 IDASQL = r"C:\Program Files\IDA Professional 9.3\idasql.exe"
 
 
+def _ensure_i64(db_path: str, timeout: int = 900) -> tuple[bool, str]:
+    """If the target has no .i64 database yet, run IDA headless auto-analysis
+    (`idat -A -c -o<file>.i64`) to create one. idasql can only query an
+    existing database — a raw .exe fails with rc=1 after 'Opening:'.
+    Returns (ok, path_or_error)."""
+    p = Path(db_path)
+    if not p.exists():
+        return False, f"file not found: {db_path}"
+    i64 = p.with_suffix(p.suffix + ".i64")
+    if i64.exists():
+        return True, str(i64)
+    ida = None
+    for cand in (r"C:\Program Files\IDA Professional 9.3\idat.exe",
+                 r"C:\Program Files\IDA Free 9.3\idat.exe"):
+        if Path(cand).exists():
+            ida = cand
+            break
+    if not ida:
+        return False, "idat.exe not found (cannot create .i64)"
+    try:
+        r = subprocess.run(
+            [ida, "-A", "-c", f"-o{i64}", str(p)],
+            capture_output=True, text=True, timeout=timeout,
+            encoding="utf-8", errors="replace",
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"idat -A analysis timeout after {timeout}s"
+    except FileNotFoundError:
+        return False, f"idat not found at {ida}"
+    if r.returncode != 0:
+        return False, (r.stderr or r.stdout)[-400:]
+    if not i64.exists():
+        return False, f"idat completed but {i64} missing"
+    return True, str(i64)
+
+
 def query_oneshot(db_path: str, sql: str, write: bool = False) -> dict:
     """Run a one-shot SQL query against an IDA database or raw binary.
 
@@ -30,16 +66,10 @@ def query_oneshot(db_path: str, sql: str, write: bool = False) -> dict:
     Returns:
         dict with keys: ok, rows, columns, error
     """
-    p = Path(db_path)
-    if not p.exists():
-        # idasql appends .i64 to the full filename. If user passed
-        # blobrunner.exe and idasql created blobrunner.exe.i64 next
-        # to it, look for that.
-        alt = p.with_suffix(p.suffix + ".i64")
-        if alt.exists():
-            db_path = str(alt)
-        else:
-            return {"ok": False, "error": f"file not found: {db_path}"}
+    ok, resolved = _ensure_i64(db_path)
+    if not ok:
+        return {"ok": False, "error": resolved}
+    db_path = resolved
 
     cmd = [IDASQL, "-s", db_path, "-q", sql]
     if write:
@@ -47,13 +77,12 @@ def query_oneshot(db_path: str, sql: str, write: bool = False) -> dict:
 
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120,
+            cmd, capture_output=True, text=True, timeout=600,
         )
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "timeout after 120s"}
+        return {"ok": False, "error": "timeout after 600s"}
     except FileNotFoundError:
         return {"ok": False, "error": f"idasql not found at {IDASQL}"}
-
     stdout = result.stdout
     if result.returncode != 0 or "Error" in stdout:
         return {

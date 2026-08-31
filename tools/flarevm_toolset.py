@@ -36,12 +36,18 @@ def health() -> dict:
     for p in ida_paths:
         if Path(p).exists():
             result["ida_pro"]["path"] = p
-            try:
-                r = subprocess.run([p], capture_output=True, text=True, timeout=10)
-                # IDA --version returns version on stderr
-                result["ida_pro"]["version"] = (r.stderr + r.stdout).strip().split("\n")[0]
-            except Exception as e:
-                result["ida_pro"]["error"] = str(e)
+            # idat.exe without args opens the GUI and hangs — probe the
+            # version via idasql instead (no GUI, no hang).
+            idasql_candidate = p.rsplit("\\", 1)[0] + "\\idasql.exe"
+            if Path(idasql_candidate).exists():
+                try:
+                    r = subprocess.run([idasql_candidate, "--version"],
+                                       capture_output=True, text=True, timeout=10)
+                    result["ida_pro"]["version"] = (r.stderr + r.stdout).strip().split("\n")[0]
+                except Exception as e:
+                    result["ida_pro"]["error"] = str(e)
+            else:
+                result["ida_pro"]["error"] = "idasql.exe not found next to idat.exe"
             break
     else:
         result["ida_pro"]["error"] = "not found"
