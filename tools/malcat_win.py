@@ -230,61 +230,34 @@ def canary(path: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# HTTP serve (stdlib http.server shim around malcat.mcp.py — no flask needed)
+# HTTP serve — starts the OFFICIAL Malcat headless MCP server
+# (malcat.mcp.py -p 9009). Persistent process, 45 tools, JSON-RPC over HTTP
+# at http://127.0.0.1:9009/mcp — same MCP contract as x64dbg/WinDbg bridges.
+# Doc: https://doc.malcat.fr/ui/mcp.html#headless-mcp-server
+# License key (-k) enables online Kesakode; without it headless works but
+# Kesakode is offline-only (OEM). Never pass the key on the CLI log line.
 # ---------------------------------------------------------------------------
-def serve(port: int) -> int:
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-    class _Handler(BaseHTTPRequestHandler):
-        def log_message(self, format, *args):  # noqa: N802
-            sys.stderr.write("[malcat_win] " + (format % args) + "\n")
-
-        def _reply(self, code: int, payload: dict):
-            data = json.dumps(payload, default=str).encode("utf-8")
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-
-        def do_GET(self):  # noqa: N802
-            if self.path == "/health":
-                self._reply(200, health())
-            else:
-                self._reply(404, {"ok": False, "error": "not found"})
-
-        def do_POST(self):  # noqa: N802
-            if self.path != "/analyze":
-                self._reply(404, {"ok": False, "error": "not found"})
-                return
-            length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(length) if length else b""
-            try:
-                body = json.loads(raw or b"{}")
-            except json.JSONDecodeError as e:
-                self._reply(400, {"ok": False, "error": str(e)})
-                return
-            p = Path(body.get("path", ""))
-            if not p.is_file():
-                self._reply(400, {"ok": False, "error": f"sample missing: {p}"})
-                return
-            profile = body.get("profile", "triage")
-            views = body.get("views")
-            limits = body.get("limits")
-            aid = int(body.get("analysis_id", int(time.time())))
-            self._reply(200, malcat_analyze(p, views=views, profile=profile,
-                                            limits=limits, analysis_id=aid,
-                                            timeout=int(body.get("timeout", 300))))
-
-    print(f"[malcat_win] serving on 127.0.0.1:{port}", flush=True)
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
+def serve(port: int = 9009) -> int:
+    h = health()
+    if not h["ok"]:
+        print(f"ERROR: {h.get('error')}", file=sys.stderr)
+        return 1
+    key = _resolve_key()
+    argv = [sys.executable, str(MALCAT_MCP), "-p", str(port)]
+    if key:
+        argv += ["-k", key]
+    print(f"[malcat_win] starting headless MCP: {argv[0]} {argv[1]} -p {port} (key: {'set' if key else 'NONE'})", flush=True)
+    proc: subprocess.Popen | None = None
     try:
-        httpd.serve_forever()
+        proc = subprocess.Popen(argv)
+        proc.wait()
     except KeyboardInterrupt:
-        pass
-    finally:
-        httpd.shutdown()
-    return 0
+        if proc:
+            proc.terminate()
+    except Exception as e:
+        print(f"[malcat_win] server failed: {e}", file=sys.stderr)
+        return 1
+    return proc.returncode if proc else 1
 
 
 # ---------------------------------------------------------------------------
