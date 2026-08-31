@@ -1,0 +1,45 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# --- Runtime state (never commit) ---
+# Secrets / license keys (MALCAT_KEY etc.)
+.env
+.env.*
+!*.env.template
+
+# Detonation logs and artifact packs
+logs/
+local-runs/
+cache/
+
+# Frida / Procmon / FakeNet runtime output
+*.pml
+*.pcap
+*.pcapng
+*.jsonl
+
+# --- Build output (x64dbg-MCP Zig plugin) ---
+dist/
+zig-out/
+.zig-cache/
+
+# --- IDA / Ghidra / BN databases ---
+*.i64
+*.idb
+*.nam
+*.bndb
+*.gpr
+*.rep
+
+# --- OS / editor ---
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*~

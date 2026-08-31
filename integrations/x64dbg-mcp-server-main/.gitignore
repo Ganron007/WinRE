@@ -1,0 +1,13 @@
+dist/
+zig-out/
+zig-cache/
+.zig-cache/
+*.dll
+*.dp32
+*.dp64
+*.pdb
+*.lib
+*.obj
+*.o
+*.exe
+mcp_config.json
