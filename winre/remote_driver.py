@@ -188,42 +188,96 @@ def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict) -> dict:
     return {"evidence": evidence, "verdict": verdict}
 
 
+# ---------------------------------------------------------------------------
+# Remote dynamic helper (runs ON the VM via scp)
+# ---------------------------------------------------------------------------
+REMOTE_DYNAMIC_HELPER = r'''
+"""Remote dynamic helper — runs orchestrator --mode local on the VM.
+
+Usage: python _remote_dynamic_helper.py <sha> <sample_path> <max_seconds> [--pesieve]
+Writes the session file, sets env, runs orchestrator, prints META.json tail.
+"""
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+sha = sys.argv[1]
+sample = sys.argv[2]
+max_seconds = int(sys.argv[3])
+pesieve = "--pesieve" in sys.argv[4:]
+
+pipeline = Path(__file__).resolve().parents[1]
+sessions = pipeline / "sessions"
+sessions.mkdir(parents=True, exist_ok=True)
+(sessions / f"{sha}.json").write_text(json.dumps({
+    "sha256": sha,
+    "sample_path": sample,
+    "file_type": {"format": "pe"},
+}), encoding="utf-8")
+
+env = os.environ.copy()
+env["WINRE_ORCHESTRATOR_MODE"] = "local"
+env.setdefault("WINRE_ORCH_LOCK", str(pipeline / "lock" / "orchestrator.lock"))
+env["REVENG_LOGS_DIR"] = str(pipeline / "logs")
+env["REVENG_SESSIONS_DIR"] = str(sessions)
+
+cmd = [sys.executable, str(pipeline / "winre" / "orchestrator.py"), sha,
+       "--mode", "local", "--max-seconds", str(max_seconds)]
+if pesieve:
+    cmd.append("--pesieve")
+try:
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env,
+                       timeout=int(max_seconds) + 600,
+                       encoding="utf-8", errors="replace")
+    print(f"RC={r.returncode}")
+    print((r.stdout or "")[-600:])
+except subprocess.TimeoutExpired:
+    print("RC=-1 TIMEOUT")
+'''
+
+
 def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                    max_seconds: int, enable_pesieve: bool) -> dict:
-    """SSH: run orchestrator --mode local on the VM, scp the dynamic pack back.
-
-    The VM orchestrator writes to C:\\WinRE\\logs\\<sha>\\dynamic (its default
-    REVENG_LOGS_DIR), then we pull it into our local pack.
-    """
+    """SSH: run orchestrator --mode local on the VM via helper, scp pack back."""
     t0 = time.time()
     py = _remote_py(cfg)
-    # stage sample as session on VM so orchestrator finds it
-    session_cmd = (
-        f'powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path '
-        f'{cfg["remote_pipeline"]}\\sessions | Out-Null; '
-        f'@{{sha256=\'{sha}\';sample_path=\'C:\\samples\\{sample_name}\';'
-        f'file_type=@{{format=\'pe\'}}}} | ConvertTo-Json | '
-        f'Set-Content {cfg["remote_pipeline"]}\\sessions\\{sha}.json -Encoding UTF8"'
-    )
-    ssh_run(cfg, session_cmd, timeout=60)
-    cmd = (
-        f'powershell -NoProfile -Command "$env:WINRE_ORCHESTRATOR_MODE=\'local\'; '
-        f'& {py} {cfg["remote_pipeline"]}\\winre\\orchestrator.py {sha} '
-        f'--mode local --max-seconds {int(max_seconds)} '
-        f'{"--pesieve" if enable_pesieve else ""}"'
-    )
-    r = ssh_run(cfg, cmd, timeout=int(max_seconds) + 600)
+    remote_sample = rf"C:\samples\{sample_name}"
+    helper = REPO / "winre" / "_remote_dynamic_helper.py"
+    helper.write_text(REMOTE_DYNAMIC_HELPER, encoding="utf-8")
+    try:
+        scp_to(cfg, helper, rf'{cfg["remote_pipeline"]}\winre\_remote_dynamic_helper.py')
+    except Exception as e:
+        return stage_result("dynamic", False, error=f"scp helper: {e}",
+                            elapsed_s=round(time.time() - t0, 1))
+
+    cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} '
+           f'{cfg["remote_pipeline"]}\\winre\\_remote_dynamic_helper.py '
+           f'{sha} "{remote_sample}" {int(max_seconds)}'
+           f'{" --pesieve" if enable_pesieve else ""} 2>&1"')
+    r = ssh_run(cfg, cmd, timeout=int(max_seconds) + 700)
+
     # pull dynamic dir back
-    remote_dyn = rf'{cfg["remote_pipeline"]}\logs\{sha}\dynamic'
     local_dyn = pack.stages["dynamic"]
     local_dyn.mkdir(parents=True, exist_ok=True)
     ok = False
     err = None
+    remote_dyn = rf'{cfg["remote_pipeline"]}\logs\{sha}\dynamic'
     try:
         scp_from(cfg, rf"{remote_dyn}\*", local_dyn)
         ok = True
     except Exception as e:
         err = str(e)
+        # orchestrator may have died but still wrote META
+        probe = ssh_run(cfg, f'powershell -NoProfile -Command (Test-Path "{remote_dyn}\\META.json")',
+                        timeout=30)
+        if probe.returncode == 0 and "True" in probe.stdout:
+            try:
+                scp_from(cfg, rf"{remote_dyn}\META.json", local_dyn / "META.json")
+                ok = True
+            except Exception:
+                pass
     meta = pack.read("dynamic", "META.json") or {}
     ok = ok or bool(meta.get("ok"))
     stage_meta = stage_result("dynamic", ok, error=err,
