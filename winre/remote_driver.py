@@ -37,6 +37,7 @@ from pathlib import Path
 from .evidence import EvidencePack, stage_result
 
 REPO = Path(__file__).resolve().parents[1]
+LOCAL_LOGS = Path(os.environ.get("WINRE_PIPELINE_LOGS", str(REPO / "logs")))
 
 
 def flare_cfg() -> dict:
@@ -93,52 +94,89 @@ def _remote_py(cfg: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Remote helper (runs ON the VM via scp — avoids nested-quote breakage)
+# ---------------------------------------------------------------------------
+REMOTE_QUICK_HELPER = r'''
+"""Remote quick-triage helper — runs on FlareVM, prints JSON to stdout.
+
+Usage: python _remote_quick_helper.py <sample_path> --json
+Output: {"evidence": {ghidra: {...}, ida: {...}}}
+"""
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+sample = Path(sys.argv[1])
+out = {"ghidra": {}, "ida": {}}
+py = sys.executable
+
+def run(script, *args):
+    p = subprocess.run([py, str(script), *args], capture_output=True, text=True,
+                       timeout=900, encoding="utf-8", errors="replace")
+    try:
+        return json.loads(p.stdout)
+    except json.JSONDecodeError:
+        return {"ok": False, "error": (p.stderr or p.stdout)[-200:]}
+
+tools = Path(__file__).resolve().parents[1] / "tools"
+g = run(tools / "flare_ghidra_sql.py", "query", "@funcs", "--file", str(sample), "--json")
+if g.get("ok"):
+    out["ghidra"] = {"func_rows": len(g.get("rows") or [])}
+else:
+    out["ghidra"] = {"error": g.get("error")}
+
+i64 = sample.with_suffix(sample.suffix + ".i64")
+if i64.is_file():
+    i = run(tools / "flarevm_ida_query.py", str(sample), "SELECT count(*) FROM funcs", "--json")
+    if i.get("ok"):
+        rows = i.get("rows") or []
+        out["ida"] = {"func_count": rows[0][0] if rows and rows[0] else None}
+    else:
+        out["ida"] = {"error": i.get("error")}
+else:
+    out["ida"] = {"skipped": "no .i64 on VM (deep dive will create)"}
+
+print(json.dumps({"evidence": out}))
+'''
+
+
+# ---------------------------------------------------------------------------
 # Remote stage implementations (control plane)
 # ---------------------------------------------------------------------------
 
 def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict) -> dict:
-    """SSH: run the quick SQL wrappers on the VM, pull JSON back."""
+    """SSH: run the quick SQL wrappers on the VM via a helper script, pull JSON back.
+
+    Uses a remote helper .py (scp'd) instead of nested inline quoting — the
+    nested powershell -Command string mangles @ and quotes over SSH.
+    """
     t0 = time.time()
-    # copy sample to VM if not already there
-    remote_sample = r"C:\samples\notepad-test.exe" if sample_name == "notepad-test.exe" \
-        else rf"C:\samples\{sample_name}"
-    # run ghidra + ida counts on the VM (the tools live there)
     py = _remote_py(cfg)
-    ghidra_cmd = (
-        f'powershell -NoProfile -Command "& {py} {cfg["remote_pipeline"]}\\tools\\flare_ghidra_sql.py '
-        f'query @funcs --file {remote_sample} --json 2>&1"'
-    )
-    r = ssh_run(cfg, ghidra_cmd, timeout=900)
-    ghidra = {}
+    remote_sample = rf"C:\samples\{sample_name}"
+
+    # helper script: runs ghidra + ida counts, prints JSON
+    helper = REPO / "winre" / "_remote_quick_helper.py"
+    helper.write_text(REMOTE_QUICK_HELPER, encoding="utf-8")
+    try:
+        scp_to(cfg, helper, rf'{cfg["remote_pipeline"]}\winre\_remote_quick_helper.py')
+    except Exception as e:
+        return {"ok": False, "error": f"scp helper: {e}"}
+
+    cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} '
+           f'{cfg["remote_pipeline"]}\\winre\\_remote_quick_helper.py '
+           f'"{remote_sample}" --json 2>&1"')
+    r = ssh_run(cfg, cmd, timeout=900)
+    evidence: dict = {}
     if r.returncode == 0:
         try:
-            ghidra = json.loads(r.stdout)
+            data = json.loads(r.stdout)
+            evidence = data.get("evidence") or {}
         except json.JSONDecodeError:
             pass
-    evidence = {"ghidra": {"func_rows": len(ghidra.get("rows") or [])
-                           if ghidra.get("ok") else None,
-                           "error": ghidra.get("error") if not ghidra.get("ok") else None}}
-
-    # IDA (only if .i64 exists — skip otherwise)
-    i64 = remote_sample + ".i64"
-    probe = ssh_run(cfg, f"powershell -NoProfile -Command (Test-Path '{i64}')", timeout=30)
-    if probe.returncode == 0 and "True" in probe.stdout:
-        ida_cmd = (
-            f'powershell -NoProfile -Command "& {py} {cfg["remote_pipeline"]}\\tools\\flarevm_ida_query.py '
-            f'{remote_sample} \"SELECT count(*) FROM funcs\" --json 2>&1"'
-        )
-        r2 = ssh_run(cfg, ida_cmd, timeout=120)
-        if r2.returncode == 0:
-            try:
-                ida = json.loads(r2.stdout)
-                if ida.get("ok"):
-                    evidence["ida"] = {"func_count": (ida.get("rows") or [None])[0]}
-            except json.JSONDecodeError:
-                pass
-        if "ida" not in evidence:
-            evidence["ida"] = {"error": "idasql flaky over SSH"}
-    else:
-        evidence["ida"] = {"skipped": "no .i64 on VM (deep dive will create)"}
+    if not evidence:
+        evidence = {"ghidra": {"error": (r.stderr or r.stdout)[-200:]}}
 
     verdict = "unknown"
     pack.write("quick", "quick.json", {"evidence": evidence, "verdict": verdict,
@@ -264,7 +302,7 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
 
     cfg = flare_cfg()
     sha = sha256_file(sample)
-    pack = EvidencePack(REPO / "logs", sha).ensure()
+    pack = EvidencePack(LOCAL_LOGS, sha).ensure()
 
     # intake (local — we have the file)
     from .pipeline import _intake
