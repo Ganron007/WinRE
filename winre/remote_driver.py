@@ -304,6 +304,13 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
     sha = sha256_file(sample)
     pack = EvidencePack(LOCAL_LOGS, sha).ensure()
 
+    # upload the sample to the VM (C:\samples\<name>) — tools run there
+    remote_sample = rf"C:\samples\{sample.name}"
+    try:
+        scp_to(cfg, sample, remote_sample.replace("\\", "/"))
+    except Exception as e:
+        print(f"[winre-remote] WARN sample upload failed: {e}", flush=True)
+
     # intake (local — we have the file)
     from .pipeline import _intake
     results = {"intake": _intake(sample, pack)}
