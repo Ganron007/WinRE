@@ -1,7 +1,7 @@
 # WinRE
 
 <p align="center">
-  <img src="docs/img/winre-logo.svg" alt="WinRE Logo" width="620">
+  <img src="assets/winre-logo.svg" alt="WinRE Logo" width="620">
 </p>
 
 <p align="center">
