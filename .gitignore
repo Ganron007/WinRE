@@ -49,3 +49,6 @@ Desktop.ini
 .idea/
 *.swp
 *~
+
+# runtime-generated remote helper
+winre/_remote_quick_helper.py
