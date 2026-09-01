@@ -1,81 +1,71 @@
 # WinDbg-MCP — Windows (FlareVM)
 
-> **Status:** MVP — `winre/mcp/windbg_bridge.py` (Phase 6, 2026-08-31). 12 tools over stdlib `http.server` on port 9096. pykd fast-path if importable; per-process `windbg.exe -c` fallback otherwise.  
-> **Source gap:** `Tools/flarevm-deploy/dynamic/windbg_script.py` only generates `.ws` scripts (`dynamic/README.md:13`) — superseded by the bridge but still useful for headless.
+> **Status:** REWIRED (2026-09-01) — official **`mcp-windbg`** (svnscha/mcp-windbg, MIT, PyPI) replaces the homemade 12-tool bridge. 10 tools over MCP streamable-http on :9097. Crash-dump analysis + remote + kernel debugging, driven by `cdb.exe`/`kd.exe` (auto-detected from the Store WinDbg or Windows Kits).
 
-## 1. Goal
+## 1. Why this changed
 
-`| x64dbg-MCP (71 tools, HTTP 9094) | WinDbg-MCP (12-tool MVP, HTTP 9096) |`  
-Same JSON-RPC shape so `deep_dive_agentic ToolRegistry` can `POST http://192.168.77.42:9096/` with identical client.
+The old `winre/mcp/windbg_bridge.py` (12-tool per-process `windbg -c` fallback) is **superseded**:
+- Per-call windbg spawn hangs without a debug target (no headless attach to a live GUI process from an SSH session).
+- Store-version WinDbg path was AppX-discoverable, not fixed.
+- pykd doesn't exist on Windows (Linux-only pip package).
 
-## 2. Architecture
+`mcp-windbg` solves all of it: it wraps `cdb.exe` with proper session lifecycle (per-session ids, per-call timeouts, CTRL+BREAK resync) and works **headlessly for dump analysis** (the case that matters on the lab VM).
 
-```
-WinDbg (C:\Program Files\Windows Kits\10\Debuggers\x64\windbg.exe)
-  └─ pykd (pip install pykd) → DbgEng COM
-         └─ windbg_mcp.py (Flask/FastAPI, :9096) — JSON-RPC {method: tools/call}
-                └─ Remnux deep_dive_agentic → HTTP (fail-open REVENG_ENABLE_WINDBGMCP=0)
-```
-
-No Zig — Python only. Bind `0.0.0.0:9096` lab-net.
-
-## 3. MVP 12 tools (spec)
-
-| Tool | DbgEng / pykd | Args |
-|------|---------------|------|
-| `GetDebugState` | `isDebugging()` | — |
-| `LoadDump` | `.opendump <path>` | `filePath` |
-| `AttachProcess` | `.attach <pid>` | `pid` |
-| `ExecuteCommand` | `dbgCommand("k; !peb; lm")` | `command` |
-| `GetCallStack` | `k` | — |
-| `GetRegisters` | `r` | — |
-| `ReadMemory` | `db <addr> L<size>` | `address`, `size` |
-| `SetBreakpoint` | `bp <addr>` | `target` |
-| `Go` | `g` | — |
-| `StepInto` | `p` | — |
-| `DumpMemory` | `.writemem <file> <range>` | `address`, `size`, `filePath` |
-| `ListModules` | `lm` | — |
-
-Full `windbg_script.py` coverage later: conditional bps (`bp <addr> "j @eax==0 'gc'; 'gc'"`), `!analyze -v`.
-
-## 4. Skeleton (`winre/mcp/windbg_bridge.py` to build)
-
-```python
-# C:\WinRE\winre\mcp\windbg_bridge.py
-import pykd, flask
-app = flask.Flask(__name__)
-
-@app.post("/")
-def rpc():
-    body = flask.request.json
-    name = body["params"]["name"]
-    args = body["params"]["arguments"]
-    if name == "ExecuteCommand":
-        out = pykd.dbgCommand(args["command"])
-        return {"jsonrpc":"2.0","id": body["id"], "result": {"text": out}}
-    # ... dispatch 12 tools
-    return {"jsonrpc":"2.0","id": body["id"], "error": {"code": -32601}}
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=9096)
-```
-
-## 5. Verification (after build)
+## 2. Install (on FlareVM, internet needed)
 
 ```powershell
-pip install pykd flask
-python C:\WinRE\winre\mcp\windbg_bridge.py --port 9096
-curl http://127.0.0.1:9096/ -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-# expect 12 tools
-curl -X POST http://127.0.0.1:9096/ -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ExecuteCommand","arguments":{"command":"lm"}}}'
+C:\Python313\python.exe -m pip install mcp-windbg
+# → mcp-windbg 1.2.1 + mcp 2.1.1 (streamable-http support)
 ```
 
-## 6. Not in scope for MVP
+Prereq: WinDbg classic (Windows Kits Debuggers) **or** Store WinDbg — both ship `cdb.exe`/`kd.exe` (auto-detected). Classic was added on FlareVM via `winsdksetup.exe /features OptionId.WindowsDesktopDebuggers /quiet`.
 
-- Time Travel Debugging, `dx` NatVis — later.
-- Kernel debugging — user-mode only.
-- SSTORE — pykd requires WinDbg Preview vs classic — pin to `Windows Kits 10 10.0.22621`.
+## 3. Run (MCP streamable-http)
+
+```powershell
+# operator (VM console) — or winre/mcp/start_servers.ps1
+C:\Python313\python.exe -m mcp_windbg --transport streamable-http --host 127.0.0.1 --port 9097
+# → MCP WinDbg server running on http://127.0.0.1:9097/mcp
+```
+
+Options: `--cdb-path`, `--kd-path`, `--symbols-path`, `--filter-script`, `--timeout`, `--transport {stdio,streamable-http}`.
+
+## 4. 10 tools (verified on FlareVM)
+
+| Tool | Purpose |
+|------|---------|
+| `list_dumps` | list crash dumps in a directory |
+| `open_cdb_dump` | open + triage a crash dump (auto `!analyze`) |
+| `open_cdb_remote` | attach to user-mode `cdb -remote` server |
+| `open_kd_session` | kernel target (`-k`, KDNET/pipe/serial) |
+| `run_cdb_command` | run a command on a user-mode session |
+| `run_kd_command` | run a command on a kernel session |
+| `close_cdb_session` / `close_kd_session` | close a session |
+| `send_ctrl_break` | break into a running live session |
+| `wait_for_break` | wait for target to stop after `g` |
+
+Every `open_*` returns an opaque `session_id`; pass it to `run_*`/`close_*`.
+
+## 5. WinRE client
+
+`winre/mcp/windbg_client.py` — `WinDbgMCPClient`, same `{ok, result, error}` shape as `X64DbgClient`/`MalcatClient`. Handles the MCP streamable-http lifecycle (initialize → `Mcp-Session-Id` header → tools/call). Note the **trailing slash** on the base URL (`/mcp/`) — the server 307-redirects `/mcp` → `/mcp/`, which urllib mishandles for POST.
+
+```python
+from winre.mcp import WinDbgMCPClient
+c = WinDbgMCPClient()
+print(c.is_up(), c.list_tools())
+r = c.open_cdb_dump(r"C:\dumps\app.dmp")       # session_id in result
+r = c.run_cdb_command(sid, "kb")               # call stack
+c.close_cdb_session(sid)
+```
+
+## 6. Limits
+
+- **Live attach needs the VM console session** (debugger must break into a live process — no headless attach over SSH). Dump analysis is fully headless.
+- Kernel debugging needs a KDNET/pipe/serial target — not set up on the lab VM by default.
+- `--filter-script` can redact PII/secrets from tool output (use if dumps carry secrets).
 
 ## References
 
-- `Tools/flarevm-deploy/dynamic/windbg_script.py:1`, `Tools/flarevm-deploy/dynamic/README.md:13`, `docs/X64DBG-MCP.md` (API parity).
+- https://github.com/svnscha/mcp-windbg (MIT) · docs https://svnscha.github.io/mcp-windbg/
+- PyPI `mcp-windbg` 1.2.1

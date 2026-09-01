@@ -33,12 +33,26 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
-WINDBG = os.environ.get("WINDBG",
-                        r"C:\Program Files\Windows Kits\10\Debuggers\x64\windbg.exe")
+def _find_windbg() -> str:
+    env = os.environ.get("WINDBG")
+    if env and Path(env).is_file():
+        return env
+    # Windows SDK installs Debuggers under "Program Files (x86)" even on x64.
+    for cand in (
+        r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\windbg.exe",
+        r"C:\Program Files\Windows Kits\10\Debuggers\x64\windbg.exe",
+    ):
+        if Path(cand).is_file():
+            return cand
+    return r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\windbg.exe"
+
+
+WINDBG = _find_windbg()
 PYTHON3 = shutil.which("python") or shutil.which("python.exe") or sys.executable
 
 # Tool name -> (description, arg schema)
@@ -114,10 +128,20 @@ def _pykd_call(name: str, args: dict) -> dict:
 # per-process fallback
 # ---------------------------------------------------------------------------
 def _windbg_once(init_cmds: list[str], body_cmds: list[str], timeout: int = 60) -> dict:
-    """Spawn one windbg.exe with -c "<init>; <body>; q" and capture output."""
+    """Spawn one windbg.exe with -c "<init>; <body>; q" and capture output.
+
+    Uses -logo <file> so command output lands on disk even without a console,
+    and -Q to auto-exit quietly. If windbg still hangs (no target), the
+    timeout kills it and we report the logo contents (usually empty).
+    """
     if not Path(WINDBG).is_file():
         return {"ok": False, "error": f"windbg not found: {WINDBG}"}
-    argv = [WINDBG]
+    logf = Path(tempfile.gettempdir()) / f"windbg-bridge-{os.getpid()}.log"
+    try:
+        logf.unlink(missing_ok=True)
+    except OSError:
+        pass
+    argv = [WINDBG, "-Q", "-logo", str(logf)]
     for c in init_cmds:
         argv += ["-c", c]
     for c in body_cmds:
@@ -127,12 +151,25 @@ def _windbg_once(init_cmds: list[str], body_cmds: list[str], timeout: int = 60) 
         cp = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
                             encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"windbg timeout {timeout}s"}
+        return {"ok": False, "error": f"windbg timeout {timeout}s",
+                "result": {"text": _tail_file(logf, 4000)}}
     except FileNotFoundError as e:
         return {"ok": False, "error": f"windbg spawn failed: {e}"}
-    return {"ok": cp.returncode in (0, 1),
-            "result": {"text": (cp.stdout or "")[-4000:]},
+    # windbg writes command output to the logo file, not stdout.
+    text = _tail_file(logf, 4000) or (cp.stdout or "")
+    return {"ok": bool(text) or cp.returncode in (0, 1),
+            "result": {"text": text},
             "stderr_tail": (cp.stderr or "")[-400:]}
+
+
+def _tail_file(path: Path, maxlen: int) -> str:
+    try:
+        if not path.is_file():
+            return ""
+        data = path.read_text(encoding="utf-8", errors="replace")
+        return data[-maxlen:]
+    except OSError:
+        return ""
 
 
 def _resolve_target(args: dict, state: dict) -> list[str]:
