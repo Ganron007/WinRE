@@ -411,10 +411,19 @@ def main() -> int:
     ap.add_argument("--skip-dynamic", action="store_true")
     ap.add_argument("--dry-llm", action="store_true",
                     help="never call the LLM (deterministic fallback only)")
+    ap.add_argument("--driver", choices=["local", "remote"], default="local",
+                    help="local = run on FlareVM itself; remote = control-plane "
+                         "driver (SSH to FlareVM + HTTP MCP + local LLM)")
     args = ap.parse_args()
     if not args.sample.is_file():
         print(f"ERROR: sample not found: {args.sample}", file=sys.stderr)
         return 2
+    if args.driver == "remote":
+        from . import remote_driver
+        res = remote_driver.run_remote_pipeline(
+            args.sample, max_seconds=args.max_seconds, enable_pesieve=args.pesieve,
+            skip_dynamic=args.skip_dynamic, dry_llm=args.dry_llm)
+        return 0 if res["results"]["audit"]["truly_green"] else 1
     res = run_pipeline(args.sample, max_seconds=args.max_seconds,
                        enable_pesieve=args.pesieve,
                        skip_dynamic=args.skip_dynamic, dry_llm=args.dry_llm)
