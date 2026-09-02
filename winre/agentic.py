@@ -43,17 +43,19 @@ from winre.evidence import EvidencePack  # noqa: E402
 _REMOTE_SQL_HELPER = r'''
 """Remote SQL helper for the LangGraph agent — runs on FlareVM.
 
-Usage: python _remote_sql_helper.py <ghidra|ida> <sample_path> <sql>
+Usage: python _remote_sql_helper.py <b64_engine> <b64_sample> <b64_sql>
 Prints JSON: {"ok": true, "columns": [...], "rows": [...], "row_count": N}
+Args are base64 (no quoting issues through SSH/powershell).
 """
+import base64
 import json
 import subprocess
 import sys
 from pathlib import Path
 
-engine = sys.argv[1]
-sample = Path(sys.argv[2])
-sql = sys.argv[3]
+engine = base64.b64decode(sys.argv[1]).decode()
+sample = Path(base64.b64decode(sys.argv[2]).decode())
+sql = base64.b64decode(sys.argv[3]).decode()
 py = sys.executable
 tools = Path(__file__).resolve().parents[1] / "tools"
 
@@ -105,9 +107,11 @@ class ToolRegistry:
     def _run_remote_py(self, helper_name: str, *args: str, timeout: int = 900) -> dict:
         """Run a scp'd helper .py on the VM and parse its JSON stdout.
 
-        Passes args as separate argv elements (no nested PS quoting — the
-        helper receives them cleanly). Returns parsed JSON dict.
+        Args are base64-encoded (single safe tokens) so spaces/quotes/parens
+        in SQL can never be mangled by the SSH→powershell nesting. The helper
+        decodes them back.
         """
+        import base64
         helper_src = _REMOTE_SQL_HELPER
         local = REPO / "winre" / f"_{helper_name}.py"
         local.write_text(helper_src, encoding="utf-8")
@@ -117,10 +121,10 @@ class ToolRegistry:
         except Exception as e:
             return {"error": f"scp helper: {e}"}
         py = r"C:\Python313\python.exe"
-        # helper args: each gets double-quoted to survive the PS layer
-        quoted = " ".join(f'"{a}"' for a in args)
+        b64args = [base64.b64encode(a.encode("utf-8")).decode() for a in args]
+        joined = " ".join(b64args)
         cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} '
-               f'{remote} {quoted} 2>&1"')
+               f'{remote} {joined} 2>&1"')
         r = remote_driver.ssh_run(self.cfg, cmd, timeout=timeout)
         if r.returncode != 0:
             return {"error": (r.stderr or r.stdout)[-300:]}
