@@ -53,3 +53,4 @@ Desktop.ini
 # runtime-generated remote helper
 winre/_remote_quick_helper.py
 winre/_remote_dynamic_helper.py
+winre/_remote_sql_helper.py

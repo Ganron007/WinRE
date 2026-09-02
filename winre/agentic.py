@@ -37,6 +37,44 @@ from winre.evidence import EvidencePack  # noqa: E402
 # ---------------------------------------------------------------------------
 # ToolRegistry — wraps the actual WinRE tool calls
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Remote SQL helper (runs ON the VM via scp — avoids nested-quote breakage)
+# ---------------------------------------------------------------------------
+_REMOTE_SQL_HELPER = r'''
+"""Remote SQL helper for the LangGraph agent — runs on FlareVM.
+
+Usage: python _remote_sql_helper.py <ghidra|ida> <sample_path> <sql>
+Prints JSON: {"ok": true, "columns": [...], "rows": [...], "row_count": N}
+"""
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+engine = sys.argv[1]
+sample = Path(sys.argv[2])
+sql = sys.argv[3]
+py = sys.executable
+tools = Path(__file__).resolve().parents[1] / "tools"
+
+if engine == "ghidra":
+    p = subprocess.run([py, str(tools / "flare_ghidra_sql.py"), "query", sql,
+                        "--file", str(sample), "--json"],
+                       capture_output=True, text=True, timeout=900,
+                       encoding="utf-8", errors="replace")
+else:  # ida
+    p = subprocess.run([py, str(tools / "flarevm_ida_query.py"), str(sample),
+                        sql, "--json"],
+                       capture_output=True, text=True, timeout=120,
+                       encoding="utf-8", errors="replace")
+try:
+    out = json.loads(p.stdout)
+    print(json.dumps(out))
+except json.JSONDecodeError:
+    print(json.dumps({"ok": False, "error": (p.stderr or p.stdout)[-300:]}))
+'''
+
+
 class ToolRegistry:
     """Deterministic tool calls the agent may make (static phase).
 
@@ -64,19 +102,26 @@ class ToolRegistry:
 
     # --- static tools ------------------------------------------------------
 
-    def ghidra_query(self, sql: str, max_rows: int = 25) -> dict:
-        """SQL against the Ghidra tables on the VM (funcs/strings/imports)."""
-        # canonical @funcs or raw SQL — pass through the wrapper CLI
-        script = "query"
-        if sql.startswith("@"):
-            pass
-        else:
-            sql = sql.strip()
+    def _run_remote_py(self, helper_name: str, *args: str, timeout: int = 900) -> dict:
+        """Run a scp'd helper .py on the VM and parse its JSON stdout.
+
+        Passes args as separate argv elements (no nested PS quoting — the
+        helper receives them cleanly). Returns parsed JSON dict.
+        """
+        helper_src = _REMOTE_SQL_HELPER
+        local = REPO / "winre" / f"_{helper_name}.py"
+        local.write_text(helper_src, encoding="utf-8")
+        remote = rf'{self.cfg["remote_pipeline"]}\winre\_{helper_name}.py'
+        try:
+            remote_driver.scp_to(self.cfg, local, remote.replace("\\", "/"))
+        except Exception as e:
+            return {"error": f"scp helper: {e}"}
         py = r"C:\Python313\python.exe"
-        remote = rf'{self.cfg["remote_pipeline"]}\tools\flare_ghidra_sql.py'
+        # helper args: each gets double-quoted to survive the PS layer
+        quoted = " ".join(f'"{a}"' for a in args)
         cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} '
-               f'{remote} query "{sql}" --file {self.remote_sample} --json 2>&1"')
-        r = remote_driver.ssh_run(self.cfg, cmd, timeout=900)
+               f'{remote} {quoted} 2>&1"')
+        r = remote_driver.ssh_run(self.cfg, cmd, timeout=timeout)
         if r.returncode != 0:
             return {"error": (r.stderr or r.stdout)[-300:]}
         try:
@@ -84,20 +129,21 @@ class ToolRegistry:
         except json.JSONDecodeError:
             return {"error": f"non-JSON: {r.stdout[-200:]}"}
 
+    def ghidra_query(self, sql: str, max_rows: int = 25) -> dict:
+        """SQL against the Ghidra tables on the VM (funcs/strings/imports)."""
+        out = self._run_remote_py("_remote_sql_helper", "ghidra",
+                                  self.remote_sample, sql)
+        if isinstance(out, dict) and out.get("ok") is not None:
+            rows = out.get("rows") or []
+            if max_rows and len(rows) > max_rows:
+                out["rows"] = rows[:max_rows]
+                out["row_count"] = len(rows[:max_rows])
+        return out
+
     def ida_query(self, sql: str) -> dict:
         """SQL against the IDA database on the VM (funcs/imports/strings)."""
-        i64 = self.remote_sample + ".i64"
-        py = r"C:\Python313\python.exe"
-        remote = rf'{self.cfg["remote_pipeline"]}\tools\flarevm_ida_query.py'
-        cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} '
-               f'{remote} {self.remote_sample} "{sql}" --json 2>&1"')
-        r = remote_driver.ssh_run(self.cfg, cmd, timeout=120)
-        if r.returncode != 0:
-            return {"error": (r.stderr or r.stdout)[-300:]}
-        try:
-            return json.loads(r.stdout)
-        except json.JSONDecodeError:
-            return {"error": f"non-JSON: {r.stdout[-200:]}"}
+        return self._run_remote_py("_remote_sql_helper", "ida",
+                                   self.remote_sample, sql, timeout=120)
 
     def malcat_analyze(self, path: str | None = None) -> dict:
         """Malcat analysis over HTTP MCP (:9009) — metadata/anomalies/yara."""
