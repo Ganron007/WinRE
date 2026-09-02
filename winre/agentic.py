@@ -301,21 +301,31 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
     system_prompt = f"""You are an agentic malware reverse-engineering assistant on a Windows
 FlareVM analysis pipeline. Sample: {sample_name} (SHA {sha[:16]}).
 
+Known SQL schemas (do NOT waste turns discovering them — query directly):
+Ghidra: tables funcs(name,address,size), imports(name,module/name,library),
+  strings(content,address); LIMIT small (25). funcs uses columns
+  name, addr AS address, size.
+IDA: tables funcs(name,address,size,prototype,arg_count,calling_conv),
+  imports(name,module), strings(content,address), segments, names.
+  Use LIMIT 20. IDs are strings in most rows.
+Malcat (only if reachable): analyse_file / fns_top_list / fn_decompile.
+
 Your job:
-1. Use ghidra_query / ida_query / malcat_* to deepen the RE — imports,
-   suspicious functions, strings, anomalies, decompile key functions.
-2. When done, reply with a FINAL flat JSON object ONLY (no markdown) with keys:
-   verdict (malicious/unknown/benign), confidence (high/medium/low),
-   summary, key_evidence (list of strings).
-Cite concrete tool/SQL evidence. Never claim behavior without tool output.
+1. Run a FEW high-value queries (imports, suspicious funcs by size, strings).
+   Do not repeat identical queries — reuse earlier outputs.
+2. When done, reply with a FINAL flat JSON object ONLY (no markdown, no extra
+   prose) with keys: verdict (malicious/unknown/benign), confidence
+   (high/medium/low), summary, key_evidence (list of strings).
+Converge quickly: 3-6 tool calls is enough for triage. Cite concrete
+tool/SQL evidence. Never claim behavior without tool output.
 MASQUERADE AWARENESS: VersionInfo/company metadata is trivially forged. If
 Malcat anomalies/YARA/high-signal imports fire, verdict must be malicious
 even if strings look legitimate.
-BUDGET DISCIPLINE: limited tool calls; don't repeat identical queries; when a
-[BUDGET] note appears, converge to your final answer.
+BUDGET DISCIPLINE: limited tool calls; when a [BUDGET] note appears, converge
+to your final answer immediately.
 """
     agent = create_react_agent(llm, tools=tools, prompt=system_prompt)
-    recursion_limit = max(8, int(max_steps) * 2 + 4)
+    recursion_limit = max(16, int(max_steps) * 2 + 6)
     try:
         result = agent.invoke(
             {"messages": [HumanMessage(content=(
