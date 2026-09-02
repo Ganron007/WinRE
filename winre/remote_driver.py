@@ -303,16 +303,23 @@ def remote_mcp_health(cfg: dict) -> dict:
     return out
 
 
-def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool) -> dict:
-    """Deep dive from the control plane: MCP HTTP to the VM + local LLM."""
+def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
+                sha: str = "") -> dict:
+    """Deep dive from the control plane.
+
+    Engine: LangGraph ReAct agent (winre/agentic.py) over the static toolset
+    (Ghidra/IDA SQL over SSH + Malcat MCP over HTTP). When the LLM endpoint is
+    configured the agent runs and the result is `llm_judge`; otherwise the
+    stage records `deterministic_fallback` (honest, not green).
+    """
     from . import llm_client
     t0 = time.time()
     mcp = remote_mcp_health(cfg)
-    out: dict = {"mcp": mcp, "remote": True}
+    out: dict = {"mcp": mcp, "remote": True, "engine": "langgraph"}
     fallback = False
     failures: list[str] = []
 
-    # x64dbg MCP (HTTP from here)
+    # x64dbg MCP (HTTP from here) — probe only in static phase
     if mcp.get("x64dbg"):
         try:
             from winre.mcp import X64DbgClient
@@ -322,25 +329,40 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool) 
         except Exception as e:
             failures.append(f"x64dbg:{e}")
 
-    # LLM (local endpoint on control plane)
-    llm_ok = False
+    # LangGraph agent (static toolset) — llm_judge if LLM up
+    agent_result = None
     try:
-        if not dry_llm and llm_client.available():
-            prompt = ("You are a malware analyst. Interpret ONLY the deterministic "
-                      f"evidence. sample={sample_name} mcp={mcp}. Give verdict + behaviors.")
-            out["llm_analysis"] = {"source": "llm_judge",
-                                   "text": llm_client.complete(prompt)[:8000]}
-            llm_ok = True
+        from winre.agentic import run_langgraph_deep_dive
+        agent_result = run_langgraph_deep_dive(sample_name, sha or sample_name,
+                                               max_steps=10, dry=dry_llm)
+        out["agent"] = {
+            "source": agent_result.get("source"),
+            "verdict": agent_result.get("verdict"),
+            "llm_analysis": agent_result.get("llm_analysis"),
+            "tool_calls": len(agent_result.get("history") or []),
+        }
     except Exception as e:
-        failures.append(f"llm:{e}")
-    if not llm_ok:
+        failures.append(f"agent:{e}")
+        agent_result = None
+
+    if agent_result and agent_result.get("source") == "llm_judge":
+        # deep produced real LLM analysis — not a fallback
+        fallback = False
+    else:
         fallback = True
-        out["llm_analysis"] = {"source": "deterministic_fallback",
-                               "text": "LLM not configured on control plane"}
+        if not out.get("agent"):
+            out["agent"] = {"source": "deterministic_fallback",
+                            "text": "agent unavailable on control plane"}
+        # keep evidence-only summary so the pack is still useful
+        try:
+            if llm_client.available() and not dry_llm:
+                pass  # agent already tried; fall through
+        except Exception:
+            pass
 
     pack.write("deep", "deep.json", out)
     pack.write("deep", "META.json", stage_result(
-        "deep", True, summary=f"mcp={mcp} fallback={fallback}",
+        "deep", True, summary=f"mcp={mcp} engine=langgraph fallback={fallback}",
         fallback=fallback, tool_failures=failures,
         elapsed_s=round(time.time() - t0, 1)))
     return {"ok": True, "fallback": fallback, "failures": failures, "mcp": mcp}
@@ -378,7 +400,7 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
                                             max_seconds, enable_pesieve)
 
     # deep (HTTP MCP + local LLM)
-    results["deep"] = remote_deep(sample.name, pack, cfg, dry_llm)
+    results["deep"] = remote_deep(sample.name, pack, cfg, dry_llm, sha=sha)
 
     # yara (local, from evidence)
     try:
