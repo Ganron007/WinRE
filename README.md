@@ -140,9 +140,17 @@ curl http://127.0.0.1:9094/ -H "Content-Type: application/json" -d '{"jsonrpc":"
 
 # 6. Cross-host SQL parity
 python C:\WinRE\ops\schema_parity.py --sample C:\samples\foo.exe --engine both
+
+# 7. Full pipeline (static + dynamic + report + audit)
+python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --max-seconds 45
+#    exit 0 only when truly_green; evidence pack under logs/<sha>/
+
+# 8. UI console (control plane — operator host, drives FlareVM over SSH)
+python winre\ui\app.py --port 5001
+#    open http://127.0.0.1:5001  → Dashboard / Run Pipeline / Evidence / MCP
 ```
 
-Per-feature docs: `docs/SQL-GHIDRA.md` · `docs/SQL-IDA.md` · `docs/MALCAT.md` · `docs/X64DBG-MCP.md` · `docs/WINDBG-MCP.md` · `docs/DYNAMIC-ORCHESTRATOR.md`.
+Per-feature docs: `docs/PIPELINE.md` · `docs/SQL-GHIDRA.md` · `docs/SQL-IDA.md` · `docs/MALCAT.md` · `docs/X64DBG-MCP.md` · `docs/WINDBG-MCP.md` · `docs/DYNAMIC-ORCHESTRATOR.md`.
 
 ---
 
@@ -161,8 +169,8 @@ Per-feature docs: `docs/SQL-GHIDRA.md` · `docs/SQL-IDA.md` · `docs/MALCAT.md` 
 
 | Item | Description |
 |------|-------------|
-| **x64dbg scripted unpack** | Automated OEP-until-WriteProcessMemory loop driven through MCP (currently one-shot OEP detect + dump) |
-| **WinDbg bridge hardening** | Persistent DbgEng session instead of per-call `windbg.exe` spawn; conditional breakpoints; `!analyze -v` |
+| **LangGraph deep-dive agent** | Agentic ReAct loop over the MCP servers (x64dbg/Malcat/WinDbg) — the LLM decides debugger moves within budget, RevAI-style |
+| **LLM endpoint on control plane** | Point `WINRE_LLM_BASE_URL` at a local model / API so deep-dive reports are `llm_judge` not fallback |
 | **Persistence forensics pass** | Registry Run keys / services diff in `process_snapshot_*` vs clean baseline, surfaced in `ANALYST-NEXT.md` |
 | **RevAI evidence backlink** | URL/`load_dynamic_pack()` links in published RevAI reports pointing at the WinRE artifact pack |
 | **Packer taxonomy** | pe-sieve + Malcat unpack results fused into a `packer-summary.json` the Linux agent can cite |
@@ -182,5 +190,6 @@ MIT — see [LICENSE](LICENSE).
 * **idasql** — SQL interface for IDA Pro databases, by [Elias Bachaalany](https://github.com/allthingsida/idasql), used under the Human-Origin Source License v1.0.
 * **ghidrasql / LibGhidraHost** — SQL interface for Ghidra program databases, by [Elias Bachaalany](https://github.com/0xeb/ghidrasql), used under the Human-Origin Source License v1.0.
 * **x64dbg-MCP-Server** — MCP plugin for x64dbg, MIT (vendored under `integrations/`).
+* **mcp-windbg** — MCP server for WinDbg crash analysis, by [svnscha](https://github.com/svnscha/mcp-windbg), MIT.
 * **Malcat** — commercial binary analyzer (license required; binary not redistributed).
 * Derived from the **RevEng** research pipeline; the Linux-side sibling is **RevAI**.

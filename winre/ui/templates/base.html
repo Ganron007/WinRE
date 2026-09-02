@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}WinRE{% endblock %}</title>
+  <style>
+    :root {
+      --bg: #04120a; --panel: #0a1f14; --panel2: #0d2a1b;
+      --border: #14532d; --text: #d1fae5; --muted: #6b7280;
+      --accent: #34d399; --accent2: #059669; --red: #f87171; --amber: #fbbf24;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text);
+           font-family: "Segoe UI", Consolas, monospace; }
+    header { display: flex; align-items: center; gap: 18px; padding: 10px 24px;
+             background: var(--panel); border-bottom: 2px solid var(--border); }
+    header img { height: 44px; }
+    header .brand { font-size: 22px; font-weight: 800; color: var(--accent); }
+    nav { display: flex; gap: 6px; margin-left: 24px; flex-wrap: wrap; }
+    nav a { color: var(--muted); text-decoration: none; padding: 6px 12px;
+            border-radius: 6px; font-size: 14px; font-weight: 600; }
+    nav a:hover, nav a.active { color: var(--accent); background: var(--panel2); }
+    main { padding: 20px 24px; max-width: 1200px; margin: 0 auto; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+             gap: 14px; }
+    .card { background: var(--panel); border: 1px solid var(--border);
+            border-radius: 10px; padding: 14px 16px; }
+    .card h3 { margin: 0 0 8px; font-size: 15px; color: var(--accent); }
+    .card .big { font-size: 26px; font-weight: 800; }
+    .card p, .card li { font-size: 13px; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+    th { color: var(--accent2); text-transform: uppercase; font-size: 11px; }
+    code, pre { background: var(--panel2); border: 1px solid var(--border);
+                padding: 2px 5px; border-radius: 4px; font-size: 12px; }
+    pre { padding: 10px; overflow-x: auto; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 10px;
+             font-size: 11px; font-weight: 700; }
+    .green { background: #14532d; color: #6ee7b7; }
+    .red { background: #7f1d1d; color: #fca5a5; }
+    .amber { background: #78350f; color: #fcd34d; }
+    .muted { color: var(--muted); }
+    button, .btn { background: var(--accent2); color: #02150c; border: none;
+                   padding: 8px 16px; border-radius: 6px; font-weight: 700;
+                   cursor: pointer; font-size: 13px; }
+    button:hover { background: var(--accent); }
+    input, select { background: var(--panel2); color: var(--text); border: 1px solid
+                    var(--border); padding: 7px 10px; border-radius: 6px;
+                    font-size: 13px; width: 100%; }
+    label { font-size: 12px; color: var(--muted); display: block; margin: 10px 0 4px; }
+    .form-row { display: flex; gap: 12px; }
+    .form-row > div { flex: 1; }
+    .mono { font-family: Consolas, monospace; }
+    footer { padding: 16px 24px; color: var(--muted); font-size: 12px;
+             border-top: 1px solid var(--border); }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="{{ url_for('static', filename='winre-logo.svg') }}" alt="WinRE">
+    <span class="brand">WinRE Console</span>
+    <nav>
+      <a href="/" class="{{ 'active' if request.path == '/' }}">Dashboard</a>
+      <a href="/run" class="{{ 'active' if request.path.startswith('/run') }}">Run Pipeline</a>
+      <a href="/packs" class="{{ 'active' if request.path.startswith('/packs') }}">Evidence</a>
+      <a href="/mcp" class="{{ 'active' if request.path == '/mcp' }}">MCP</a>
+    </nav>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <footer>WinRE — Windows Malware RE + Dynamic Analysis · control-plane console ·
+    private lab</footer>
+</body>
+</html>

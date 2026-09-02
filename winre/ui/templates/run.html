@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}WinRE — Run Pipeline{% endblock %}
+{% block content %}
+<h2>Run pipeline (remote driver)</h2>
+
+{% if running %}
+  <p><span class="badge amber">A pipeline run is in progress…</span></p>
+  <div id="progress" class="card">
+    <p class="muted">Polling status…</p>
+  </div>
+  <script>
+    const t = setInterval(async () => {
+      const r = await fetch('/run/status');
+      const s = await r.json();
+      if (!s.running) {
+        clearInterval(t);
+        document.getElementById('progress').innerHTML =
+          '<p><span class="badge green">done</span></p><pre>' +
+          JSON.stringify(s.last, null, 2) + '</pre>';
+      }
+    }, 3000);
+  </script>
+{% else %}
+  <div class="card" style="max-width:640px">
+    <form method="post" action="/run">
+      <label>Sample path (on this host — uploaded to FlareVM)</label>
+      <input name="sample" placeholder="C:\samples\foo.exe" required>
+
+      <div class="form-row">
+        <div>
+          <label>Max detonation seconds</label>
+          <input name="max_seconds" type="number" value="45" min="10" max="600">
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <div style="display:flex; gap:18px; align-items:center; padding-top:6px">
+            <label style="display:flex; gap:6px; align-items:center; margin:0">
+              <input type="checkbox" name="pesieve" style="width:auto"> pe-sieve
+            </label>
+            <label style="display:flex; gap:6px; align-items:center; margin:0">
+              <input type="checkbox" name="dry_llm" style="width:auto" checked>
+              dry-LLM (no LLM call)
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top:16px">
+        <button type="submit">Run pipeline</button>
+      </div>
+      <p class="muted" style="margin-top:12px">
+        Stages: intake → quick (Malcat/Ghidra/IDA over SSH) → dynamic
+        (FakeNet+Procmon+Frida on VM) → deep (MCP + LLM) → yara → report →
+        audit (truly_green). Artifacts are pulled back to this host.
+      </p>
+    </form>
+  </div>
+
+  {% if last %}
+  <div class="card" style="margin-top:16px">
+    <h3>Last run</h3>
+    <pre>{{ last | tojson(indent=2) }}</pre>
+  </div>
+  {% endif %}
+{% endif %}
+{% endblock %}

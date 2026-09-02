@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}WinRE — Pack {{ pack.short }}{% endblock %}
+{% block content %}
+<h2>Pack <span class="mono">{{ pack.sha }}</span></h2>
+
+{% for stage, files in pack.stages.items() %}
+  {% if files %}
+  <h3 style="margin-top:20px">{{ stage }}</h3>
+  <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:6px">
+    {% for fname in files.keys() %}
+      <a class="btn" style="text-decoration:none; font-size:11px"
+         href="/packs/{{ pack.sha }}/{{ stage }}/{{ fname }}">{{ fname }}</a>
+    {% endfor %}
+  </div>
+  {% for fname, content in files.items() %}
+    {% if fname in ('META.json', 'STAGE.json', 'quick.json', 'deep.json') %}
+      <pre>{{ content | tojson(indent=2) }}</pre>
+    {% endif %}
+  {% endfor %}
+  {% endif %}
+{% endfor %}
+{% endblock %}

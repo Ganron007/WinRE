@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}WinRE — Evidence{% endblock %}
+{% block content %}
+<h2>Evidence packs</h2>
+{% if error %}<p class="badge red">{{ error }}</p>{% endif %}
+<table>
+  <tr><th>sha256</th><th>intake</th><th>quick</th><th>dynamic</th><th>deep</th>
+      <th>yara</th><th>report</th><th>truly_green</th></tr>
+  {% for p in packs %}
+  <tr>
+    <td><a href="/packs/{{ p.sha }}" class="mono">{{ p.short }}…</a></td>
+    {% if p.audit %}
+      {% set c = p.audit.checks %}
+      {% for s in ['intake','quick','dynamic','deep','yara','report'] %}
+        <td>
+          {% set row = c|selectattr('stage','equalto',s)|first %}
+          {% if row and row.ran %}<span class="badge green">ok</span>
+          {% else %}<span class="badge red">—</span>{% endif %}
+        </td>
+      {% endfor %}
+      <td>{% if p.audit.truly_green %}<span class="badge green">TRUE</span>
+          {% else %}<span class="badge amber">false</span>{% endif %}</td>
+    {% else %}
+      <td colspan="7" class="muted">no audit</td>
+    {% endif %}
+  </tr>
+  {% else %}
+  <tr><td colspan="8" class="muted">No packs yet.</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}
