@@ -1,40 +1,63 @@
 # Pipeline — WinRE static + dynamic RE workflow
 
-> **Status:** LIVE (2026-09-01) — `winre/pipeline.py` spine verified end-to-end on FlareVM.
+> **Status:** LIVE (2026-09-02) — `winre/pipeline.py` with SEGREGATED static/dynamic phases.
 > WinRE is the Windows FlareVM pipeline: static AND dynamic AND interactive
 > debugger on one host, all local, LLM interprets evidence only.
+
+## Static-first, dynamic opt-in + segregated (design)
+
+**Static is the default and mirrors RevEng/RevAI exactly.** Dynamic is a
+SEPARATE, opt-in phase that runs LAST from a restored (clean) VM — never in
+the middle of static (detonation would contaminate the VM the deep static
+agent runs on). `static_yara_wins`: dynamic corroborates, never clears.
+
+```
+DEFAULT (no env):   pipeline.py <sample>                  → STATIC ONLY
+                    intake → quick → deep(agent) → yara → report → audit
+                    Never detonates. Clean on any host.
+
+OPT-IN DYNAMIC:     WINRE_ENABLE_DYNAMIC=1 pipeline.py <sample> --dynamic
+                    (or RevEng triggers the legacy SSH orchestrator)
+                    static completes FIRST → detonation on restored VM →
+                    FakeNet+Procmon+Frida+pe-sieve → dynamic pack pulled →
+                    static_yara_wins → snapshot revert (mandatory)
+```
+
+Why: a detonation dirties the VM (Run keys, dropped files, hooks). Running
+the deep static agent after detonation would analyze on contaminated ground.
+RevEng/RevAI (Linux static) can drive WinRE SQL over SSH; WinRE owns dynamic.
 
 ## Why WinRE beats static-only pipelines
 
 RevEng/RevAI run static tools on Linux and hand the evidence to an LLM. They
 cannot: detonate on Windows, hook APIs with Frida, capture Procmon/network,
 drive x64dbg/WinDbg/Malcat over MCP, or unpack interactively. WinRE does all
-of it on one host — static SQL, dynamic detonation, and agentic debugger
-control — then applies the same honest gates.
+of it on one host — static SQL, dynamic detonation (gated), and agentic
+debugger control — then applies the same honest gates.
 
 ## Spine
 
 ```
-winre/pipeline.py <sample> [--max-seconds 45] [--pesieve] [--skip-dynamic] [--dry-llm]
+winre/pipeline.py <sample> [--dynamic] [--max-seconds 45] [--pesieve] [--dry-llm] [--driver remote]
    │
    ├─ 1. intake   hash, format, magic            → logs/<sha>/intake/
    ├─ 2. quick    Malcat MCP + IDA/Ghidra SQL    → logs/<sha>/quick/   (deterministic triage + verdict)
-   ├─ 3. dynamic  orchestrator --mode local       → logs/<sha>/dynamic/ (FakeNet+Procmon+Frida+pe-sieve)
-   │             (x64dbg OEP/dump best-effort)
-   ├─ 4. deep     MCP-driven agent pass           → logs/<sha>/deep/    (x64dbg 71 + Malcat 45 + WinDbg 10)
+   ├─ 3. deep     LangGraph agent (static tools) → logs/<sha>/deep/    (ghidra/ida SQL + malcat MCP)
    │             LLM interprets evidence (local endpoint, source-tagged)
-   ├─ 5. yara     YARA + Sigma from evidence      → logs/<sha>/yara/    (deterministic, no LLM in rules)
-   ├─ 6. report   source-tagged report + next     → logs/<sha>/report/
-   └─ audit       truly_green gate                → logs/<sha>/audit.json
+   ├─ 4. yara     YARA + Sigma from evidence      → logs/<sha>/yara/    (deterministic, no LLM in rules)
+   ├─ 5. report   source-tagged report + next     → logs/<sha>/report/
+   └─ audit       truly_green gate (dynamic optional) → logs/<sha>/audit.json
+          │
+          └─ [--dynamic] detonation runs here, LAST, segregated:
+             orchestrator --mode local → logs/<sha>/dynamic/ (pulled via scp)
 ```
 
-- **Deterministic-first**: tools produce evidence; the LLM only interprets
-  (verdicts, report prose). Deep-dive LLM output is `source: llm_judge`; a
-  missing LLM falls back to `deterministic_fallback` and the audit records it.
+- **Deterministic-first**: tools produce evidence; the LLM only interprets.
 - **`static_yara_wins`**: dynamic evidence corroborates but never clears a
   static malicious verdict (policy in `audit.json`).
-- **Honest gate**: `truly_green = all stages ran + zero failed tools + no
-  fallback when primary tool required + no dynamic-vs-static conflict`.
+- **Honest gate**: `truly_green = all required stages ran + zero failed tools
+  + no fallback + no dynamic-vs-static conflict`. Dynamic is NOT required for
+  green (optional corroboration) unless it ran and conflicted.
 
 ## Stage detail
 
@@ -64,18 +87,24 @@ MCP servers run on the VM console (`winre/mcp/start_servers.ps1`) — Malcat
 ## Run
 
 ```powershell
-# static-only (no detonation, no LLM) — fastest smoke
-python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --skip-dynamic --dry-llm
+# STATIC (default — never detonates) — fastest smoke
+python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --dry-llm
 
-# full
-python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --max-seconds 45 --pesieve
+# STATIC + SEGREGATED DYNAMIC (opt-in; needs restored VM, then snapshot revert)
+python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --dynamic --max-seconds 45
+# or env: $env:WINRE_ENABLE_DYNAMIC = "1"
+
+# control-plane driver (run from operator host, SSH to FlareVM)
+python winre\pipeline.py C:\samples\foo.exe --driver remote
 
 # env
 $env:GHIDRA_HEADLESS_MAXMEM = "8G"     # 16GB host
 $env:WINRE_PIPELINE_LOGS = "C:\WinRE\logs"
+$env:WINRE_LLM_BASE_URL / WINRE_LLM_API_KEY / WINRE_LLM_MODEL  (in .env)
 ```
 
-Exit code 0 only when `truly_green` (audit gate passed).
+Exit code 0 only when `truly_green` (audit gate passed). Dynamic is not
+required for green — it is optional corroboration.
 
 ## Evidence contract with RevAI
 

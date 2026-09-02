@@ -369,9 +369,13 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
 
 
 def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
-                        enable_pesieve: bool = False, skip_dynamic: bool = False,
+                        enable_pesieve: bool = False, enable_dynamic: bool = False,
                         dry_llm: bool = False) -> dict:
-    """Control-plane pipeline driver: SSH/HTTP to the VM + local LLM + local audit."""
+    """Control-plane pipeline driver: SSH/HTTP to the VM + local LLM + local audit.
+
+    DEFAULT = static-only (quick + deep + yara + report + audit). Dynamic is
+    opt-in (enable_dynamic) and runs LAST, segregated, static_yara_wins.
+    """
     from .evidence import sha256_file
     from . import audit as audit_mod
     from . import yara_gen
@@ -391,16 +395,14 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
     from .pipeline import _intake
     results = {"intake": _intake(sample, pack)}
 
-    # quick (SSH)
+    # ---- STATIC phase (quick + deep over SSH/HTTP) ----
     results["quick"] = remote_quick(sample.name, pack, cfg)
+    results["deep"] = remote_deep(sample.name, pack, cfg, dry_llm, sha=sha)
 
-    # dynamic (SSH + scp)
-    if not skip_dynamic:
+    # ---- DYNAMIC phase (segregated, opt-in, runs LAST after static) ----
+    if enable_dynamic:
         results["dynamic"] = remote_dynamic(sample.name, sha, pack, cfg,
                                             max_seconds, enable_pesieve)
-
-    # deep (HTTP MCP + local LLM)
-    results["deep"] = remote_deep(sample.name, pack, cfg, dry_llm, sha=sha)
 
     # yara (local, from evidence)
     try:
@@ -421,7 +423,7 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
     results["audit"] = audit_res
 
     print(f"[winre-remote] {sha[:16]}… quick={results['quick'].get('verdict')} "
-          f"dynamic={'ok' if results.get('dynamic',{}).get('ok') else 'skip'} "
+          f"dynamic={'ok' if results.get('dynamic',{}).get('ok') else 'not-run'} "
           f"truly_green={audit_res['truly_green']}", flush=True)
     return {"sha": sha, "results": results}
 
@@ -432,15 +434,19 @@ def main() -> int:
     ap.add_argument("sample", type=Path)
     ap.add_argument("--max-seconds", type=int, default=45)
     ap.add_argument("--pesieve", action="store_true")
-    ap.add_argument("--skip-dynamic", action="store_true")
+    ap.add_argument("--dynamic", action="store_true",
+                    help="enable segregated dynamic phase (opt-in)")
     ap.add_argument("--dry-llm", action="store_true")
     args = ap.parse_args()
     if not args.sample.is_file():
         print(f"ERROR: sample not found: {args.sample}", file=sys.stderr)
         return 2
+    import os as _os
+    enable_dynamic = args.dynamic or _os.environ.get(
+        "WINRE_ENABLE_DYNAMIC", "").strip().lower() in ("1", "true", "yes")
     res = run_remote_pipeline(args.sample, max_seconds=args.max_seconds,
                               enable_pesieve=args.pesieve,
-                              skip_dynamic=args.skip_dynamic, dry_llm=args.dry_llm)
+                              enable_dynamic=enable_dynamic, dry_llm=args.dry_llm)
     return 0 if res["results"]["audit"]["truly_green"] else 1
 
 

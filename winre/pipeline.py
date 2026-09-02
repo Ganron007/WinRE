@@ -337,78 +337,116 @@ def _report(pack: EvidencePack, sha: str, quick: dict, dynamic: dict | None,
     t0 = time.time()
     q = (quick or {}).get("evidence") or {}
     d = dynamic or {}
+    dp = deep or {}
+    # source: langgraph agent (agent.source) OR plain llm_analysis.source
+    agent = dp.get("agent") or {}
+    llm_analysis = dp.get("llm_analysis") or {}
+    source = (agent.get("source") or llm_analysis.get("source")
+              or "deterministic_fallback")
+    dynamic_ran = bool(d.get("ok"))
+    analyst_next = [
+        "If packed: x64dbg OEP detect + dump, then Malcat transforms",
+        "If network: follow C2 in network_intel.json",
+    ]
+    if dynamic_ran:
+        analyst_next.insert(0, "Review dynamic artifacts (procmon.csv, pcap)")
+        analyst_next.append("Restore FlareVM snapshot after dynamic run")
     report = {
         "sha256": sha,
         "generated_at": utcnow(),
-        "source": "llm_judge" if (deep or {}).get("llm_analysis", {}).get("source") == "llm_judge" else "deterministic_fallback",
+        "source": "llm_judge" if source == "llm_judge" else "deterministic_fallback",
+        "phase": "static+dynamic" if dynamic_ran else "static",
         "quick": {k: q.get(k) for k in ("ida", "ghidra", "malcat") if k in q},
         "dynamic": {
             "ok": d.get("ok"),
             "frida_events": d.get("frida_events"),
             "verdict": d.get("verdict"),
         },
-        "deep": {k: (deep or {}).get(k) for k in ("mcp", "x64dbg") if k in (deep or {})},
-        "analyst_next": [
-            "Review dynamic artifacts in logs/<sha>/dynamic/ (procmon.csv, pcap)",
-            "If packed: x64dbg OEP detect + dump, then Malcat transforms",
-            "If network: follow C2 in network_intel.json",
-            "Restore FlareVM snapshot after dynamic run",
-        ],
+        "deep": {k: dp.get(k) for k in ("mcp", "agent", "x64dbg")
+                 if k in dp and dp.get(k) is not None},
+        "analyst_next": analyst_next,
     }
     pack.write("report", "report.json", report)
     pack.write("report", "ANALYST-NEXT.md", {
         "md": "\n".join([f"- {a}" for a in report["analyst_next"]]),
     })
     pack.write("report", "META.json", stage_result(
-        "report", True, summary=f"source={report['source']}",
+        "report", True, summary=f"source={report['source']} phase={report['phase']}",
         source=report["source"]))
     return report
 
 
 def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = False,
-                 skip_dynamic: bool = False, dry_llm: bool = False) -> dict:
+                 enable_dynamic: bool = False, dry_llm: bool = False) -> dict:
+    """Run the WinRE pipeline.
+
+    DEFAULT = STATIC-ONLY (mirrors RevEng/RevAI): intake → quick → deep → yara
+    → report → audit. Never detonates. Safe on any host.
+
+    enable_dynamic=True appends a SEGREGATED dynamic phase (detonation) that:
+      - runs AFTER static completes (never mid-static — no VM contamination
+        of the deep static pass)
+      - is env-gated (WINRE_ENABLE_DYNAMIC) — opt-in, never default
+      - writes to dynamic/ as corroboration; static_yara_wins (can never
+        clear a static malicious verdict)
+      - requires snapshot restore after (analyst/operator)
+    """
     sha = __import__("winre.evidence", fromlist=["sha256_file"]).sha256_file(sample)
     pack = EvidencePack(LOGS_DIR, sha).ensure()
     results: dict = {}
 
+    # ---- STATIC phase (default, clean) ----
     intake = _intake(sample, pack)
     results["intake"] = intake
 
     quick = _quick(sample, pack)
     results["quick"] = quick
 
-    dynamic = None
-    if not skip_dynamic:
-        dynamic = _dynamic(sample, pack, sha, max_seconds, enable_pesieve)
-        results["dynamic"] = dynamic
-
     deep = _deep(sample, pack, quick, dry_llm=dry_llm)
     results["deep"] = deep
 
-    yara = _yara(pack, quick, dynamic)
+    yara = _yara(pack, quick, None)
     results["yara"] = yara
+
+    # ---- DYNAMIC phase (segregated, opt-in, LAST) ----
+    dynamic = None
+    if enable_dynamic:
+        # static already complete; detonation runs on (restored) VM now.
+        # dynamic is corroboration — do not let it fail static artifacts.
+        dynamic = _dynamic(sample, pack, sha, max_seconds, enable_pesieve)
+        results["dynamic"] = dynamic
 
     report = _report(pack, sha, quick, dynamic, deep)
     results["report"] = report
 
+    # audit: static truly_green independent of dynamic; dynamic is a note
     audit_res = audit_mod.audit(pack.root)
     (pack.root / "audit.json").write_text(
         json.dumps(audit_res, indent=2) + "\n", encoding="utf-8")
     results["audit"] = audit_res
 
     # summary line
-    print(f"[winre-pipeline] {sha[:16]}… "
-          f"quick={quick.get('verdict')} dynamic={'ok' if dynamic and dynamic.get('ok') else 'skip'} "
+    phase = "static"
+    if dynamic:
+        phase += f"+dynamic({'ok' if dynamic.get('ok') else 'FAIL'})"
+    print(f"[winre-pipeline] {sha[:16]}… [{phase}] "
+          f"quick={quick.get('verdict')} "
           f"truly_green={audit_res['truly_green']}", flush=True)
     return {"sha": sha, "results": results}
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="WinRE static+dynamic RE pipeline")
+    ap = argparse.ArgumentParser(
+        description="WinRE RE pipeline. DEFAULT=static-only (RevEng/RevAI-"
+                    "mirror). Dynamic detonation is opt-in & segregated.")
     ap.add_argument("sample", type=Path, help="path to sample PE")
-    ap.add_argument("--max-seconds", type=int, default=45)
-    ap.add_argument("--pesieve", action="store_true")
-    ap.add_argument("--skip-dynamic", action="store_true")
+    ap.add_argument("--max-seconds", type=int, default=45,
+                    help="dynamic detonation length (when --dynamic)")
+    ap.add_argument("--pesieve", action="store_true",
+                    help="dynamic: run pe-sieve mid-detonation")
+    ap.add_argument("--dynamic", action="store_true",
+                    help="ENABLE the segregated dynamic phase (opt-in; "
+                         "requires snapshot-restored VM; static_yara_wins)")
     ap.add_argument("--dry-llm", action="store_true",
                     help="never call the LLM (deterministic fallback only)")
     ap.add_argument("--driver", choices=["local", "remote"], default="local",
@@ -418,15 +456,18 @@ def main() -> int:
     if not args.sample.is_file():
         print(f"ERROR: sample not found: {args.sample}", file=sys.stderr)
         return 2
+    # env-gate: WINRE_ENABLE_DYNAMIC=1 also opts in
+    import os as _os
+    enable_dynamic = args.dynamic or _os.environ.get("WINRE_ENABLE_DYNAMIC", "").strip().lower() in ("1", "true", "yes")
     if args.driver == "remote":
         from . import remote_driver
         res = remote_driver.run_remote_pipeline(
             args.sample, max_seconds=args.max_seconds, enable_pesieve=args.pesieve,
-            skip_dynamic=args.skip_dynamic, dry_llm=args.dry_llm)
+            enable_dynamic=enable_dynamic, dry_llm=args.dry_llm)
         return 0 if res["results"]["audit"]["truly_green"] else 1
     res = run_pipeline(args.sample, max_seconds=args.max_seconds,
                        enable_pesieve=args.pesieve,
-                       skip_dynamic=args.skip_dynamic, dry_llm=args.dry_llm)
+                       enable_dynamic=enable_dynamic, dry_llm=args.dry_llm)
     return 0 if res["results"]["audit"]["truly_green"] else 1
 
 

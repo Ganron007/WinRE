@@ -48,9 +48,17 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                                                         "dynamic", "deep",
                                                         "yara", "report"),
           require_dynamic: bool = False) -> dict:
-    """Run the truly_green gate over an evidence pack."""
+    """Run the truly_green gate over an evidence pack.
+
+    Dynamic is OPTIONAL by design (static-first, segregated). It only
+    contributes to all_green when it was actually run (dynamic/ present with
+    ok=true) or require_dynamic=True. A static-only run can be truly_green.
+    """
+    # required stages = everything except dynamic (dynamic optional)
+    required = tuple(s for s in stages if s != "dynamic")
     checks = [_stage_ok(evidence, s) for s in stages]
-    all_green = all(c["ran"] for c in checks)
+    req_checks = [c for c in checks if c["stage"] in required]
+    all_green = all(c["ran"] for c in req_checks)
     failed_tools = [t for c in checks for t in (c.get("tool_failures") or [])]
     fallbacks = [c["stage"] for c in checks if c.get("fallback")]
 
