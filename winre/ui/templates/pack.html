@@ -3,6 +3,29 @@
 {% block content %}
 <h2>Pack <span class="mono">{{ pack.sha }}</span></h2>
 
+{% set deep = pack.stages.get('deep') or {} %}
+{% set agent = deep.get('deep.json', {}).get('agent') if deep.get('deep.json') is mapping else None %}
+{% if agent %}
+<div class="card" style="border-color:#14532d">
+  <h3>Deep dive (LangGraph agent)</h3>
+  <p>
+    source:
+    {% if agent.get('source') == 'llm_judge' %}<span class="badge green">llm_judge</span>
+    {% else %}<span class="badge amber">deterministic_fallback</span>{% endif %}
+    {% if agent.get('verdict') %}
+      &nbsp;·&nbsp; verdict: <b>{{ agent.verdict.verdict if agent.verdict is mapping else agent.verdict }}</b>
+      ({{ agent.verdict.confidence if agent.verdict is mapping else '?' }})
+    {% endif %}
+    &nbsp;·&nbsp; {{ agent.get('tool_calls', 0) }} tool calls
+  </p>
+  {% if agent.get('llm_analysis') and agent.llm_analysis is string %}
+  <details><summary>LLM analysis text</summary>
+    <pre>{{ agent.llm_analysis }}</pre>
+  </details>
+  {% endif %}
+</div>
+{% endif %}
+
 {% for stage, files in pack.stages.items() %}
   {% if files %}
   <h3 style="margin-top:20px">{{ stage }}</h3>
@@ -13,7 +36,7 @@
     {% endfor %}
   </div>
   {% for fname, content in files.items() %}
-    {% if fname in ('META.json', 'STAGE.json', 'quick.json', 'deep.json') %}
+    {% if fname in ('META.json', 'STAGE.json', 'quick.json', 'deep.json', 'report.json', 'rule_report.json') %}
       <pre>{{ content | tojson(indent=2) }}</pre>
     {% endif %}
   {% endfor %}

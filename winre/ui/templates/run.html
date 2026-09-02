@@ -14,47 +14,71 @@
       const s = await r.json();
       if (!s.running) {
         clearInterval(t);
+        const last = s.last || {};
+        const ok = last.ok ? '<span class="badge green">done</span>'
+                           : '<span class="badge red">failed</span>';
         document.getElementById('progress').innerHTML =
-          '<p><span class="badge green">done</span></p><pre>' +
-          JSON.stringify(s.last, null, 2) + '</pre>';
+          `<p>${ok} <span class="mono">${last.sha ? last.sha.slice(0,16)+'…' : ''}</span></p>
+           <pre>${JSON.stringify(last, null, 2)}</pre>`;
       }
     }, 3000);
   </script>
 {% else %}
-  <div class="card" style="max-width:640px">
+  <div class="card" style="max-width:680px">
     <form method="post" action="/run">
       <label>Sample path (on this host — uploaded to FlareVM)</label>
       <input name="sample" placeholder="C:\samples\foo.exe" required>
 
       <div class="form-row">
         <div>
-          <label>Max detonation seconds</label>
+          <label>Max detonation seconds (dynamic only)</label>
           <input name="max_seconds" type="number" value="45" min="10" max="600">
         </div>
-        <div>
-          <label>&nbsp;</label>
-          <div style="display:flex; gap:18px; align-items:center; padding-top:6px">
-            <label style="display:flex; gap:6px; align-items:center; margin:0">
-              <input type="checkbox" name="pesieve" style="width:auto"> pe-sieve
-            </label>
-            <label style="display:flex; gap:6px; align-items:center; margin:0">
-              <input type="checkbox" name="dry_llm" style="width:auto" checked>
-              dry-LLM (no LLM call)
-            </label>
-          </div>
-        </div>
+      </div>
+
+      <div style="display:flex; gap:22px; flex-wrap:wrap; align-items:center; margin-top:10px">
+        <label style="display:flex; gap:6px; align-items:center">
+          <input type="checkbox" name="dry_llm" style="width:auto" checked>
+          dry-LLM (no LLM call)
+        </label>
+        <label style="display:flex; gap:6px; align-items:center">
+          <input type="checkbox" name="dynamic" id="dynamicChk" style="width:auto">
+          <b style="color:#fbbf24">enable dynamic detonation (opt-in)</b>
+        </label>
+        <label style="display:flex; gap:6px; align-items:center; margin:0" id="pesieveLbl" hidden>
+          <input type="checkbox" name="pesieve" style="width:auto"> pe-sieve
+        </label>
+      </div>
+
+      <div id="dynWarn" class="card" style="margin-top:10px; border-color:#78350f; background:#1a0f00" hidden>
+        <p style="color:#fcd34d; margin:0; font-size:12px">
+          <b>Dynamic is segregated &amp; contaminating.</b> Runs LAST after static, on a
+          FlareVM that must be at its clean snapshot. It detonates the sample
+          (FakeNet+Procmon+Frida+pe-sieve), then you MUST restore the VM snapshot.
+          static_yara_wins — dynamic can only corroborate, never clear a static verdict.
+        </p>
       </div>
 
       <div style="margin-top:16px">
         <button type="submit">Run pipeline</button>
       </div>
       <p class="muted" style="margin-top:12px">
-        Stages: intake → quick (Malcat/Ghidra/IDA over SSH) → dynamic
-        (FakeNet+Procmon+Frida on VM) → deep (MCP + LLM) → yara → report →
-        audit (truly_green). Artifacts are pulled back to this host.
+        <b>Static (default):</b> intake → quick (Malcat/Ghidra/IDA over SSH) →
+        deep (LangGraph agent: SQL+Malcat, llm_judge when LLM configured) →
+        yara → report → audit (truly_green). Never detonates.
       </p>
     </form>
   </div>
+
+  <script>
+    const chk = document.getElementById('dynamicChk');
+    const warn = document.getElementById('dynWarn');
+    const pes = document.getElementById('pesieveLbl');
+    chk.addEventListener('change', () => {
+      warn.hidden = !chk.checked;
+      pes.hidden = !chk.checked;
+    });
+  </script>
 
   {% if last %}
   <div class="card" style="margin-top:16px">

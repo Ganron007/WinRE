@@ -27,7 +27,9 @@
 </div>
 <p class="muted" style="margin-top:12px">
   MCP servers bind the lab NIC so this control plane reaches them over HTTP
-  (no internet on the VM — safe for detonation). Start them on the VM console
-  with <code>winre\mcp\start_servers.ps1</code>.
+  (no internet on the VM — safe for detonation). They auto-start at boot via
+  the Startup launcher (FlareVM autologon → <code>start_servers.ps1</code>);
+  x64dbg opens minimized for :9094. If a server is down, run
+  <code>winre\mcp\start_servers.ps1</code> on the VM console.
 </p>
 {% endblock %}

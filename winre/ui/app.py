@@ -159,19 +159,22 @@ def _vm_health() -> dict:
 
 
 def _run_pipeline_in_thread(sample_path: str, max_seconds: int,
-                            pesieve: bool, dry_llm: bool) -> None:
+                            pesieve: bool, dry_llm: bool, dynamic: bool) -> None:
     """Run the remote pipeline in a background thread; store the result."""
+    import traceback
+
     def _do():
         with _run_lock:
             _run_state["running"] = True
             try:
-                from winre.pipeline import run_pipeline as _local  # not used
                 res = remote_driver.run_remote_pipeline(
                     Path(sample_path), max_seconds=max_seconds,
-                    enable_pesieve=pesieve, dry_llm=dry_llm)
+                    enable_pesieve=pesieve, enable_dynamic=dynamic,
+                    dry_llm=dry_llm)
                 _run_state["last"] = {"ok": True, "sha": res["sha"],
                                       "audit": res["results"]["audit"]}
             except Exception as e:
+                print("[winre-ui] run failed:", traceback.format_exc(), flush=True)
                 _run_state["last"] = {"ok": False, "error": str(e)}
             finally:
                 _run_state["running"] = False
@@ -207,9 +210,10 @@ def create_app() -> "Flask":
             max_seconds = int(request.form.get("max_seconds", 45))
             pesieve = request.form.get("pesieve") == "on"
             dry_llm = request.form.get("dry_llm") == "on"
-            _run_pipeline_in_thread(sample, max_seconds, pesieve, dry_llm)
+            dynamic = request.form.get("dynamic") == "on"
+            _run_pipeline_in_thread(sample, max_seconds, pesieve, dry_llm, dynamic)
             return jsonify({"ok": True, "msg": "pipeline started",
-                            "sample": sample})
+                            "sample": sample, "dynamic": dynamic})
         return render_template("run.html", running=_run_state["running"],
                                last=_run_state["last"])
 
@@ -220,6 +224,27 @@ def create_app() -> "Flask":
     @app.route("/packs")
     def packs():
         return render_template("packs.html", packs=_packs())
+
+    @app.route("/api/packs")
+    def api_packs():
+        """JSON: pack list + phase/source/truly_green for each."""
+        out = []
+        for p in _packs():
+            sha = p["sha"]
+            rep = None
+            rp = LOGS_DIR / sha / "report" / "report.json"
+            if rp.is_file():
+                try:
+                    rep = json.loads(rp.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    pass
+            out.append({
+                "sha": sha, "short": p["short"],
+                "audit": p["audit"],
+                "phase": (rep or {}).get("phase", "static"),
+                "source": (rep or {}).get("source", "?"),
+            })
+        return jsonify(out)
 
     @app.route("/packs/<sha>")
     def pack(sha: str):
