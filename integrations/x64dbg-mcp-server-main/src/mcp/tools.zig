@@ -1795,7 +1795,11 @@ fn setHardwareBreakpoint(params: ?std.json.Value, out: []u8) ToolResult {
     const cmd = std.fmt.bufPrint(&cmd_buf, "bphws {s}, {s}, {d}\x00", .{ addr_str, bp_type, size }) catch
         return errResult(out, "Error: input too long.");
     const ok = bridge.cmdExec(@ptrCast(cmd.ptr));
-    return fmtResult(out, "{s}", .{if (ok) "Hardware breakpoint set." else "Failed to set hardware breakpoint."});
+    // NOTE (WinRE): report cmdExec failure as an error, not success text.
+    // Previously fmtResult hid failures ("Failed to..." with is_error=false),
+    // so callers saw ok:true with nothing registered.
+    if (!ok) return fmtErr(out, "Failed to set hardware breakpoint.", .{});
+    return fmtResult(out, "{s}", .{"Hardware breakpoint set."});
 }
 
 // ── GetPatches ─────────────────────────────────────────────────────

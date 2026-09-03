@@ -80,7 +80,21 @@ class X64DbgClient:
         if "error" in raw:
             return {"ok": False, "error": str(raw["error"]),
                     "result": raw, "name": name}
-        return {"ok": True, "error": None, "result": raw.get("result"), "name": name}
+        result = raw.get("result")
+        # MCP content envelope: {"content": [{"type": "text", "text": ...}],
+        #                        "isError": true} on tool failure. Surface it —
+        # otherwise failures look like ok:true (silent-drop).
+        if isinstance(result, dict) and result.get("isError"):
+            text = ""
+            try:
+                content = result.get("content") or []
+                if content and isinstance(content[0], dict):
+                    text = content[0].get("text", "")
+            except Exception:
+                pass
+            return {"ok": False, "error": str(text)[:300] or "tool reported error",
+                    "result": result, "name": name}
+        return {"ok": True, "error": None, "result": result, "name": name}
 
     def list_tools(self) -> list[str]:
         """Return the list of tool names advertised by the plugin."""

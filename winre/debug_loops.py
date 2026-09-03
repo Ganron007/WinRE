@@ -166,10 +166,15 @@ def _module_base_and_sections(xc: X64DbgClient, sample_stem: str) -> tuple[int |
 
 
 def oep_by_section(sample: str, xc: X64DbgClient | None = None,
-                   text_offset: int = 0x1000, max_wait_s: int = 60) -> dict:
-    """Unpack OEP: EP break, then execute-BP on the ORIGINAL .text
-    (base+text_offset, the region UPX decompresses to), run, and the first
-    execution there is the OEP. Deterministic, no stub-walking."""
+                   text_offset: int = 0x1000, max_wait_s: int = 90) -> dict:
+    """Unpack OEP via MEMORY-EXECUTE breakpoint on the unpack section.
+
+    Method (analyst-standard, verified on UPX x64): EP break, find the
+    unpack-target section (UPX0: the RWX region the stub decompresses into),
+    set a memory-execute bp over it via raw `bpm start, size, x`, run.
+    The FIRST instruction fetch in unpacked code is the OEP by definition.
+    No stub-walking, no HW-BP DR-register dependence, no stack assumptions.
+    """
     import os
     xc = xc or X64DbgClient()
     evidence: list[dict] = []
@@ -182,23 +187,41 @@ def oep_by_section(sample: str, xc: X64DbgClient | None = None,
     base, sections = _module_base_and_sections(xc, stem)
     if base is None:
         return {"ok": False, "error": "module base not found", "evidence": evidence}
-    # target = first code section (UPX0 or .text) — where the stub jumps for OEP
-    code_secs = [s for s in sections if s["start"] > base
-                 and ("x" in (s.get("perm") or "").lower()
-                      or "UPX0" in s.get("owner", "").upper())]
-    target = code_secs[0]["start"] if code_secs else base + text_offset
 
-    # BP at original .text start (execute) — hardware BP works even before the
-    # section is committed (software BP on reserved pages fails silently).
-    # Verify registration: the plugin may return ok without registering.
-    hw = xc.set_hw_breakpoint(target, dr_index=0)
+    def _sz(s: dict) -> int:
+        try:
+            return int(str(s.get("size", "0")), 16)
+        except ValueError:
+            return 0
+
+    # unpack target = UPX0-style section (RWX, after header) else first
+    # executable section after the header page
+    target, tsize = None, 0
+    for s in sections:
+        if s["start"] <= base:
+            continue
+        if "UPX0" in (s.get("owner") or "").upper():
+            target, tsize = s["start"], _sz(s) or 0x10000
+            break
+    if target is None:
+        execs = [s for s in sections if s["start"] > base
+                 and "x" in (s.get("perm") or "").lower()]
+        if execs:
+            target, tsize = execs[0]["start"], _sz(execs[0]) or 0x10000
+    if target is None:
+        target, tsize = base + text_offset, 0x10000
+    evidence.append({"label": "oep_membp_target",
+                     "target": hex(target), "size": hex(tsize)})
+
+    # memory-execute bp via raw debugger command (no HW-BP DR dependence)
+    cmd = f"bpm {hex(target)}, {hex(tsize)}, x"
+    cr = xc.execute_command(cmd)
     registered = hex(target).lower() in _bp_text(xc).lower()
-    evidence.append({"label": f"oep_hwbp_{hex(target)}", "bp": hex(target),
-                     "registered": registered})
-    if not hw.get("ok") or not registered:
+    evidence.append({"label": "oep_membp_set", "cmd": cmd,
+                     "ok": bool(cr.get("ok")), "registered": registered})
+    if not registered:
         return {"ok": False,
-                "error": f"hw bp {hex(target)} not registered "
-                         f"(ok={hw.get('ok')}, listed={registered})",
+                "error": f"memory bp {hex(target)} not registered",
                 "evidence": evidence}
 
     xc.run()
@@ -211,9 +234,9 @@ def oep_by_section(sample: str, xc: X64DbgClient | None = None,
         if st.get("isRunning") == "false":
             break
     if rip is None:
-        return {"ok": False, "error": "never paused after run",
+        return {"ok": False, "error": "never paused after membp run",
                 "evidence": evidence}
-    evidence.append(_pause_evidence(xc, "oep_pause", rip))
+    evidence.append(_pause_evidence(xc, "oep_membp_hit", rip))
     return {"ok": True, "oep": rip, "module_base": hex(base),
             "evidence": evidence}
 
@@ -629,7 +652,8 @@ if __name__ == "__main__":
     from winre.remote_driver import flare_cfg
 
     ap = argparse.ArgumentParser(description="x64dbg debug-loop scenarios")
-    ap.add_argument("scenario", choices=["ep_break", "oep_by_esp", "wpm_dump", "crypt_dump", "api_loop"])
+    ap.add_argument("scenario", choices=["ep_break", "oep_by_section", "oep_by_esp",
+                                         "wpm_dump", "crypt_dump", "api_loop"])
     ap.add_argument("sample", help="VM path e.g. C:\\samples\\foo.exe")
     ap.add_argument("--api", default="WriteProcessMemory")
     ap.add_argument("--dump-dir", default=None, help="where to write dumped buffers (host path)")
@@ -641,7 +665,8 @@ if __name__ == "__main__":
         raise SystemExit(1)
     host = flare_cfg()["host"]
     xc = X64DbgClient(base=f"http://{host}:9094")
-    fn = {"ep_break": ep_break, "oep_by_esp": oep_by_esp,
+    fn = {"ep_break": ep_break, "oep_by_section": oep_by_section,
+          "oep_by_esp": oep_by_esp,
           "wpm_dump": wpm_dump, "crypt_dump": crypt_dump,
           "api_loop": api_loop}[args.scenario]
     if args.scenario == "api_loop":
