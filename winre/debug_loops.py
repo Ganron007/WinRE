@@ -14,8 +14,11 @@ the LangGraph agent and the dynamic phase can drive them reliably. Discipline
 Scenarios (each = one checklist item, test one-by-one):
     ep_break(sample)        LoadBinary -> run -> auto-EP break -> state   [1]
     oep_by_section(sample)  UPX/unpack: mem-BP on original .text exec
-                            region -> run -> OEP break -> dump            [2/3]
-    api_loop(sample, api)   BP on API (e.g. WriteProcessMemory) -> run ->
+                            region -> run -> OEP break -> dump            [2, parked]
+    wpm_dump(sample)        BP WriteProcessMemory -> run -> on hit, decode
+                            x64 args (rcx,rdx,r8,r9), ReadMemory src buf,
+                            dump it -> bounded hits                      [3]
+    api_loop(sample, api)   BP on API (e.g. CryptDecrypt) -> run ->
                             capture args on hit -> bounded hits           [4]
 
 All return {"ok", "evidence": {...}, "error"} — evidence is the LLM-usable
@@ -275,6 +278,139 @@ def oep_by_esp(sample: str, xc: X64DbgClient | None = None,
 
 
 # ---------------------------------------------------------------------------
+# Scenario 3 — WriteProcessMemory BP loop + buffer dump
+# ---------------------------------------------------------------------------
+def _parse_reg(regs: str, name: str) -> int | None:
+    m = re.search(rf"\b{name}: (0x[0-9A-Fa-f]+)", regs, re.I)
+    if not m:
+        return None
+    try:
+        return int(m.group(1), 16)
+    except ValueError:
+        return None
+
+
+def _read_buf(xc: X64DbgClient, addr: int, size: int) -> bytes:
+    """Read target memory; the plugin may return hex text or base64."""
+    r = xc.read_memory(addr, min(size, 65536))
+    res = r.get("result") or {}
+    content = res.get("content") if isinstance(res, dict) else None
+    text = ""
+    if isinstance(content, list) and content:
+        text = content[0].get("text", "") or ""
+    elif isinstance(content, str):
+        text = content
+    # try: raw hex dump lines ("addr: bb bb ...") -> bytes
+    out = bytearray()
+    for line in text.splitlines():
+        m = re.match(r"\s*(?:0x)?[0-9A-Fa-f]+\s*:\s*((?:[0-9A-Fa-f]{2}\s*)+)", line)
+        if m:
+            try:
+                out.extend(bytes(int(b, 16) for b in m.group(1).split()))
+            except ValueError:
+                pass
+    if out:
+        return bytes(out)
+    # fall back: printable ASCII runs in the text
+    return text.encode("utf-8", errors="replace")
+
+
+def wpm_dump(sample: str, xc: X64DbgClient | None = None,
+             max_hits: int = 3, max_wait_s: int = 60,
+             dump_dir: str | None = None) -> dict:
+    """BP WriteProcessMemory -> on each hit decode x64 args
+    (rcx=hProcess, rdx=dst, r8=src, r9=size), ReadMemory the SRC buffer and
+    dump it. Bounded hits; evidence per hit with hex preview.
+
+    This is the injection/unpack primitive: what malware writes elsewhere.
+    """
+    xc = xc or X64DbgClient()
+    evidence: list[dict] = []
+    # NOTE: do NOT rely on auto-EP-break here — .NET/managed binaries run
+    # straight through `run` without pausing. Set the API BP immediately
+    # after load; its hit is the first (and only needed) pause.
+    try:
+        xc.call("DeleteAllBreakpoints")
+    except Exception:
+        pass
+    r = xc.load_binary(sample)
+    if not r.get("ok"):
+        return {"ok": False, "error": f"load failed: {r.get('error')}",
+                "evidence": evidence}
+    import time as _t
+    _t.sleep(2)
+    evidence.append({"label": "loaded", "sample": sample})
+
+    bp = xc.set_breakpoint("WriteProcessMemory")
+    if not bp.get("ok"):
+        return {"ok": False,
+                "error": f"bp WriteProcessMemory failed: {bp.get('error')}",
+                "evidence": evidence}
+    # verify registration: the plugin lists resolved addresses
+    # ("... kernel32.dll!"), not the symbol name — so count entries.
+    def _bp_count() -> int:
+        return _bp_text(xc).count("[Normal]")
+    if _bp_count() == 0:
+        return {"ok": False, "error": "WPM bp did not register",
+                "evidence": evidence}
+    evidence.append({"label": "wpm_bp_set"})
+
+    hits: list[dict] = []
+    for n in range(1, max_hits + 1):
+        xc.run()
+        deadline = time.time() + max_wait_s
+        rip = None
+        while time.time() < deadline:
+            time.sleep(2)
+            st = _parse_state(xc.get_state())
+            if st.get("isRunning") == "false":
+                rip = _rip(xc)
+                break
+        if rip is None:
+            evidence.append({"label": f"wpm_hit{n}_timeout"})
+            break
+        regs = _regs(xc)
+        hproc = _parse_reg(regs, "rcx")
+        dst = _parse_reg(regs, "rdx")
+        src = _parse_reg(regs, "r8")
+        size = _parse_reg(regs, "r9")
+        hit = {"hit": n, "rip": hex(rip), "hProcess": hex(hproc) if hproc else None,
+               "dst": hex(dst) if dst else None,
+               "src": hex(src) if src else None, "size": size}
+        if src and size and 0 < size <= 1_048_576:
+            buf = _read_buf(xc, src, size)
+            hit["buf_len"] = len(buf)
+            hit["buf_preview"] = buf[:64].hex(" ")
+            try:
+                txt = buf.decode("ascii")
+                if all(32 <= ord(c) < 127 or c in "\r\n\t" for c in txt[:64]):
+                    hit["buf_ascii"] = txt[:200]
+            except Exception:
+                pass
+            if dump_dir and buf:
+                try:
+                    from pathlib import Path as _P
+                    dp = _P(dump_dir)
+                    dp.mkdir(parents=True, exist_ok=True)
+                    fp = dp / f"wpm-hit{n}-{size}b.bin"
+                    fp.write_bytes(buf)
+                    hit["dumped"] = str(fp)
+                except Exception as e:
+                    hit["dump_error"] = str(e)[:100]
+        else:
+            hit["note"] = "src/size not decodable — regs snapshot kept"
+            hit["regs"] = regs[:600]
+        hits.append(hit)
+        evidence.append({"label": f"wpm_hit{n}", **hit})
+        # check target still alive before continuing
+        st = _parse_state(xc.get_state())
+        if "NO_TARGET" in _state_text(xc.get_state()):
+            break
+    return {"ok": True, "hits": hits, "api": "WriteProcessMemory",
+            "evidence": evidence}
+
+
+# ---------------------------------------------------------------------------
 # Scenario 4 — API BP loop (args capture)
 # ---------------------------------------------------------------------------
 def api_loop(sample: str, api: str, xc: X64DbgClient | None = None,
@@ -312,9 +448,10 @@ if __name__ == "__main__":
     from winre.remote_driver import flare_cfg
 
     ap = argparse.ArgumentParser(description="x64dbg debug-loop scenarios")
-    ap.add_argument("scenario", choices=["ep_break", "oep_by_esp", "api_loop"])
+    ap.add_argument("scenario", choices=["ep_break", "oep_by_esp", "wpm_dump", "api_loop"])
     ap.add_argument("sample", help="VM path e.g. C:\\samples\\foo.exe")
     ap.add_argument("--api", default="WriteProcessMemory")
+    ap.add_argument("--dump-dir", default=None, help="where to write dumped buffers (host path)")
     args = ap.parse_args()
 
     ok, info = ensure_mcp()
@@ -324,9 +461,11 @@ if __name__ == "__main__":
     host = flare_cfg()["host"]
     xc = X64DbgClient(base=f"http://{host}:9094")
     fn = {"ep_break": ep_break, "oep_by_esp": oep_by_esp,
-          "api_loop": api_loop}[args.scenario]
+          "wpm_dump": wpm_dump, "api_loop": api_loop}[args.scenario]
     if args.scenario == "api_loop":
         res = fn(args.sample, args.api, xc)
+    elif args.scenario == "wpm_dump":
+        res = fn(args.sample, xc, dump_dir=args.dump_dir)
     else:
         res = fn(args.sample, xc)
     import json as _json

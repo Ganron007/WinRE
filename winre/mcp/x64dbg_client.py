@@ -128,15 +128,22 @@ class X64DbgClient:
     def get_call_stack(self) -> dict:     return self.call("GetCallStack")
     def get_all_registers(self) -> dict:  return self.call("GetAllRegisters")
     def read_memory(self, address: int, size: int = 4096) -> dict:
-        return self.call("ReadMemory", {"address": address, "size": size})
+        # plugin schema declares address as string ("Hex address or expression")
+        return self.call("ReadMemory", {"address": hex(address), "size": size})
     def disassemble_at(self, address: int, count: int = 16) -> dict:
-        return self.call("Disassemble", {"address": address, "count": count})
+        # plugin schema declares address as string
+        return self.call("Disassemble", {"address": hex(address), "count": count})
     def set_breakpoint(self, target: str) -> dict:
         return self.call("SetBreakpoint", {"target": target})
-    def set_hw_breakpoint(self, address: int, dr_index: int = 0) -> dict:
-        return self.call("SetHardwareBreakpoint", {"address": address, "drIndex": dr_index})
+    def set_hw_breakpoint(self, address: int, dr_index: int = 0,
+                            bp_type: str = "x", size: int = 1) -> dict:
+        # plugin schema: {"address": string, "type": "x|w|r", "size": 1|2|4|8}
+        # (no drIndex — the plugin manages debug registers itself)
+        return self.call("SetHardwareBreakpoint",
+                         {"address": hex(address), "type": bp_type, "size": size})
     def delete_breakpoint(self, address: int) -> dict:
-        return self.call("DeleteBreakpoint", {"address": address})
+        # plugin schema: {"target": string}
+        return self.call("DeleteBreakpoint", {"target": hex(address)})
     def list_breakpoints(self) -> dict:   return self.call("ListBreakpoints")
     def run(self) -> dict:                return self.call("run")
     def pause(self) -> dict:              return self.call("PauseDebug")
@@ -144,7 +151,8 @@ class X64DbgClient:
     def step_over(self) -> dict:          return self.call("StepOver")
     def step_out(self) -> dict:           return self.call("StepOut")
     def run_to(self, address: int) -> dict:
-        return self.call("RunToAddress", {"address": address})
+        # plugin schema declares address as string
+        return self.call("RunToAddress", {"address": hex(address)})
     def wait_pause(self, timeout_ms: int = 30000) -> dict:
         return self.call("WaitForPause", {"timeout": timeout_ms})
     def eval(self, expression: str) -> dict:
