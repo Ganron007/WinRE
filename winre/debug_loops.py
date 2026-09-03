@@ -80,6 +80,13 @@ def _regs(xc: X64DbgClient) -> str:
     return ""
 
 
+def _bp_text(xc: X64DbgClient) -> str:
+    lb = xc.list_breakpoints()
+    lr = lb.get("result") or {}
+    lc = lr.get("content") or [{}]
+    return lc[0].get("text", "") if isinstance(lc, list) else ""
+
+
 def _pause_evidence(xc: X64DbgClient, label: str, rip: int | None) -> dict:
     return {
         "label": label,
@@ -97,6 +104,11 @@ def ep_break(sample: str, xc: X64DbgClient | None = None,
     """LoadBinary -> run -> pause at EP (x64dbg auto-EP-breaks)."""
     xc = xc or X64DbgClient()
     evidence: list[dict] = []
+    # x64dbg persists breakpoints across LoadBinary sessions — always start clean
+    try:
+        xc.call("DeleteAllBreakpoints")
+    except Exception:
+        pass
     r = xc.load_binary(sample)
     if not r.get("ok"):
         return {"ok": False, "error": f"load failed: {r.get('error')}",
@@ -175,11 +187,16 @@ def oep_by_section(sample: str, xc: X64DbgClient | None = None,
 
     # BP at original .text start (execute) — hardware BP works even before the
     # section is committed (software BP on reserved pages fails silently).
+    # Verify registration: the plugin may return ok without registering.
     hw = xc.set_hw_breakpoint(target, dr_index=0)
-    if not hw.get("ok"):
-        return {"ok": False, "error": f"hw bp {hex(target)} failed: {hw.get('error')}",
+    registered = hex(target).lower() in _bp_text(xc).lower()
+    evidence.append({"label": f"oep_hwbp_{hex(target)}", "bp": hex(target),
+                     "registered": registered})
+    if not hw.get("ok") or not registered:
+        return {"ok": False,
+                "error": f"hw bp {hex(target)} not registered "
+                         f"(ok={hw.get('ok')}, listed={registered})",
                 "evidence": evidence}
-    evidence.append({"label": f"oep_hwbp_{hex(target)}", "bp": hex(target)})
 
     xc.run()
     deadline = time.time() + max_wait_s
@@ -222,13 +239,23 @@ def oep_by_esp(sample: str, xc: X64DbgClient | None = None,
     esp = int(m.group(1), 16)
     evidence.append({"label": "esp_at_ep", "rsp": hex(esp)})
 
-    # hardware bp on ESP (write) — fires when the stub adjusts the stack
+    # hardware bp on ESP (write) — fires when the stub adjusts the stack.
+    # NOTE: the vendored plugin's SetHardwareBreakpoint returns ok but may
+    # silently fail to register — always verify via ListBreakpoints.
     hw = xc.call("SetHardwareBreakpoint",
                  {"address": esp, "drIndex": 0, "type": "access"})
     if not hw.get("ok"):
         # fall back to default (execute) if access-type unsupported
         hw = xc.set_hw_breakpoint(esp, dr_index=0)
-    evidence.append({"label": "esp_hwbp", "ok": bool(hw.get("ok"))})
+    bp_list = _bp_text(xc)
+    registered = hex(esp).lower() in bp_list.lower()
+    evidence.append({"label": "esp_hwbp", "ok": bool(hw.get("ok")),
+                     "registered": registered})
+    if not registered:
+        return {"ok": False,
+                "error": "hw bp did not register (plugin silent-drop); "
+                         "software-bp fallback required",
+                "evidence": evidence}
 
     xc.run()
     deadline = time.time() + max_wait_s
