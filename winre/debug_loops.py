@@ -300,19 +300,200 @@ def _read_buf(xc: X64DbgClient, addr: int, size: int) -> bytes:
         text = content[0].get("text", "") or ""
     elif isinstance(content, str):
         text = content
-    # try: raw hex dump lines ("addr: bb bb ...") -> bytes
+    # try: raw hex dump lines ("  ADDR: bb bb ... <ascii>") -> bytes.
+    # The ASCII column can start with hex-looking chars ("DE..."), so take
+    # at most 16 whitespace-separated 2-char hex tokens per line (the plugin
+    # prints 16 bytes/line) and stop at the first non-pair token.
     out = bytearray()
     for line in text.splitlines():
-        m = re.match(r"\s*(?:0x)?[0-9A-Fa-f]+\s*:\s*((?:[0-9A-Fa-f]{2}\s*)+)", line)
-        if m:
+        m = re.match(r"\s*(?:0x)?[0-9A-Fa-f]+\s*:\s*(.*)", line)
+        if not m:
+            continue
+        count = 0
+        for tok in m.group(1).split():
+            if count >= 16 or len(tok) != 2:
+                break
             try:
-                out.extend(bytes(int(b, 16) for b in m.group(1).split()))
+                out.append(int(tok, 16))
+                count += 1
             except ValueError:
-                pass
+                break
     if out:
         return bytes(out)
     # fall back: printable ASCII runs in the text
     return text.encode("utf-8", errors="replace")
+
+
+    if out:
+        return bytes(out)
+    # fall back: printable ASCII runs in the text
+    return text.encode("utf-8", errors="replace")
+
+
+def _read_u64(xc: X64DbgClient, addr: int) -> int | None:
+    """Read an 8-byte little-endian pointer from target memory."""
+    buf = _read_buf(xc, addr, 8)
+    if len(buf) < 8:
+        return None
+    return int.from_bytes(buf[:8], "little")
+
+
+def _read_u32(xc: X64DbgClient, addr: int) -> int | None:
+    """Read a 4-byte little-endian DWORD from target memory."""
+    buf = _read_buf(xc, addr, 4)
+    if len(buf) < 4:
+        return None
+    return int.from_bytes(buf[:4], "little")
+
+
+def crypt_dump(sample: str, xc: X64DbgClient | None = None,
+               max_hits: int = 2, max_wait_s: int = 60,
+               dump_dir: str | None = None) -> dict:
+    """BP CryptDecrypt -> on hit decode x64 args + stack args
+    (rcx=hKey, rdx=hHash, r8=Final, r9=dwFlags, [rsp+0x28]=pbData,
+    [rsp+0x30]=pdwDataLen), capture the CIPHERTEXT buffer, StepOut back to
+    the caller, re-read the buffer as PLAINTEXT. Bounded hits.
+
+    This is the crypto-unpack primitive: what malware decrypts in memory.
+    """
+    xc = xc or X64DbgClient()
+    evidence: list[dict] = []
+    # CryptDecrypt lives in advapi32/cryptsp, which is NOT mapped at load
+    # time — setting the BP immediately would silently drop. Flow: load,
+    # run (target executes its lead-in), wait until the crypto module is
+    # mapped, THEN set the BP (test harnesses sleep first for this reason).
+    try:
+        xc.call("DeleteAllBreakpoints")
+    except Exception:
+        pass
+    r = xc.load_binary(sample)
+    if not r.get("ok"):
+        return {"ok": False, "error": f"load failed: {r.get('error')}",
+                "evidence": evidence}
+    import time as _t
+    _t.sleep(2)
+    evidence.append({"label": "loaded", "sample": sample})
+
+    xc.run()
+    mod_found = False
+    mod_deadline = time.time() + 60
+    resumed_once = False
+    while time.time() < mod_deadline:
+        _t.sleep(2)
+        mm = xc.get_memory_map()
+        mr = mm.get("result") or {}
+        mc = mr.get("content") or [{}]
+        t = mc[0].get("text", "") if isinstance(mc, list) else ""
+        if "cryptsp" in t.lower() or "advapi32" in t.lower():
+            mod_found = True
+            break
+        st = _parse_state(xc.get_state())
+        if st.get("isRunning") == "false" and not resumed_once:
+            # paused at entry (native): DLLs are mapped now; resume so the
+            # target proceeds toward the crypto call while we keep watching
+            resumed_once = True
+            xc.run()
+        if "NO_TARGET" in _state_text(xc.get_state()):
+            break
+    if not mod_found:
+        return {"ok": False,
+                "error": "crypto module (cryptsp/advapi32) never mapped",
+                "evidence": evidence}
+    evidence.append({"label": "crypto_module_mapped"})
+
+    bp = xc.set_breakpoint("CryptDecrypt")
+    if not bp.get("ok"):
+        return {"ok": False,
+                "error": f"bp CryptDecrypt failed: {bp.get('error')}",
+                "evidence": evidence}
+
+    def _bp_count() -> int:
+        return _bp_text(xc).count("[Normal]")
+    if _bp_count() == 0:
+        return {"ok": False, "error": "CryptDecrypt bp did not register",
+                "evidence": evidence}
+    evidence.append({"label": "crypt_bp_set"})
+
+    hits: list[dict] = []
+    for n in range(1, max_hits + 1):
+        xc.run()
+        deadline = time.time() + max_wait_s
+        rip = None
+        exited = False
+        while time.time() < deadline:
+            time.sleep(2)
+            raw = _state_text(xc.get_state())
+            if "NO_TARGET" in raw or "isDebugging: false" in raw:
+                exited = True
+                break
+            st = _parse_state(xc.get_state())
+            if st.get("isRunning") == "false":
+                rip = _rip(xc)
+                break
+        if exited:
+            evidence.append({"label": f"crypt_hit{n}_exited"})
+            break
+        if rip is None:
+            evidence.append({"label": f"crypt_hit{n}_timeout"})
+            break
+        regs = _regs(xc)
+        hkey = _parse_reg(regs, "rcx")
+        final = _parse_reg(regs, "r8")
+        flags = _parse_reg(regs, "r9")
+        rsp = _parse_reg(regs, "rsp")
+        pb_data = _read_u64(xc, rsp + 0x28) if rsp else None
+        len_ptr = _read_u64(xc, rsp + 0x30) if rsp else None
+        data_len = _read_u32(xc, len_ptr) if len_ptr else None
+        hit = {"hit": n, "rip": hex(rip), "hKey": hex(hkey) if hkey else None,
+               "final": final, "flags": flags,
+               "pbData": hex(pb_data) if pb_data else None,
+               "data_len": data_len}
+        if pb_data and data_len and 0 < data_len <= 1_048_576:
+            cipher = _read_buf(xc, pb_data, data_len)
+            hit["cipher_len"] = len(cipher)
+            hit["cipher_preview"] = cipher[:64].hex(" ")
+        else:
+            hit["note"] = "pbData/len not decodable at entry"
+        # step out of CryptDecrypt back to caller, re-read as plaintext
+        xc.step_out()
+        _t.sleep(1)
+        # wait for the step-out to land back in caller code
+        so_deadline = time.time() + 20
+        while time.time() < so_deadline:
+            _t.sleep(1)
+            st2 = _parse_state(xc.get_state())
+            if st2.get("isRunning") == "false":
+                break
+        if pb_data and data_len and 0 < data_len <= 1_048_576:
+            # length may have been updated in place — re-read it
+            new_len = _read_u32(xc, len_ptr) if len_ptr else data_len
+            plain = _read_buf(xc, pb_data, new_len or data_len)
+            hit["plain_len"] = len(plain)
+            hit["plain_preview"] = plain[:64].hex(" ")
+            ascii_part = plain[:data_len]
+            try:
+                txt = ascii_part.decode("ascii")
+                if all(32 <= ord(c) < 127 or c in "\r\n\t" for c in txt):
+                    hit["plain_ascii"] = txt[:200]
+            except Exception:
+                pass
+            if dump_dir and plain:
+                try:
+                    from pathlib import Path as _P
+                    dp = _P(dump_dir)
+                    dp.mkdir(parents=True, exist_ok=True)
+                    fp = dp / f"crypt-hit{n}-{len(plain)}b.bin"
+                    fp.write_bytes(plain)
+                    hit["dumped"] = str(fp)
+                except Exception as e:
+                    hit["dump_error"] = str(e)[:100]
+        hits.append(hit)
+        evidence.append({"label": f"crypt_hit{n}", **hit})
+        st = _parse_state(xc.get_state())
+        if "NO_TARGET" in _state_text(xc.get_state()):
+            break
+    return {"ok": True, "hits": hits, "api": "CryptDecrypt",
+            "evidence": evidence}
 
 
 def wpm_dump(sample: str, xc: X64DbgClient | None = None,
@@ -448,7 +629,7 @@ if __name__ == "__main__":
     from winre.remote_driver import flare_cfg
 
     ap = argparse.ArgumentParser(description="x64dbg debug-loop scenarios")
-    ap.add_argument("scenario", choices=["ep_break", "oep_by_esp", "wpm_dump", "api_loop"])
+    ap.add_argument("scenario", choices=["ep_break", "oep_by_esp", "wpm_dump", "crypt_dump", "api_loop"])
     ap.add_argument("sample", help="VM path e.g. C:\\samples\\foo.exe")
     ap.add_argument("--api", default="WriteProcessMemory")
     ap.add_argument("--dump-dir", default=None, help="where to write dumped buffers (host path)")
@@ -461,10 +642,11 @@ if __name__ == "__main__":
     host = flare_cfg()["host"]
     xc = X64DbgClient(base=f"http://{host}:9094")
     fn = {"ep_break": ep_break, "oep_by_esp": oep_by_esp,
-          "wpm_dump": wpm_dump, "api_loop": api_loop}[args.scenario]
+          "wpm_dump": wpm_dump, "crypt_dump": crypt_dump,
+          "api_loop": api_loop}[args.scenario]
     if args.scenario == "api_loop":
         res = fn(args.sample, args.api, xc)
-    elif args.scenario == "wpm_dump":
+    elif args.scenario in ("wpm_dump", "crypt_dump"):
         res = fn(args.sample, xc, dump_dir=args.dump_dir)
     else:
         res = fn(args.sample, xc)
