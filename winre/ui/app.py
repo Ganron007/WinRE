@@ -58,12 +58,14 @@ def _read_json(path: Path) -> dict | None:
 
 
 def _pack_verdicts(root: Path) -> dict:
-    """quick/deep verdicts + deep source for a pack row (tolerant of gaps)."""
-    out: dict = {"quick": None, "deep": None, "source": None}
+    """quick/deep verdicts + deep source/engine for a pack row (tolerant)."""
+    out: dict = {"quick": None, "deep": None, "source": None, "engine": None}
     quick = _read_json(root / "quick" / "quick.json") or {}
     if isinstance(quick.get("verdict"), str):
         out["quick"] = quick["verdict"]
     deep = _read_json(root / "deep" / "deep.json") or {}
+    if isinstance(deep.get("engine"), str):
+        out["engine"] = deep["engine"]
     agent = deep.get("agent") if isinstance(deep.get("agent"), dict) else None
     if agent:
         v = agent.get("verdict")
@@ -224,6 +226,7 @@ def _pack_views(root: Path, files: dict) -> dict:
         "agent": agent if isinstance(agent, dict) else None,
         "history": hist[:60],
         "mcp": dj.get("mcp") if isinstance(dj, dict) else None,
+        "engine": dj.get("engine") if isinstance(dj, dict) else None,
         "meta": get("deep", "META.json"),
     }
 
@@ -386,7 +389,8 @@ def _current_stage(sha: str | None) -> str | None:
 
 
 def _run_pipeline_in_thread(sample_path: str, max_seconds: int,
-                            pesieve: bool, dry_llm: bool, dynamic: bool) -> None:
+                            pesieve: bool, dry_llm: bool, dynamic: bool,
+                            agentic_dbg: bool = False) -> None:
     """Run the remote pipeline in a background thread; store the result."""
     import contextlib
     import datetime
@@ -423,7 +427,7 @@ def _run_pipeline_in_thread(sample_path: str, max_seconds: int,
                 res = remote_driver.run_remote_pipeline(
                     Path(sample_path), max_seconds=max_seconds,
                     enable_pesieve=pesieve, enable_dynamic=dynamic,
-                    dry_llm=dry_llm)
+                    dry_llm=dry_llm, enable_agentic_dbg=agentic_dbg)
                 _run_state["sha"] = res["sha"]
                 _run_state["last"] = {"ok": True, "sha": res["sha"],
                                       "started": started,
@@ -478,12 +482,15 @@ def create_app() -> "Flask":
             pesieve = request.form.get("pesieve") == "on"
             dry_llm = request.form.get("dry_llm") == "on"
             dynamic = request.form.get("dynamic") == "on"
+            agentic_dbg = request.form.get("agentic_dbg") == "on"
             _run_state["sha"] = None
             _run_state["log"] = []
             _run_state["last"] = None
-            _run_pipeline_in_thread(sample, max_seconds, pesieve, dry_llm, dynamic)
+            _run_pipeline_in_thread(sample, max_seconds, pesieve, dry_llm,
+                                    dynamic, agentic_dbg)
             return jsonify({"ok": True, "msg": "pipeline started",
-                            "sample": sample, "dynamic": dynamic})
+                            "sample": sample, "dynamic": dynamic,
+                            "agentic_dbg": agentic_dbg})
         return render_template("run.html", running=_run_state["running"],
                                last=_run_state["last"])
 

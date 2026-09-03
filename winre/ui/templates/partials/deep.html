@@ -7,6 +7,11 @@
     {% if agent.get('source') == 'llm_judge' %}
       <span class="badge up">llm_judge</span>
     {% else %}<span class="badge warn">deterministic_fallback</span>{% endif %}
+    {% if d.engine %}
+      {% if d.engine == 'langgraph+dbg' %}
+        <span class="badge warn" style="margin-left:6px" title="agent had bounded x64dbg debug tools">langgraph+dbg</span>
+      {% else %}<span class="badge flat" style="margin-left:6px">{{ d.engine }}</span>{% endif %}
+    {% endif %}
     {% set v = agent.get('verdict') %}
     {% if v %}
       <span style="margin-left:8px; font-size:var(--tx-sm)">

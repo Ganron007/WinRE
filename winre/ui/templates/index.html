@@ -100,7 +100,7 @@
               {% set dyn = (p.audit.checks|selectattr('stage','equalto','dynamic')|first) if p.audit else none %}
               {% if p.audit and p.audit.truly_green %}<span class="badge up">green</span>
               {% elif p.audit %}<span class="badge {{ 'warn' if dyn and dyn.ran else 'flat' }}">
-                {{ 'static+dyn' if dyn and dyn.ran else 'static' }}</span>
+                {{ 'static+dyn' if dyn and dyn.ran else 'static' }}{{ '+dbg' if p.verdicts.engine == 'langgraph+dbg' }}</span>
               {% else %}<span class="badge flat">no audit</span>{% endif %}
             </a>
             {% else %}

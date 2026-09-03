@@ -380,7 +380,7 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
 
     pack.write("deep", "deep.json", out)
     pack.write("deep", "META.json", stage_result(
-        "deep", True, summary=f"mcp={mcp} engine=langgraph fallback={fallback}",
+        "deep", True, summary=f"mcp={mcp} engine={engine} fallback={fallback}",
         fallback=fallback, tool_failures=failures,
         elapsed_s=round(time.time() - t0, 1)))
     return {"ok": True, "fallback": fallback, "failures": failures, "mcp": mcp}
@@ -388,11 +388,15 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
 
 def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
                         enable_pesieve: bool = False, enable_dynamic: bool = False,
-                        dry_llm: bool = False) -> dict:
+                        dry_llm: bool = False,
+                        enable_agentic_dbg: bool = False) -> dict:
     """Control-plane pipeline driver: SSH/HTTP to the VM + local LLM + local audit.
 
     DEFAULT = static-only (quick + deep + yara + report + audit). Dynamic is
     opt-in (enable_dynamic) and runs LAST, segregated, static_yara_wins.
+    enable_agentic_dbg is independent: it gives the deep-dive agent the
+    bounded x64dbg debug-loop tools (engine langgraph+dbg), without running
+    the detonation phase.
     """
     from .evidence import sha256_file
     from . import audit as audit_mod
@@ -416,7 +420,7 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
     # ---- STATIC phase (quick + deep over SSH/HTTP) ----
     results["quick"] = remote_quick(sample.name, pack, cfg)
     results["deep"] = remote_deep(sample.name, pack, cfg, dry_llm, sha=sha,
-                                  dynamic=enable_dynamic)
+                                  dynamic=enable_agentic_dbg)
 
     # ---- DYNAMIC phase (segregated, opt-in, runs LAST after static) ----
     if enable_dynamic:
@@ -455,6 +459,9 @@ def main() -> int:
     ap.add_argument("--pesieve", action="store_true")
     ap.add_argument("--dynamic", action="store_true",
                     help="enable segregated dynamic phase (opt-in)")
+    ap.add_argument("--agentic-dbg", action="store_true",
+                    help="give the deep-dive agent bounded x64dbg tools "
+                         "(engine langgraph+dbg; no detonation)")
     ap.add_argument("--dry-llm", action="store_true")
     args = ap.parse_args()
     if not args.sample.is_file():
@@ -463,9 +470,12 @@ def main() -> int:
     import os as _os
     enable_dynamic = args.dynamic or _os.environ.get(
         "WINRE_ENABLE_DYNAMIC", "").strip().lower() in ("1", "true", "yes")
+    enable_agentic_dbg = args.agentic_dbg or _os.environ.get(
+        "WINRE_AGENTIC_DBG", "").strip().lower() in ("1", "true", "yes")
     res = run_remote_pipeline(args.sample, max_seconds=args.max_seconds,
                               enable_pesieve=args.pesieve,
-                              enable_dynamic=enable_dynamic, dry_llm=args.dry_llm)
+                              enable_dynamic=enable_dynamic, dry_llm=args.dry_llm,
+                              enable_agentic_dbg=enable_agentic_dbg)
     return 0 if res["results"]["audit"]["truly_green"] else 1
 
 

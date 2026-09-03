@@ -76,14 +76,21 @@
         </div>
 
         <div style="margin-top:10px">
-          <label class="check"><input type="checkbox" name="dry_llm" checked>
+          <label class="check"><input type="checkbox" name="dry_llm" id="dryChk" checked>
             dry-LLM — no LLM call (deep stays deterministic)</label>
+          <label class="check"><input type="checkbox" name="agentic_dbg" id="dbgChk">
+            <span style="color:var(--warn)">Agentic debugging</span>
+            <span class="muted" style="font-size:var(--tx-xs)">(deep agent gets bounded x64dbg tools — OEP/dump/decrypt; no detonation)</span></label>
           <label class="check"><input type="checkbox" id="dynChk" name="dynamic">
             <span style="color:var(--warn)">Enable dynamic detonation</span>
             <span class="muted" style="font-size:var(--tx-xs)">(opt-in, last phase)</span></label>
           <label class="check" id="pesLbl" style="margin-left:26px" hidden>
             <input type="checkbox" name="pesieve"> also run pe-sieve mid-detonation</label>
         </div>
+
+        <p style="font-size:var(--tx-sm); margin:8px 0 0">
+          deep mode: <span class="badge flat" id="deepMode">deterministic</span>
+        </p>
 
         <div id="dynWarn" class="notice warn" hidden>
           <b>Contamination warning.</b> Dynamic runs the sample on the FlareVM
@@ -103,6 +110,7 @@
   <p style="font-size:var(--tx-sm); color:var(--tx-2); margin:6px 0 0">
     <span class="badge flat">static</span>
     intake → quick → deep (LangGraph agent) → yara → report → audit
+    &nbsp;&nbsp;<span class="badge warn">+agentic_dbg</span> agent gets x64dbg tools (debug, no detonation)
     &nbsp;&nbsp;<span class="badge warn">+dynamic</span> detonation, segregated last phase
   </p>
 
@@ -110,10 +118,24 @@
     const chk = document.getElementById('dynChk');
     const warn = document.getElementById('dynWarn');
     const pes = document.getElementById('pesLbl');
+    const dbg = document.getElementById('dbgChk');
+    const dry = document.getElementById('dryChk');
+    const mode = document.getElementById('deepMode');
+    function refreshMode() {
+      // deep engine preview: dry-LLM => deterministic; else langgraph(+dbg)
+      let m = 'langgraph', cls = 'up';
+      if (dry.checked) { m = 'deterministic'; cls = 'flat'; }
+      else if (dbg.checked) { m = 'langgraph+dbg'; cls = 'warn'; }
+      mode.textContent = m;
+      mode.className = 'badge ' + cls;
+    }
     chk.addEventListener('change', () => {
       warn.hidden = !chk.checked;
       pes.hidden = !chk.checked;
     });
+    dbg.addEventListener('change', refreshMode);
+    dry.addEventListener('change', refreshMode);
+    refreshMode();
   </script>
 
   {% if last %}
