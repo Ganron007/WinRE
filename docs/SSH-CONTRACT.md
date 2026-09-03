@@ -1,15 +1,23 @@
 # WinRE SSH Contract — for RevEng / RevAI callers
 
-> **Audience:** RevEng (`192.168.77.41`) and RevAI pipelines invoking WinRE
-> (`192.168.77.42`, FlareVM) over SSH for static + dynamic analysis.
+> **Audience:** sibling pipelines (e.g. RevEng, RevAI) invoking WinRE
+> (FlareVM) over SSH for static + dynamic analysis.
 > **Status:** verified live; the SSH-exec path is the most-tested surface.
-> **Internal:** contains lab IPs — do not publish.
+
+Conventions used below (no lab specifics committed — set these per lab):
+
+| Placeholder | Meaning | Example |
+|---|---|---|
+| `<FLARE_HOST>` | FlareVM SSH host/IP | set via `FLARE_HOST` env |
+| `<FLARE_USER>` | SSH user on FlareVM | set via `FLARE_USER` env |
+| `$KEY` | path to your lab SSH private key | set via `FLARE_SSH_KEY` env |
+| `<sha>` | lowercase hex sha256 of the sample | |
 
 ## 0. Transport baseline
 
 | Item | Value |
 |---|---|
-| Flare host | `192.168.77.42`, user `FLARE-VM`, SSH port 22 |
+| Flare host | `<FLARE_HOST>`, user `<FLARE_USER>`, SSH port 22 |
 | Auth | key only, `BatchMode=yes` (no passwords, no prompts) |
 | Remote shell | `powershell -NoProfile -ExecutionPolicy Bypass -File <script>` |
 | Python on Flare | `C:\Python313\python.exe` |
@@ -29,23 +37,23 @@ Two equivalent entry points. Both write `logs/<sha>/dynamic/` (+ `META.json`).
 
 ### Option A — orchestrator `--mode ssh` (recommended)
 
-Run **on the caller** (Remnux/RevAI host). The orchestrator scps the sample
+Run **on the caller** host. The orchestrator scps the sample
 to Flare, runs the job remotely, pulls `artifacts.zip` back and unzips it.
 
 Caller-side prerequisites:
 - `orchestrator.py` present (copy from WinRE `winre/`, or `git clone` WinRE)
-- A session resolvable by `load_session(sha)`: either RevEng `v2_lib` on
-  `sys.path`, or `SESSIONS_DIR/<sha>.json` (override via `REVENG_SESSIONS_DIR`)
-  containing `{"sample_path": "<local path>"}` — the sample **must exist
-  locally**; it is scp'd to Flare as `C:\samples\<sha>\sample.exe`
-- Env: `FLARE_HOST` (default `192.168.77.42`), `FLARE_USER` (default
-  `FLARE-VM`), `FLARE_SSH_KEY` (default `~/.ssh/cadre-77.42-key`),
-  `FLARE_SSH_PORT` (default `22`)
+- A session resolvable by `load_session(sha)`: either the sibling pipeline's
+  session library on `sys.path`, or `SESSIONS_DIR/<sha>.json` (override via
+  `REVENG_SESSIONS_DIR`) containing `{"sample_path": "<local path>"}` — the
+  sample **must exist locally**; it is scp'd to Flare as `C:\samples\<sha>\sample.exe`
+- Env: `FLARE_HOST`, `FLARE_USER`, `FLARE_SSH_KEY`, `FLARE_SSH_PORT`
+  (defaults suit the reference lab; override per deployment)
 - Output lands in `LOGS_DIR/<sha>/dynamic/` (override via `REVENG_LOGS_DIR`)
 
 ```bash
-# on Remnux / RevAI host
-export FLARE_SSH_KEY=~/.ssh/cadre-77.42-key
+# on the caller host
+export FLARE_HOST=<FLARE_HOST> FLARE_USER=<FLARE_USER>
+export FLARE_SSH_KEY=$KEY
 export REVENG_LOGS_DIR=/opt/samples/logs
 export REVENG_SESSIONS_DIR=/opt/samples/sessions
 python3 winre/orchestrator.py <sha256> --mode ssh --max-seconds 60
@@ -63,13 +71,13 @@ python3 winre/orchestrator.py <sha256> --mode ssh --dry-run   # plan only
 
 ```bash
 # 1. upload sample
-scp -i $KEY sample.exe FLARE-VM@192.168.77.42:C:/samples/<sha>/sample.exe
+scp -i $KEY sample.exe <FLARE_USER>@<FLARE_HOST>:C:/samples/<sha>/sample.exe
 # 2. run the job (writes C:\samples\<sha>\out\* + artifacts.zip on Flare)
-ssh -i $KEY FLARE-VM@192.168.77.42 \
+ssh -i $KEY <FLARE_USER>@<FLARE_HOST> \
   "powershell -NoProfile -ExecutionPolicy Bypass -File C:/WinRE/winre/flare_dynamic_job.ps1 \
    -Sha256 <sha> -SamplePath C:/samples/<sha>/sample.exe -MaxSeconds 60 [-EnablePeSieve]"
 # 3. pull artifacts
-scp -i $KEY FLARE-VM@192.168.77.42:C:/samples/<sha>/artifacts.zip ./logs/<sha>/dynamic/
+scp -i $KEY <FLARE_USER>@<FLARE_HOST>:C:/samples/<sha>/artifacts.zip ./logs/<sha>/dynamic/
 ```
 
 ## 2. Artifact contract (`logs/<sha>/dynamic/`)
@@ -102,16 +110,16 @@ snapshot after pulling artifacts. No exceptions.
 
 ```bash
 # Ghidra (headless + post-script; ~14s; SQL via env var, never bare argv)
-ssh -i $KEY FLARE-VM@192.168.77.42 \
+ssh -i $KEY <FLARE_USER>@<FLARE_HOST> \
   "C:\Python313\python.exe C:\WinRE\tools\flare_ghidra_sql.py query '@funcs' --file C:\samples\<sha>.exe --json"
 # IDA (auto-creates .i64 on first run via idat -A; ~4min cold, ~14s cached)
-ssh -i $KEY FLARE-VM@192.168.77.42 \
+ssh -i $KEY <FLARE_USER>@<FLARE_HOST> \
   "C:\Python313\python.exe C:\WinRE\tools\flarevm_ida_query.py C:\samples\<sha>.exe.i64 'SELECT ...' --json"
 # Malcat triage
-ssh -i $KEY FLARE-VM@192.168.77.42 \
+ssh -i $KEY <FLARE_USER>@<FLARE_HOST> \
   "C:\Python313\python.exe C:\WinRE\tools\malcat_win.py C:\samples\<sha>.exe --profile triage --json"
 # Unified health
-ssh -i $KEY FLARE-VM@192.168.77.42 \
+ssh -i $KEY <FLARE_USER>@<FLARE_HOST> \
   "C:\Python313\python.exe C:\WinRE\tools\flarevm_toolset.py health"
 ```
 
@@ -126,7 +134,7 @@ Notes:
 
 ## 4. MCP over HTTP (cross-VM reachability)
 
-| Server | Port | Bind | Reachable from RevEng VM? |
+| Server | Port | Bind | Reachable from caller VM? |
 |---|---|---|---|
 | x64dbg-MCP | 9094 | `0.0.0.0` | **Yes, direct** |
 | windbg_bridge | 9096 | `0.0.0.0` | **Yes, direct** |
@@ -136,7 +144,7 @@ Notes:
 | mcp-windbg | 9097 | `127.0.0.1` | No — SSH-exec CLI or `ssh -L` tunnel |
 
 Rule: **SSH-exec CLIs are the primary contract; direct HTTP only for x64dbg.**
-Tunnel example: `ssh -L 19300:127.0.0.1:19300 -i $KEY FLARE-VM@192.168.77.42`.
+Tunnel example: `ssh -L 19300:127.0.0.1:19300 -i $KEY <FLARE_USER>@<FLARE_HOST>`.
 
 **Servers are not always up.** Nothing listens after a fresh boot until the
 Startup launcher fires (autologon) or an operator runs
@@ -161,8 +169,6 @@ from the caller to bring it up on demand, or start it first:
 
 ## References
 
-- `docs/DYNAMIC-ORCHESTRATOR.md` (job internals), `docs/internal/ARCHITECTURE.md`
-  (artifact schema), `docs/internal/VM-ACCESS.md` (hosts/keys),
-  `docs/internal/TOOL-INVENTORY.md` (verified tool paths)
+- `docs/DYNAMIC-ORCHESTRATOR.md` (job internals), `docs/PIPELINE.md` (workflow)
 - Code: `winre/orchestrator.py --help`, `winre/mcp/x64dbg_manager.py`,
   `winre/agentic.py::_run_remote_py` (base64-arg pattern)
