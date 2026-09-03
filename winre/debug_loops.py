@@ -698,18 +698,21 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
                      "dump": dr.get("result")})
 
     # 3+4. static re-analysis of BOTH images + compare (Malcat MCP).
-    # Malcat MCP binds on the VM — address it explicitly, never the
-    # localhost default (this code runs on the control-plane host).
+    # Malcat MCP binds localhost on the VM — the SSH-exec bridge is the
+    # only control-plane-safe transport. FAIL CLOSED: a vacuous compare of
+    # two empty results previously passed as ok (fixed 2026-09-03).
     try:
-        from winre.mcp import MalcatClient
-        try:
-            from winre.remote_driver import flare_cfg
-            mhost = flare_cfg()["host"]
-        except Exception:
-            mhost = "192.168.77.42"
-        mc = MalcatClient(base=f"http://{mhost}:9009/mcp")
-        orig = mc.analyse_file(sample).get("result") or {}
-        new = mc.analyse_file(dump_path).get("result") or {}
+        from winre.remote_driver import malcat_remote_call
+        ro = malcat_remote_call("analyse_file", {"path": sample})
+        rn = malcat_remote_call("analyse_file", {"path": dump_path})
+        if not ro.get("ok") or not rn.get("ok"):
+            return {"ok": False,
+                    "error": f"malcat re-analysis failed: "
+                             f"orig={ro.get('error')} new={rn.get('error')}",
+                    "oep": hex(oep), "dump_path": dump_path,
+                    "evidence": evidence}
+        orig = ro.get("result") or {}
+        new = rn.get("result") or {}
     except Exception as e:
         return {"ok": False, "error": f"malcat re-analysis failed: {e}",
                 "oep": hex(oep), "dump_path": dump_path,

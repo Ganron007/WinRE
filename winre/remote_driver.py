@@ -34,6 +34,7 @@ import sys
 import time
 from pathlib import Path
 
+from .envfile import load_dotenv  # noqa: F401  (ensures .env is loaded)
 from .evidence import EvidencePack, stage_result
 
 REPO = Path(__file__).resolve().parents[1]
@@ -287,11 +288,79 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     return stage_meta
 
 
+def malcat_remote_call(name: str, arguments: dict | None = None,
+                       timeout: int = 180,
+                       method: str = "tools/call") -> dict:
+    """Call the VM's Malcat MCP (localhost-bound :9009) via SSH-exec.
+
+    Control-plane-safe transport: the JSON-RPC body is base64'd into a
+    `powershell -EncodedCommand` (zero nested-quoting), POSTed to
+    http://127.0.0.1:9009/mcp ON the VM, raw JSON printed to stdout.
+    Returns the MalcatClient shape: {"ok","result","error","name"}.
+    method="tools/list" ignores name/arguments (cheap liveness probe).
+    """
+    import base64
+    import json as _json
+    cfg = flare_cfg()
+    if method == "tools/list":
+        payload: dict = {"jsonrpc": "2.0", "id": 1, "method": method,
+                         "params": {}}
+    else:
+        payload = {"jsonrpc": "2.0", "id": 1, "method": method,
+                   "params": {"name": name, "arguments": arguments or {}}}
+    body = _json.dumps(payload)
+    ps = (
+        "$ErrorActionPreference='Stop';"
+        f"$t={int(timeout)};"
+        "$b=[Text.Encoding]::Utf8.GetString([Convert]::FromBase64String('"
+        + base64.b64encode(body.encode("utf-8")).decode("ascii") + "'));"
+        "$r=Invoke-RestMethod -Uri http://127.0.0.1:9009/mcp -Method Post "
+        "-ContentType 'application/json' -Body $b -TimeoutSec $t;"
+        "$r|ConvertTo-Json -Depth 16 -Compress"
+    )
+    enc = base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
+    try:
+        p = ssh_run(cfg, f"powershell -NoProfile -EncodedCommand {enc}",
+                    timeout=timeout + 60)
+    except Exception as e:
+        return {"ok": False, "error": f"ssh-exec malcat failed: {e}",
+                "result": None, "name": name}
+    if p.returncode != 0:
+        return {"ok": False,
+                "error": f"malcat remote exit={p.returncode}: "
+                         f"{(p.stderr or '')[:300]}",
+                "result": None, "name": name}
+    try:
+        raw = _json.loads(p.stdout)
+    except Exception as e:
+        return {"ok": False,
+                "error": f"malcat remote non-JSON: {e}: "
+                         f"{(p.stdout or '')[:200]}",
+                "result": None, "name": name}
+    if isinstance(raw, dict) and "error" in raw:
+        return {"ok": False, "error": str(raw["error"]),
+                "result": raw, "name": name}
+    res = raw.get("result") if isinstance(raw, dict) else raw
+    return {"ok": True, "error": None, "result": res, "name": name}
+
+
+def malcat_remote_is_up(timeout: int = 20) -> bool:
+    """SSH-exec probe: is Malcat MCP answering on the VM's localhost?"""
+    r = malcat_remote_call("", None, timeout=timeout, method="tools/list")
+    if not r.get("ok"):
+        return False
+    tools = ((r.get("result") or {}).get("tools")) or []
+    return len(tools) > 0
+
+
 def remote_mcp_health(cfg: dict) -> dict:
-    """Probe the VM's MCP servers over the lab net (HTTP, from this host)."""
+    """Probe the VM's MCP servers.
+
+    x64dbg :9094 binds 0.0.0.0 — direct HTTP from this host. Malcat :9009
+    and WinDbg :9097 bind 127.0.0.1 on the VM — those go via SSH-exec.
+    """
     out = {}
-    for name, url in (("x64dbg", "http://{}:9094/"), ("malcat", "http://{}:9009/mcp"),
-                      ("windbg", "http://{}:9097/mcp/")):
+    for name, url in (("x64dbg", "http://{}:9094/"),):
         import urllib.request
         try:
             req = urllib.request.Request(url.format(cfg["host"]), data=b"{}",
@@ -300,6 +369,15 @@ def remote_mcp_health(cfg: dict) -> dict:
                 out[name] = resp.status == 200
         except Exception:
             out[name] = False
+    try:
+        out["malcat"] = malcat_remote_is_up()
+    except Exception:
+        out["malcat"] = False
+    try:
+        from winre.mcp import WinDbgMCPClient
+        out["windbg"] = WinDbgMCPClient(base=f"http://{cfg['host']}:9097/mcp/").is_up()
+    except Exception:
+        out["windbg"] = False
     return out
 
 

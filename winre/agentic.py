@@ -30,6 +30,7 @@ sys.path.insert(0, str(REPO))
 
 from pydantic import BaseModel, Field  # noqa: E402
 
+from .envfile import load_dotenv  # noqa: F401  (ensures .env is loaded)
 from winre import remote_driver  # noqa: E402
 from winre.evidence import EvidencePack  # noqa: E402
 
@@ -150,35 +151,33 @@ class ToolRegistry:
                                    self.remote_sample, sql, timeout=120)
 
     def malcat_analyze(self, path: str | None = None) -> dict:
-        """Malcat analysis over HTTP MCP (:9009) — metadata/anomalies/yara."""
+        """Malcat analysis (:9009, localhost-bound on VM — SSH-exec bridge)."""
         try:
-            from winre.mcp import MalcatClient
-            host = self.cfg["host"]
-            mc = MalcatClient(base=f"http://{host}:9009/mcp")
-            r = mc.analyse_file(path or self.remote_sample)
-            return r.get("result") or {"error": r.get("error")}
+            return self._malcat("analyse_file",
+                                {"path": path or self.remote_sample})
         except Exception as e:
             return {"error": str(e)}
+
+    def _malcat(self, tool: str, args: dict) -> dict:
+        """Malcat MCP via SSH-exec bridge (port is localhost-bound on VM)."""
+        from winre.remote_driver import malcat_remote_call
+        r = malcat_remote_call(tool, args)
+        return r.get("result") or {"error": r.get("error")}
 
     def malcat_functions(self, count: int = 10) -> dict:
         """Top-N most interesting functions (Malcat heuristics)."""
         try:
-            from winre.mcp import MalcatClient
-            host = self.cfg["host"]
-            mc = MalcatClient(base=f"http://{host}:9009/mcp")
-            r = mc.fns_top_list(self.remote_sample, count=count)
-            return r.get("result") or {"error": r.get("error")}
+            return self._malcat("fns_top_list",
+                                {"path": self.remote_sample, "count": count})
         except Exception as e:
             return {"error": str(e)}
 
     def malcat_decompile(self, address: int) -> dict:
         """Decompile one function by address (Malcat MCP)."""
         try:
-            from winre.mcp import MalcatClient
-            host = self.cfg["host"]
-            mc = MalcatClient(base=f"http://{host}:9009/mcp")
-            r = mc.fn_decompile(self.remote_sample, address=address)
-            return r.get("result") or {"error": r.get("error")}
+            return self._malcat("fn_decompile",
+                                {"path": self.remote_sample,
+                                 "address": address})
         except Exception as e:
             return {"error": str(e)}
 
