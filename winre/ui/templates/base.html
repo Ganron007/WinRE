@@ -26,9 +26,9 @@
             onclick="togglePalette(true)" title="jump to pack">
       ⌘K <span class="muted">jump</span>
     </button>
-    <span class="api-health {{ 'up' if health and health.ssh else 'down' }}"
+    <span class="api-health {{ 'up' if health and health.ssh else 'down' }}" id="pill-flare"
           data-tip="{{ 'FlareVM reachable' if health and health.ssh else 'FlareVM unreachable' }}">
-      <span class="dot"></span>{{ 'Flare' if health and health.ssh else 'DOWN' }}
+      <span class="dot"></span><span id="pill-flare-text">{{ 'Flare' if health and health.ssh else 'DOWN' }}</span>
     </span>
   </div>
 </header>
@@ -73,6 +73,57 @@
   });
   document.getElementById('paletteInput').addEventListener('input', e => render(e.target.value));
   window.togglePalette = togglePalette;
+})();
+
+// Live health: pages render instantly from cached health; refresh badges
+// from /health (which probes + warms the cache) without blocking paint.
+(function(){
+  function setBadge(el, up, upText, downText) {
+    if (!el) return;
+    el.classList.remove('up', 'down');
+    el.classList.add(up ? 'up' : 'down');
+    const t = el.querySelector('[data-htext]') || el;
+    // keep inner dot span intact for api-health pills
+    const label = el.querySelector('.pill-label');
+    if (label) { label.textContent = up ? upText : downText; }
+    else if (el.id === 'pill-flare') {
+      const txt = document.getElementById('pill-flare-text');
+      if (txt) txt.textContent = up ? 'Flare' : 'DOWN';
+    }
+  }
+  async function refreshHealth(){
+    try {
+      const r = await fetch('/health');
+      const h = await r.json();
+      const pill = document.getElementById('pill-flare');
+      if (pill) {
+        pill.classList.remove('up', 'down');
+        pill.classList.add(h.ssh ? 'up' : 'down');
+        const txt = document.getElementById('pill-flare-text');
+        if (txt) txt.textContent = h.ssh ? 'Flare' : 'DOWN';
+      }
+      document.querySelectorAll('[data-mcp]').forEach(el => {
+        const up = !!(h.mcp && h.mcp[el.dataset.mcp]);
+        el.classList.remove('up', 'down', 'danger', 'accent');
+        el.classList.add(up ? 'up' : 'down');
+        if (el.hasAttribute('data-mcp-text')) {
+          // stat-value flavor uses accent/danger + UP/DOWN text
+          el.classList.remove('up', 'down');
+          el.classList.add(up ? 'accent' : 'danger');
+          el.textContent = up ? 'UP' : 'DOWN';
+        }
+      });
+      document.querySelectorAll('[data-llm]').forEach(el => {
+        const up = !!h.llm;
+        el.classList.remove('up', 'down', 'warn', 'accent');
+        el.classList.add(up ? 'up' : 'warn');
+        if (el.hasAttribute('data-llm-text')) el.textContent = up ? 'ready' : 'off';
+      });
+    } catch (e) { /* stay with server-rendered values */ }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', refreshHealth);
+  } else { refreshHealth(); }
 })();
 </script>
 </body>

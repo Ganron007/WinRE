@@ -76,7 +76,7 @@
               </div>
               <div class="stat">
                 <div class="stat-label">LLM</div>
-                <div class="stat-value {{ 'accent' if health.llm else 'warn' }}"
+                <div class="stat-value {{ 'accent' if health.llm else 'warn' }}" data-llm data-llm-text
                      style="font-size:var(--tx-md)">{{ 'ready' if health.llm else 'off' }}</div>
               </div>
             </div>
@@ -114,9 +114,9 @@
         <div class="board">
           <div class="board-head"><h3>MCP plane</h3></div>
           <div class="board-body" style="display:flex; gap:6px; flex-wrap:wrap; padding:var(--sp-3)">
-            <span class="badge {{ 'up' if health.mcp.get('x64dbg') else 'down' }}">x64dbg :9094</span>
-            <span class="badge {{ 'up' if health.mcp.get('malcat') else 'down' }}">Malcat :9009</span>
-            <span class="badge {{ 'up' if health.mcp.get('windbg') else 'down' }}">WinDbg :9097</span>
+            <span class="badge {{ 'up' if health.mcp.get('x64dbg') else 'down' }}" data-mcp="x64dbg">x64dbg :9094</span>
+            <span class="badge {{ 'up' if health.mcp.get('malcat') else 'down' }}" data-mcp="malcat">Malcat :9009</span>
+            <span class="badge {{ 'up' if health.mcp.get('windbg') else 'down' }}" data-mcp="windbg">WinDbg :9097</span>
           </div>
         </div>
       </div>

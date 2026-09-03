@@ -267,6 +267,39 @@ def _pack_views(root: Path, files: dict) -> dict:
 
 _vm_health_cache: dict = {"t": 0.0, "data": None}
 _VM_HEALTH_TTL = 20.0  # seconds — reloads are instant; health refreshes slowly
+_llm_cache: dict = {"t": 0.0, "value": False}
+_LLM_TTL = 120.0  # LLM endpoint rarely changes mid-session; avoid a chat call per refresh
+
+# (name, url, timeout_s): LAN servers answer in ms; dead ports cost one
+# TCP retransmit (~2s) as the SYN is dropped — keep the cap tight.
+_MCP_ENDPOINTS = (("x64dbg", "http://{}:9094/", 1.5),
+                  ("malcat", "http://{}:9009/mcp", 1.5),
+                  ("windbg", "http://{}:9097/mcp/", 1.5))
+
+
+def _llm_cached() -> bool:
+    now = time.time()
+    if now - _llm_cache["t"] < _LLM_TTL:
+        return _llm_cache["value"]
+    try:
+        from winre import llm_client
+        v = bool(llm_client.available())
+    except Exception:
+        v = False
+    _llm_cache.update({"t": now, "value": v})
+    return v
+
+
+def _vm_health_cached() -> dict:
+    """Last known health, or neutral defaults — never probes, never blocks.
+
+    Used for instant page renders; the browser then fetches /health (which
+    probes + warms the cache) and updates badges via JS.
+    """
+    if _vm_health_cache["data"]:
+        return _vm_health_cache["data"]
+    return {"ssh": False, "error": None, "mcp": {}, "llm": False,
+            "logs_dir": str(LOGS_DIR), "stale": True}
 
 
 def _vm_health() -> dict:
@@ -295,24 +328,32 @@ def _vm_health() -> dict:
     def _probe_mcp():
         cfg = flare_cfg()
         mcp: dict = {}
-        for name, url in (("x64dbg", "http://{}:9094/"),
-                          ("malcat", "http://{}:9009/mcp"),
-                          ("windbg", "http://{}:9097/mcp/")):
+        lock = threading.Lock()
+
+        def _one(name: str, url: str, timeout_s: float):
             try:
                 req = urllib.request.Request(url.format(cfg["host"]), data=b"{}",
                                              method="POST")
-                with urllib.request.urlopen(req, timeout=4) as resp:
-                    mcp[name] = resp.status == 200
+                with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                    ok = resp.status == 200
             except Exception:
-                mcp[name] = False
+                ok = False
+            with lock:
+                mcp[name] = ok
+
+        ts = [threading.Thread(target=_one, args=(n, u, t), daemon=True)
+              for n, u, t in _MCP_ENDPOINTS]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(timeout=3)
+        # anything still missing after the cap counts as down
+        for n, _, _ in _MCP_ENDPOINTS:
+            mcp.setdefault(n, False)
         results["mcp"] = mcp
 
     def _probe_llm():
-        try:
-            from winre import llm_client
-            results["llm"] = llm_client.available()
-        except Exception:
-            results["llm"] = False
+        results["llm"] = _llm_cached()
 
     threads = [threading.Thread(target=f, daemon=True) for f in
                (_probe_ssh, _probe_mcp, _probe_llm)]
@@ -405,15 +446,19 @@ def create_app() -> "Flask":
 
     @app.context_processor
     def _inject_health():
-        """Give every template the VM/MCP health for the topbar pill."""
-        return {"health": _vm_health()}
+        """Instant health for every template (cached, never probes).
+
+        The browser fetches /health after paint and updates badges via JS,
+        so navigation is never blocked by probe latency.
+        """
+        return {"health": _vm_health_cached()}
 
     @app.route("/")
     def index():
         pk = _packs()
         greens = sum(1 for p in pk if p.get("audit") and p["audit"].get("truly_green"))
         return render_template("index.html", packs=pk, greens=greens,
-                               health=_vm_health(),
+                               health=_vm_health_cached(),
                                state={k: _run_state[k] for k in
                                       ("running", "last")})
 
@@ -658,7 +703,7 @@ def create_app() -> "Flask":
 
     @app.route("/mcp")
     def mcp():
-        return render_template("mcp.html", health=_vm_health())
+        return render_template("mcp.html", health=_vm_health_cached())
 
     @app.route("/settings")
     def settings():

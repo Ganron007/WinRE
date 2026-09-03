@@ -13,21 +13,21 @@
       <div style="display:flex; gap:10px; flex-wrap:wrap">
         <div class="stat" style="flex:1; min-width:200px">
           <div class="stat-label">x64dbg-MCP · :9094</div>
-          <div class="stat-value {{ 'accent' if health.mcp.get('x64dbg') else 'danger' }}"
+          <div class="stat-value {{ 'accent' if health.mcp.get('x64dbg') else 'danger' }}" data-mcp="x64dbg" data-mcp-text
                style="font-size:var(--tx-md)">
             {{ 'UP' if health.mcp.get('x64dbg') else 'DOWN' }}</div>
           <p class="muted" style="font-size:var(--tx-xs); margin-top:6px">71 tools · debugger control</p>
         </div>
         <div class="stat" style="flex:1; min-width:200px">
           <div class="stat-label">Malcat-MCP · :9009</div>
-          <div class="stat-value {{ 'accent' if health.mcp.get('malcat') else 'danger' }}"
+          <div class="stat-value {{ 'accent' if health.mcp.get('malcat') else 'danger' }}" data-mcp="malcat" data-mcp-text
                style="font-size:var(--tx-md)">
             {{ 'UP' if health.mcp.get('malcat') else 'DOWN' }}</div>
           <p class="muted" style="font-size:var(--tx-xs); margin-top:6px">45 tools · analyse/decompile</p>
         </div>
         <div class="stat" style="flex:1; min-width:200px">
           <div class="stat-label">WinDbg-MCP · :9097</div>
-          <div class="stat-value {{ 'accent' if health.mcp.get('windbg') else 'danger' }}"
+          <div class="stat-value {{ 'accent' if health.mcp.get('windbg') else 'danger' }}" data-mcp="windbg" data-mcp-text
                style="font-size:var(--tx-md)">
             {{ 'UP' if health.mcp.get('windbg') else 'DOWN' }}</div>
           <p class="muted" style="font-size:var(--tx-xs); margin-top:6px">10 tools · dump/kernel/remote</p>
