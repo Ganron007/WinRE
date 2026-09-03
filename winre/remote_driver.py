@@ -304,18 +304,21 @@ def remote_mcp_health(cfg: dict) -> dict:
 
 
 def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
-                sha: str = "") -> dict:
+                sha: str = "", dynamic: bool = False) -> dict:
     """Deep dive from the control plane.
 
     Engine: LangGraph ReAct agent (winre/agentic.py) over the static toolset
     (Ghidra/IDA SQL over SSH + Malcat MCP over HTTP). When the LLM endpoint is
     configured the agent runs and the result is `llm_judge`; otherwise the
     stage records `deterministic_fallback` (honest, not green).
+    Set dynamic=True (same --dynamic opt-in as detonation) to also expose the
+    bounded x64dbg debug-loop tools to the agent.
     """
     from . import llm_client
     t0 = time.time()
     mcp = remote_mcp_health(cfg)
-    out: dict = {"mcp": mcp, "remote": True, "engine": "langgraph"}
+    engine = "langgraph+dbg" if dynamic else "langgraph"
+    out: dict = {"mcp": mcp, "remote": True, "engine": engine}
     fallback = False
     failures: list[str] = []
 
@@ -334,7 +337,8 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
     try:
         from winre.agentic import run_langgraph_deep_dive
         agent_result = run_langgraph_deep_dive(sample_name, sha or sample_name,
-                                               max_steps=10, dry=dry_llm)
+                                               max_steps=10, dry=dry_llm,
+                                               dynamic=dynamic)
         history = []
         for h in (agent_result.get("history") or [])[:60]:
             entry = {"step": h.get("step"), "tool": h.get("tool"),
@@ -411,7 +415,8 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
 
     # ---- STATIC phase (quick + deep over SSH/HTTP) ----
     results["quick"] = remote_quick(sample.name, pack, cfg)
-    results["deep"] = remote_deep(sample.name, pack, cfg, dry_llm, sha=sha)
+    results["deep"] = remote_deep(sample.name, pack, cfg, dry_llm, sha=sha,
+                                  dynamic=enable_dynamic)
 
     # ---- DYNAMIC phase (segregated, opt-in, runs LAST after static) ----
     if enable_dynamic:

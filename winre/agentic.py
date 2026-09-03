@@ -182,12 +182,70 @@ class ToolRegistry:
         except Exception as e:
             return {"error": str(e)}
 
+    # --- dynamic tools (x64dbg debug loops; opt-in, bounded) ---------------
+
+    def _dbg_client(self):
+        from winre.mcp import X64DbgClient
+        return X64DbgClient(base=f"http://{self.cfg['host']}:9094")
+
+    def x64dbg_oep(self) -> dict:
+        """Find the unpack OEP via memory-execute BP (verified method)."""
+        try:
+            from winre import debug_loops
+            r = debug_loops.oep_by_section(self.remote_sample,
+                                           xc=self._dbg_client())
+            return {"ok": r.get("ok"), "oep": r.get("oep"),
+                    "error": r.get("error")}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def x64dbg_wpm_dump(self, max_hits: int = 3) -> dict:
+        """BP WriteProcessMemory, dump written buffers (bounded hits)."""
+        try:
+            from winre import debug_loops
+            r = debug_loops.wpm_dump(self.remote_sample,
+                                     xc=self._dbg_client(),
+                                     max_hits=max(1, min(int(max_hits), 5)))
+            return {"ok": r.get("ok"), "hits": r.get("hits"),
+                    "error": r.get("error")}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def x64dbg_crypt_dump(self, max_hits: int = 2) -> dict:
+        """BP CryptDecrypt, capture ciphertext then plaintext (bounded)."""
+        try:
+            from winre import debug_loops
+            r = debug_loops.crypt_dump(self.remote_sample,
+                                       xc=self._dbg_client(),
+                                       max_hits=max(1, min(int(max_hits), 3)))
+            return {"ok": r.get("ok"), "hits": r.get("hits"),
+                    "error": r.get("error")}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def x64dbg_unpack(self) -> dict:
+        """Full unpack: OEP -> DumpModule -> Malcat compare (deterministic)."""
+        try:
+            from winre import debug_loops
+            r = debug_loops.agentic_unpack(self.remote_sample,
+                                           xc=self._dbg_client())
+            return {"ok": r.get("ok"), "oep": r.get("oep"),
+                    "dump_path": r.get("dump_path"),
+                    "comparison": r.get("comparison"),
+                    "error": r.get("error")}
+        except Exception as e:
+            return {"error": str(e)}
+
 
 # ---------------------------------------------------------------------------
 # LangGraph ReAct (static phase)
 # ---------------------------------------------------------------------------
 TOOL_NAMES = ("ghidra_query", "ida_query", "malcat_analyze",
               "malcat_functions", "malcat_decompile")
+# Opt-in dynamic tools: x64dbg debug loops over MCP. Bounded, deterministic
+# primitives — the LLM composes them, never free-forms debugger commands.
+DYNAMIC_TOOL_NAMES = ("x64dbg_oep", "x64dbg_wpm_dump",
+                      "x64dbg_crypt_dump", "x64dbg_unpack")
 
 
 class GhidraQueryArgs(BaseModel):
@@ -211,12 +269,20 @@ class MalcatDecompileArgs(BaseModel):
     address: int = Field(..., description="function address to decompile")
 
 
+class X64DbgHitsArgs(BaseModel):
+    max_hits: int = Field(3, description="max BP hits to service (bounded)")
+
+
 _ARG_MODELS: dict[str, type[BaseModel]] = {
     "ghidra_query": GhidraQueryArgs,
     "ida_query": IdaQueryArgs,
     "malcat_analyze": EmptyArgs,
     "malcat_functions": MalcatFnArgs,
     "malcat_decompile": MalcatDecompileArgs,
+    "x64dbg_oep": EmptyArgs,
+    "x64dbg_wpm_dump": X64DbgHitsArgs,
+    "x64dbg_crypt_dump": X64DbgHitsArgs,
+    "x64dbg_unpack": EmptyArgs,
 }
 
 
@@ -227,8 +293,13 @@ def _truncate(s: str, n: int) -> str:
 def run_langgraph_deep_dive(sample_name: str, sha: str, *,
                             max_steps: int = 10,
                             log_dir: Path | None = None,
-                            dry: bool = False) -> dict:
+                            dry: bool = False,
+                            dynamic: bool = False) -> dict:
     """Run the LangGraph ReAct agent over the static toolset.
+
+    Set dynamic=True to also expose the bounded x64dbg debug-loop tools
+    (oep/wpm_dump/crypt_dump/unpack). They run inside the VM snapshot and
+    are deterministic primitives — the LLM only composes them.
 
     Returns {"verdict": ..., "source": "llm_judge"|"deterministic_fallback",
              "history": [...], "llm_analysis": text}
@@ -279,6 +350,19 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
                                             args_schema=model)
 
     tools = [_make(n) for n in TOOL_NAMES]
+    dyn_note = ""
+    if dynamic:
+        tools += [_make(n) for n in DYNAMIC_TOOL_NAMES]
+        dyn_note = """
+Dynamic debugger tools (x64dbg in the VM snapshot — bounded primitives):
+x64dbg_oep (find unpack OEP), x64dbg_wpm_dump (capture process-injected
+buffers), x64dbg_crypt_dump (capture pre/post-decrypt buffers),
+x64dbg_unpack (full OEP->dump->Malcat-compare in one call — prefer this for
+packed samples over composing primitives yourself).
+Debugger discipline: prefer x64dbg_unpack for packed binaries; keep hit
+counts small (<=3); every dynamic claim needs a dump/evidence field; if a
+dynamic tool errors, fall back to static — do not retry more than once.
+"""
 
     if dry:
         # no LLM — deterministic fallback stub
@@ -323,7 +407,7 @@ Malcat anomalies/YARA/high-signal imports fire, verdict must be malicious
 even if strings look legitimate.
 BUDGET DISCIPLINE: limited tool calls; when a [BUDGET] note appears, converge
 to your final answer immediately.
-"""
+{dyn_note}"""
     agent = create_react_agent(llm, tools=tools, prompt=system_prompt)
     recursion_limit = max(16, int(max_steps) * 2 + 6)
     try:
@@ -369,7 +453,10 @@ if __name__ == "__main__":
     ap.add_argument("--max-steps", type=int, default=10)
     ap.add_argument("--dry", action="store_true",
                     help="no LLM — deterministic fallback only")
+    ap.add_argument("--dynamic", action="store_true",
+                    help="expose bounded x64dbg debug-loop tools to the agent")
     args = ap.parse_args()
     out = run_langgraph_deep_dive(args.sample_name, args.sha,
-                                  max_steps=args.max_steps, dry=args.dry)
+                                  max_steps=args.max_steps, dry=args.dry,
+                                  dynamic=args.dynamic)
     print(json.dumps(out, indent=2, default=str))
