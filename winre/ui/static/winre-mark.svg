@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="14 18 130 165" role="img" aria-label="WinRE mark">
+  <defs>
+    <linearGradient id="markGreenGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#16a34a"/>
+      <stop offset="55%" stop-color="#14532d"/>
+      <stop offset="100%" stop-color="#052e16"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Shield mark: bug with a terminal/RE sparkle cutout (no wordmark, no tagline) -->
+  <g transform="translate(24,28)">
+    <path d="M55 0 L110 18 V62 C110 100 86 128 55 145 C24 128 0 100 0 62 V18 Z"
+          fill="url(#markGreenGrad)" stroke="#052e16" stroke-width="2"/>
+
+    <path d="M52 46 Q47 38 41 40" fill="none" stroke="#d1fae5" stroke-width="2.5" stroke-linecap="round" opacity="0.9"/>
+    <path d="M58 46 Q63 38 69 40" fill="none" stroke="#d1fae5" stroke-width="2.5" stroke-linecap="round" opacity="0.9"/>
+
+    <path d="M45 64 Q35 60 29 65" fill="none" stroke="#d1fae5" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
+    <path d="M65 64 Q75 60 81 65" fill="none" stroke="#d1fae5" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
+    <path d="M45 73 Q32 73 26 78" fill="none" stroke="#d1fae5" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
+    <path d="M65 73 Q78 73 84 78" fill="none" stroke="#d1fae5" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
+    <path d="M45 82 Q34 85 30 95" fill="none" stroke="#d1fae5" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
+    <path d="M65 82 Q76 85 80 95" fill="none" stroke="#d1fae5" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
+
+    <rect x="44" y="55" width="22" height="38" rx="11" fill="#052e16" stroke="#34d399" stroke-width="1.5" opacity="0.95"/>
+
+    <circle cx="55" cy="49" r="6" fill="#052e16" stroke="#34d399" stroke-width="1.5" opacity="0.95"/>
+
+    <path d="M55 62 Q55 74 63 74 Q55 74 55 86 Q55 74 47 74 Q55 74 55 62 Z" fill="url(#markGreenGrad)"/>
+    <rect x="52" y="70" width="6" height="2" rx="1" fill="#34d399"/>
+    <rect x="52" y="74" width="6" height="2" rx="1" fill="#34d399"/>
+  </g>
+</svg>

@@ -4,12 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}WinRE{% endblock %}</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='winre-mark.svg') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='winre.css') }}">
 </head>
 <body>
 <header class="topbar">
   <a href="/" class="topbar-brand">
-    <img src="{{ url_for('static', filename='winre-logo.svg') }}" alt="">
+    <img src="{{ url_for('static', filename='winre-mark.svg') }}" alt="WinRE">
     WinRE<span class="sub">Console</span>
   </a>
   <nav class="topbar-nav">
