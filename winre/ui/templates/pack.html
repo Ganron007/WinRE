@@ -1,42 +1,43 @@
 {% extends "base.html" %}
 {% block title %}WinRE — Pack {{ pack.short }}{% endblock %}
 {% block content %}
-<h2>Pack <span class="mono">{{ pack.sha }}</span></h2>
+<h1>Evidence pack</h1>
+<p class="sub mono">{{ pack.sha }}</p>
 
 {% set deep = pack.stages.get('deep') or {} %}
-{% set agent = deep.get('deep.json', {}).get('agent') if deep.get('deep.json') is mapping else None %}
+{% set dj = deep.get('deep.json') %}
+{% set agent = dj.get('agent') if dj is mapping else None %}
 {% if agent %}
-<div class="card" style="border-color:#14532d">
-  <h3>Deep dive (LangGraph agent)</h3>
-  <p>
-    source:
-    {% if agent.get('source') == 'llm_judge' %}<span class="badge green">llm_judge</span>
-    {% else %}<span class="badge amber">deterministic_fallback</span>{% endif %}
-    {% if agent.get('verdict') %}
-      &nbsp;·&nbsp; verdict: <b>{{ agent.verdict.verdict if agent.verdict is mapping else agent.verdict }}</b>
-      ({{ agent.verdict.confidence if agent.verdict is mapping else '?' }})
+<div class="card" style="border-color:var(--border2); max-width:760px">
+  <h3>Deep dive — LangGraph agent</h3>
+  <p style="margin-top:6px">
+    {% if agent.get('source') == 'llm_judge' %}
+      <span class="pill up">llm_judge</span>
+    {% else %}<span class="pill warn">deterministic_fallback</span>{% endif %}
+    {% set v = agent.get('verdict') %}
+    {% if v %}
+      <span style="margin-left:10px">verdict <b>{{ v.verdict if v is mapping else v }}</b>
+        <span class="dim">({{ v.confidence if v is mapping else '?' }})</span></span>
     {% endif %}
-    &nbsp;·&nbsp; {{ agent.get('tool_calls', 0) }} tool calls
+    <span class="muted" style="margin-left:10px">{{ agent.get('tool_calls', 0) }} tool calls</span>
   </p>
   {% if agent.get('llm_analysis') and agent.llm_analysis is string %}
-  <details><summary>LLM analysis text</summary>
-    <pre>{{ agent.llm_analysis }}</pre>
-  </details>
+    <details><summary>LLM analysis text</summary><pre>{{ agent.llm_analysis }}</pre></details>
   {% endif %}
 </div>
 {% endif %}
 
 {% for stage, files in pack.stages.items() %}
   {% if files %}
-  <h3 style="margin-top:20px">{{ stage }}</h3>
-  <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:6px">
+  <h2>{{ stage }}</h2>
+  <p style="margin:0 0 10px">
     {% for fname in files.keys() %}
-      <a class="btn" style="text-decoration:none; font-size:11px"
+      <a class="btn ghost" style="padding:4px 12px; font-size:11.5px; margin:0 4px 4px 0"
          href="/packs/{{ pack.sha }}/{{ stage }}/{{ fname }}">{{ fname }}</a>
     {% endfor %}
-  </div>
+  </p>
   {% for fname, content in files.items() %}
-    {% if fname in ('META.json', 'STAGE.json', 'quick.json', 'deep.json', 'report.json', 'rule_report.json') %}
+    {% if fname in ('META.json','STAGE.json','quick.json','deep.json','report.json','rule_report.json') %}
       <pre>{{ content | tojson(indent=2) }}</pre>
     {% endif %}
   {% endfor %}

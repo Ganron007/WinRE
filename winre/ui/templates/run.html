@@ -1,12 +1,14 @@
 {% extends "base.html" %}
-{% block title %}WinRE — Run Pipeline{% endblock %}
+{% block title %}WinRE — Run pipeline{% endblock %}
 {% block content %}
-<h2>Run pipeline (remote driver)</h2>
+<h1>Run pipeline</h1>
+<p class="sub">Static by default · dynamic is opt-in and segregated</p>
 
 {% if running %}
-  <p><span class="badge amber">A pipeline run is in progress…</span></p>
-  <div id="progress" class="card">
-    <p class="muted">Polling status…</p>
+  <div class="card" style="max-width:720px">
+    <h3>Run in progress</h3>
+    <p><span class="pill warn">running</span></p>
+    <div id="progress"><p class="muted">Polling…</p></div>
   </div>
   <script>
     const t = setInterval(async () => {
@@ -15,76 +17,73 @@
       if (!s.running) {
         clearInterval(t);
         const last = s.last || {};
-        const ok = last.ok ? '<span class="badge green">done</span>'
-                           : '<span class="badge red">failed</span>';
-        document.getElementById('progress').innerHTML =
-          `<p>${ok} <span class="mono">${last.sha ? last.sha.slice(0,16)+'…' : ''}</span></p>
-           <pre>${JSON.stringify(last, null, 2)}</pre>`;
+        const el = document.getElementById('progress');
+        if (last.ok) {
+          el.innerHTML = `<p><span class="pill up">done</span>
+             <span class="mono">${last.sha ? last.sha.slice(0,16)+'…' : ''}</span>
+             truly_green=${last.audit ? last.audit.truly_green : '?'}</p>
+             <pre>${JSON.stringify(last, null, 2)}</pre>`;
+        } else {
+          el.innerHTML = `<div class="notice err">Run failed: ${last.error || 'unknown'}</div>`;
+        }
       }
     }, 3000);
   </script>
 {% else %}
-  <div class="card" style="max-width:680px">
-    <form method="post" action="/run">
-      <label>Sample path (on this host — uploaded to FlareVM)</label>
-      <input name="sample" placeholder="C:\samples\foo.exe" required>
+<div class="card" style="max-width:720px">
+  <form method="post" action="/run">
+    <label>Sample path (host) — uploaded to FlareVM <span class="mono">C:\samples\</span></label>
+    <input name="sample" placeholder="C:\samples\foo.exe" required>
 
-      <div class="form-row">
-        <div>
-          <label>Max detonation seconds (dynamic only)</label>
-          <input name="max_seconds" type="number" value="45" min="10" max="600">
-        </div>
+    <div class="row">
+      <div>
+        <label>Detonation seconds <span class="dim">(dynamic only)</span></label>
+        <input name="max_seconds" type="number" value="45" min="10" max="600">
       </div>
+    </div>
 
-      <div style="display:flex; gap:22px; flex-wrap:wrap; align-items:center; margin-top:10px">
-        <label style="display:flex; gap:6px; align-items:center">
-          <input type="checkbox" name="dry_llm" style="width:auto" checked>
-          dry-LLM (no LLM call)
-        </label>
-        <label style="display:flex; gap:6px; align-items:center">
-          <input type="checkbox" name="dynamic" id="dynamicChk" style="width:auto">
-          <b style="color:#fbbf24">enable dynamic detonation (opt-in)</b>
-        </label>
-        <label style="display:flex; gap:6px; align-items:center; margin:0" id="pesieveLbl" hidden>
-          <input type="checkbox" name="pesieve" style="width:auto"> pe-sieve
-        </label>
-      </div>
+    <div style="margin-top:12px">
+      <label class="check"><input type="checkbox" name="dry_llm" checked>
+        dry-LLM — no LLM call (deep stays deterministic_fallback)</label>
+      <label class="check"><input type="checkbox" id="dynamicChk" name="dynamic">
+        <b style="color:var(--amber)">Enable dynamic detonation</b> — runs last,
+        segregated, requires clean-snapshot VM</label>
+      <label class="check" id="pesieveLbl" style="margin-left:24px" hidden>
+        <input type="checkbox" name="pesieve"> also run pe-sieve mid-run</label>
+    </div>
 
-      <div id="dynWarn" class="card" style="margin-top:10px; border-color:#78350f; background:#1a0f00" hidden>
-        <p style="color:#fcd34d; margin:0; font-size:12px">
-          <b>Dynamic is segregated &amp; contaminating.</b> Runs LAST after static, on a
-          FlareVM that must be at its clean snapshot. It detonates the sample
-          (FakeNet+Procmon+Frida+pe-sieve), then you MUST restore the VM snapshot.
-          static_yara_wins — dynamic can only corroborate, never clear a static verdict.
-        </p>
-      </div>
+    <div id="dynWarn" class="notice warn" hidden>
+      <b>Contamination warning.</b> Dynamic detonates the sample on the VM
+      (FakeNet + Procmon + Frida + optional pe-sieve). It runs <b>after</b> the
+      static deep dive, from a VM at its clean snapshot, and you <b>must restore
+      the snapshot</b> afterward. <span class="mono">static_yara_wins</span> —
+      dynamic corroborates, never clears a static verdict.
+    </div>
 
-      <div style="margin-top:16px">
-        <button type="submit">Run pipeline</button>
-      </div>
-      <p class="muted" style="margin-top:12px">
-        <b>Static (default):</b> intake → quick (Malcat/Ghidra/IDA over SSH) →
-        deep (LangGraph agent: SQL+Malcat, llm_judge when LLM configured) →
-        yara → report → audit (truly_green). Never detonates.
-      </p>
-    </form>
-  </div>
+    <div style="margin-top:18px"><button class="btn" type="submit">Run pipeline</button></div>
+  </form>
+</div>
 
-  <script>
-    const chk = document.getElementById('dynamicChk');
-    const warn = document.getElementById('dynWarn');
-    const pes = document.getElementById('pesieveLbl');
-    chk.addEventListener('change', () => {
-      warn.hidden = !chk.checked;
-      pes.hidden = !chk.checked;
-    });
-  </script>
+<div style="margin-top:14px">
+  <span class="pill flat">static</span> intake → quick → deep (LangGraph) → yara → report → audit
+  &nbsp;·&nbsp; <span class="pill warn">+ dynamic</span> detonation, last
+</div>
 
-  {% if last %}
-  <div class="card" style="margin-top:16px">
-    <h3>Last run</h3>
-    <pre>{{ last | tojson(indent=2) }}</pre>
-  </div>
-  {% endif %}
+<script>
+  const chk = document.getElementById('dynamicChk');
+  const warn = document.getElementById('dynWarn');
+  const pes = document.getElementById('pesieveLbl');
+  chk.addEventListener('change', () => {
+    warn.hidden = !chk.checked;
+    pes.hidden = !chk.checked;
+  });
+</script>
+
+{% if last %}
+<div class="card" style="margin-top:18px; max-width:720px">
+  <h3>Last run</h3>
+  <pre>{{ last | tojson(indent=2) }}</pre>
+</div>
+{% endif %}
 {% endif %}
 {% endblock %}

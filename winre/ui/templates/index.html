@@ -1,75 +1,80 @@
 {% extends "base.html" %}
 {% block title %}WinRE — Dashboard{% endblock %}
 {% block content %}
-<h2>Dashboard</h2>
+<h1>Dashboard</h1>
+<p class="sub">Static-first RE pipeline · dynamic opt-in · control-plane console</p>
 
-<div class="cards">
+<h2>Environment</h2>
+<div class="grid">
   <div class="card">
-    <h3>FlareVM (execution plane)</h3>
+    <h3>FlareVM · execution plane</h3>
     {% if health.ssh %}
-      <span class="badge green">SSH up</span>
+      <div class="val green">Online</div>
     {% else %}
-      <span class="badge red">SSH down</span>
-      {% if health.error %}<p>{{ health.error }}</p>{% endif %}
+      <div class="val red">Offline</div>
     {% endif %}
-    <p class="muted mono">{{ health.host if health.host else '' }}</p>
-    <p>MCP: x64dbg <b>{{ 'UP' if health.mcp.get('x64dbg') else 'down' }}</b> ·
-       Malcat <b>{{ 'UP' if health.mcp.get('malcat') else 'down' }}</b> ·
-       WinDbg <b>{{ 'UP' if health.mcp.get('windbg') else 'down' }}</b></p>
+    <p>SSH reachable · detonation + SQL tools + MCP servers run here (no internet)</p>
   </div>
 
   <div class="card">
-    <h3>LLM (control plane)</h3>
+    <h3>MCP servers</h3>
+    <p style="margin-top:4px">
+      <span class="pill {{ 'up' if health.mcp.get('x64dbg') else 'down' }}">x64dbg :9094</span>
+      <span class="pill {{ 'up' if health.mcp.get('malcat') else 'down' }}">Malcat :9009</span>
+      <span class="pill {{ 'up' if health.mcp.get('windbg') else 'down' }}">WinDbg :9097</span>
+    </p>
+    <p style="margin-top:8px">Auto-start at VM boot (autologon launcher)</p>
+  </div>
+
+  <div class="card">
+    <h3>LLM · control plane</h3>
     {% if health.llm %}
-      <span class="badge green">available</span>
+      <div class="val green">Ready</div>
     {% else %}
-      <span class="badge amber">not configured</span>
+      <div class="val amber">Not configured</div>
     {% endif %}
-    <p>Deep-dive reports will be <b>deterministic_fallback</b> until
-       WINRE_LLM_BASE_URL points at a reachable endpoint.</p>
+    <p>Deep-dive reports stay <span class="mono">deterministic_fallback</span> until
+       <span class="mono">WINRE_LLM_BASE_URL</span> is reachable</p>
   </div>
 
   <div class="card">
-    <h3>Pipeline</h3>
+    <h3>Pipeline state</h3>
     {% if state.running %}
-      <span class="badge amber">running…</span>
+      <div class="val amber">Running…</div>
     {% else %}
-      <span class="badge green">idle</span>
+      <div class="val green">Idle</div>
     {% endif %}
     {% if state.last %}
-      <p>Last: {{ state.last.sha[:16] if state.last.get('sha') else '' }}
-         {% if state.last.get('ok') %}
-           truly_green={{ state.last.audit.truly_green if state.last.audit else '?' }}
-         {% else %}
-           error: {{ state.last.error }}
-         {% endif %}
-      </p>
+      <p class="mono" style="margin-top:8px">{{ state.last.sha[:16] if state.last.get('sha') else '' }}…</p>
+      <p>{% if state.last.get('ok') %}
+           truly_green = <b>{{ state.last.audit.truly_green if state.last.audit else '?' }}</b>
+         {% else %}error: {{ state.last.error }}{% endif %}</p>
     {% endif %}
-  </div>
-
-  <div class="card">
-    <h3>Evidence packs</h3>
-    <p class="big">{{ packs|length }}</p>
-    <p>Local packs under <code class="mono">{{ health.logs_dir or '' }}</code></p>
   </div>
 </div>
 
-<h3 style="margin-top:24px">Recent packs</h3>
+<h2>Recent evidence packs</h2>
+<div class="table-wrap">
 <table>
-  <tr><th>sha256</th><th>truly_green</th><th>all_green</th><th>fallbacks</th><th>failed tools</th></tr>
+  <tr><th>sha256</th><th>Phase</th><th>Deep source</th><th>Quick verdict</th><th>truly_green</th></tr>
   {% for p in packs[:10] %}
   <tr>
-    <td><a href="/packs/{{ p.sha }}" class="mono">{{ p.short }}…</a></td>
-    <td>
-      {% if p.audit and p.audit.truly_green %}<span class="badge green">TRUE</span>
-      {% else %}<span class="badge red">false</span>{% endif %}
-    </td>
-    <td>{{ p.audit.all_green if p.audit else '?' }}</td>
-    <td>{{ (p.audit.fallback_stages or [])|join(', ') if p.audit else '-' }}</td>
-    <td>{{ (p.audit.failed_tools or [])|length if p.audit else '-' }}</td>
+    <td class="mono"><a href="/packs/{{ p.sha }}">{{ p.short }}…</a></td>
+    {% if p.audit %}
+      {% set dyn = p.audit.checks|selectattr('stage','equalto','dynamic')|first %}
+      <td>{% if dyn and dyn.ran %}<span class="pill warn">static+dynamic</span>
+          {% else %}<span class="pill flat">static</span>{% endif %}</td>
+      {% set deep = p.audit.checks|selectattr('stage','equalto','deep')|first %}
+      <td>{% if deep and deep.fallback %}<span class="pill warn">fallback</span>
+          {% else %}<span class="pill up">llm_judge</span>{% endif %}</td>
+      <td class="muted">—</td>
+      <td>{% if p.audit.truly_green %}<span class="pill up">GREEN</span>
+          {% else %}<span class="pill down">not green</span>{% endif %}</td>
+    {% else %}<td colspan="4" class="muted">no audit yet</td>{% endif %}
   </tr>
   {% else %}
-  <tr><td colspan="5" class="muted">No packs yet — run the pipeline.</td></tr>
+  <tr><td colspan="5" class="muted">No packs yet — start a run.</td></tr>
   {% endfor %}
 </table>
+</div>
 {% endblock %}

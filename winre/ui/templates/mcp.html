@@ -1,35 +1,39 @@
 {% extends "base.html" %}
-{% block title %}WinRE — MCP{% endblock %}
+{% block title %}WinRE — MCP servers{% endblock %}
 {% block content %}
-<h2>MCP servers (FlareVM execution plane)</h2>
-<div class="cards">
+<h1>MCP servers</h1>
+<p class="sub">FlareVM execution plane · reachable from this host over the lab NIC</p>
+
+<div class="grid">
   <div class="card">
     <h3>x64dbg-MCP · :9094</h3>
-    {% if health.mcp.get('x64dbg') %}<span class="badge green">UP</span>
-    {% else %}<span class="badge red">down</span>{% endif %}
-    <p>71 tools — debugger control (open x64dbg on the VM console for the
-       plugin to auto-start).</p>
+    {% if health.mcp.get('x64dbg') %}
+      <div class="val green">Up</div>
+    {% else %}<div class="val red">Down</div>{% endif %}
+    <p>71 tools · debugger control (load/BP/run/regs/disasm/dump).
+       Starts with x64dbg on the VM console.</p>
   </div>
   <div class="card">
     <h3>Malcat-MCP · :9009</h3>
-    {% if health.mcp.get('malcat') %}<span class="badge green">UP</span>
-    {% else %}<span class="badge red">down</span>{% endif %}
-    <p>45 tools — analyse/decompile/transforms. Start:
-       <code>python malcat.mcp.py -p 9009</code> on the VM.</p>
+    {% if health.mcp.get('malcat') %}
+      <div class="val green">Up</div>
+    {% else %}<div class="val red">Down</div>{% endif %}
+    <p>45 tools · analyse/decompile/transforms/unpack.</p>
   </div>
   <div class="card">
     <h3>WinDbg-MCP · :9097</h3>
-    {% if health.mcp.get('windbg') %}<span class="badge green">UP</span>
-    {% else %}<span class="badge red">down</span>{% endif %}
-    <p>10 tools — dump analysis / remote / kernel. Start:
-       <code>python -m mcp_windbg --port 9097</code> on the VM.</p>
+    {% if health.mcp.get('windbg') %}
+      <div class="val green">Up</div>
+    {% else %}<div class="val red">Down</div>{% endif %}
+    <p>10 tools · crash-dump analysis, remote &amp; kernel sessions
+       (<span class="mono">mcp-windbg</span>).</p>
   </div>
 </div>
-<p class="muted" style="margin-top:12px">
-  MCP servers bind the lab NIC so this control plane reaches them over HTTP
-  (no internet on the VM — safe for detonation). They auto-start at boot via
-  the Startup launcher (FlareVM autologon → <code>start_servers.ps1</code>);
-  x64dbg opens minimized for :9094. If a server is down, run
-  <code>winre\mcp\start_servers.ps1</code> on the VM console.
-</p>
+
+<div class="notice ok" style="max-width:760px">
+  <b>Auto-start at boot.</b> The VM auto-logs-on and the Startup launcher runs
+  <span class="mono">winre\mcp\start_servers.ps1</span> — Malcat and WinDbg come
+  up automatically; x64dbg starts minimized for :9094. If one is down here,
+  run the launcher on the VM console.
+</div>
 {% endblock %}
