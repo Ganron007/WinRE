@@ -1,39 +1,45 @@
 {% extends "base.html" %}
-{% block title %}WinRE — Evidence packs{% endblock %}
+{% block title %}WinRE — Cases{% endblock %}
 {% block content %}
-<h1>Evidence packs</h1>
-<p class="sub">Stage-tagged evidence per sample · honest audit gate</p>
+<div class="page">
+  <div class="page-head">
+    <h1>Cases</h1>
+    <span class="sub">stage-tagged evidence packs · honest audit gate</span>
+  </div>
 
-{% if error %}<div class="notice err">{{ error }}</div>{% endif %}
+  {% if error %}<div class="notice err">{{ error }}</div>{% endif %}
 
-<div class="table-wrap">
-<table>
-  <tr><th>sha256</th><th>Phase</th><th>intake</th><th>quick</th><th>deep</th>
-      <th>yara</th><th>report</th><th>dynamic</th><th>truly_green</th></tr>
-  {% for p in packs %}
-  <tr>
-    <td class="mono"><a href="/packs/{{ p.sha }}">{{ p.short }}…</a></td>
-    {% if p.audit %}
-      {% set c = p.audit.checks %}
-      {% set dyn = c|selectattr('stage','equalto','dynamic')|first %}
-      <td>{% if dyn and dyn.ran %}<span class="pill warn">static+dyn</span>
-          {% else %}<span class="pill flat">static</span>{% endif %}</td>
-      {% for s in ['intake','quick','deep','yara','report'] %}
-        {% set row = c|selectattr('stage','equalto',s)|first %}
-        <td>{% if row and row.ran %}<span class="pill up">ok</span>
-            {% else %}<span class="pill down">—</span>{% endif %}</td>
-      {% endfor %}
-      <td>{% if dyn and dyn.ran %}<span class="pill up">ran</span>
-          {% else %}<span class="muted">—</span>{% endif %}</td>
-      <td>{% if p.audit.truly_green %}<span class="pill up">GREEN</span>
-          {% else %}<span class="pill down">no</span>{% endif %}</td>
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>sha256</th><th>Phase</th><th>Intake</th><th>Quick</th><th>Deep</th>
+          <th>Yara</th><th>Report</th><th>Dynamic</th><th>Gate</th></tr>
+    </thead>
+    <tbody>
+    {% for p in packs %}
+    <tr>
+      <td class="mono"><a href="/packs/{{ p.sha }}">{{ p.short }}…</a></td>
+      {% if p.audit %}
+        {% set c = p.audit.checks %}
+        {% set dyn = c|selectattr('stage','equalto','dynamic')|first %}
+        <td>{% if dyn and dyn.ran %}<span class="badge warn">static+dyn</span>
+            {% else %}<span class="badge flat">static</span>{% endif %}</td>
+        {% for s in ['intake','quick','deep','yara','report'] %}
+          {% set row = c|selectattr('stage','equalto',s)|first %}
+          <td>{% if row and row.ran %}<span class="badge up">ok</span>
+              {% else %}<span class="badge down">fail</span>{% endif %}</td>
+        {% endfor %}
+        <td>{% if dyn and dyn.ran %}<span class="badge up">ran</span>
+            {% else %}<span class="badge flat">—</span>{% endif %}</td>
+        <td>{% if p.audit.truly_green %}<span class="badge up">GREEN</span>
+            {% else %}<span class="badge down">no</span>{% endif %}</td>
+      {% else %}<td colspan="9" class="muted">no audit</td>{% endif %}
+    </tr>
     {% else %}
-      <td colspan="9" class="muted">no audit</td>
-    {% endif %}
-  </tr>
-  {% else %}
-  <tr><td colspan="9" class="muted">No packs yet.</td></tr>
-  {% endfor %}
-</table>
+    <tr><td colspan="9" class="muted" style="text-align:center; padding:24px">No cases yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
 </div>
 {% endblock %}

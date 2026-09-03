@@ -1,80 +1,122 @@
 {% extends "base.html" %}
-{% block title %}WinRE — Dashboard{% endblock %}
+{% block title %}WinRE — Console{% endblock %}
 {% block content %}
-<h1>Dashboard</h1>
-<p class="sub">Static-first RE pipeline · dynamic opt-in · control-plane console</p>
+<div class="landing-bg">
+  <div class="landing-inner">
+    <div class="landing-grid">
 
-<h2>Environment</h2>
-<div class="grid">
-  <div class="card">
-    <h3>FlareVM · execution plane</h3>
-    {% if health.ssh %}
-      <div class="val green">Online</div>
-    {% else %}
-      <div class="val red">Offline</div>
-    {% endif %}
-    <p>SSH reachable · detonation + SQL tools + MCP servers run here (no internet)</p>
+      <!-- Left: brand + pathways -->
+      <div>
+        <div class="reveal">
+          <span class="landing-eyebrow">● Windows Malware Reverse-Engineering Lab</span>
+          <div style="display:flex; align-items:center; gap:16px">
+            <img src="{{ url_for('static', filename='winre-logo.svg') }}" alt="" style="height:52px">
+            <h1 class="landing-title" style="margin:0"><span class="accent">WinRE</span></h1>
+          </div>
+          <p class="landing-sub">
+            Static-first, dynamic opt-in: SQL-first triage (Ghidra / IDA / Malcat),
+            a LangGraph agentic deep dive, then a segregated detonation phase on the
+            FlareVM — every run gated on evidence quality, not a green light.
+          </p>
+        </div>
+
+        <div class="reveal">
+          <button class="pathway primary" onclick="location.href='/run'">
+            <span class="pathway-icon">▶</span>
+            <span class="pathway-body">
+              <span class="pathway-title">Analyze a new sample</span>
+              <span class="pathway-desc">Stage a binary, run static (default) or static + segregated dynamic.</span>
+            </span>
+            <span class="pathway-arrow">→</span>
+          </button>
+          <button class="pathway" onclick="location.href='/packs'">
+            <span class="pathway-icon">▤</span>
+            <span class="pathway-body">
+              <span class="pathway-title">Review existing analyses</span>
+              <span class="pathway-desc">Browse evidence packs: quick triage, agent deep dive, dynamic artifacts, audit.</span>
+            </span>
+            <span class="pathway-arrow">→</span>
+          </button>
+          <button class="pathway" onclick="location.href='/mcp'">
+            <span class="pathway-icon">⌁</span>
+            <span class="pathway-body">
+              <span class="pathway-title">MCP servers</span>
+              <span class="pathway-desc">x64dbg · Malcat · WinDbg — the FlareVM tool plane.</span>
+            </span>
+            <span class="pathway-arrow">→</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Right: live status board -->
+      <div>
+        <div class="board">
+          <div class="board-head">
+            <span class="dot {{ 'live' if state.running else ('ok' if health.ssh else 'danger') }}"></span>
+            <h3>Lab status</h3>
+            <span style="margin-left:auto; font-family:var(--font-mono); font-size:var(--tx-xs); color:var(--tx-2)">
+              static-first · dynamic opt-in
+            </span>
+          </div>
+          <div class="board-body">
+            <div class="board-stats">
+              <div class="stat">
+                <div class="stat-label">Cases analyzed</div>
+                <div class="stat-value">{{ packs|length }}</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Pipeline</div>
+                <div class="stat-value {{ 'info' if state.running else 'accent' }} {{ 'live' if state.running }}">
+                  {{ 'RUNNING' if state.running else 'IDLE' }}
+                </div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">truly_green</div>
+                <div class="stat-value {{ 'accent' if greens else 'unknown' }}">{{ greens }}</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">LLM</div>
+                <div class="stat-value {{ 'accent' if health.llm else 'warn' }}"
+                     style="font-size:var(--tx-md)">{{ 'ready' if health.llm else 'off' }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="board">
+          <div class="board-head">
+            <h3>Recent analyses</h3>
+            <a href="/packs" style="margin-left:auto; font-size:var(--tx-xs); color:var(--accent-hi)">view all →</a>
+          </div>
+          <div class="board-body" style="padding:var(--sp-2)">
+            {% for p in packs[:5] %}
+            <a href="/packs/{{ p.sha }}" style="display:flex; align-items:center; gap:8px;
+                 padding:7px 8px; border-radius:var(--r-sm); color:var(--tx-1)">
+              <span class="mono" style="flex:1">{{ p.short }}…</span>
+              {% set dyn = (p.audit.checks|selectattr('stage','equalto','dynamic')|first) if p.audit else none %}
+              {% if p.audit and p.audit.truly_green %}<span class="badge up">green</span>
+              {% elif p.audit %}<span class="badge {{ 'warn' if dyn and dyn.ran else 'flat' }}">
+                {{ 'static+dyn' if dyn and dyn.ran else 'static' }}</span>
+              {% else %}<span class="badge flat">no audit</span>{% endif %}
+            </a>
+            {% else %}
+            <div style="padding:var(--sp-3); color:var(--tx-2); font-size:var(--tx-sm)">
+              No cases yet — run your first sample.
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="board">
+          <div class="board-head"><h3>MCP plane</h3></div>
+          <div class="board-body" style="display:flex; gap:6px; flex-wrap:wrap; padding:var(--sp-3)">
+            <span class="badge {{ 'up' if health.mcp.get('x64dbg') else 'down' }}">x64dbg :9094</span>
+            <span class="badge {{ 'up' if health.mcp.get('malcat') else 'down' }}">Malcat :9009</span>
+            <span class="badge {{ 'up' if health.mcp.get('windbg') else 'down' }}">WinDbg :9097</span>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
-
-  <div class="card">
-    <h3>MCP servers</h3>
-    <p style="margin-top:4px">
-      <span class="pill {{ 'up' if health.mcp.get('x64dbg') else 'down' }}">x64dbg :9094</span>
-      <span class="pill {{ 'up' if health.mcp.get('malcat') else 'down' }}">Malcat :9009</span>
-      <span class="pill {{ 'up' if health.mcp.get('windbg') else 'down' }}">WinDbg :9097</span>
-    </p>
-    <p style="margin-top:8px">Auto-start at VM boot (autologon launcher)</p>
-  </div>
-
-  <div class="card">
-    <h3>LLM · control plane</h3>
-    {% if health.llm %}
-      <div class="val green">Ready</div>
-    {% else %}
-      <div class="val amber">Not configured</div>
-    {% endif %}
-    <p>Deep-dive reports stay <span class="mono">deterministic_fallback</span> until
-       <span class="mono">WINRE_LLM_BASE_URL</span> is reachable</p>
-  </div>
-
-  <div class="card">
-    <h3>Pipeline state</h3>
-    {% if state.running %}
-      <div class="val amber">Running…</div>
-    {% else %}
-      <div class="val green">Idle</div>
-    {% endif %}
-    {% if state.last %}
-      <p class="mono" style="margin-top:8px">{{ state.last.sha[:16] if state.last.get('sha') else '' }}…</p>
-      <p>{% if state.last.get('ok') %}
-           truly_green = <b>{{ state.last.audit.truly_green if state.last.audit else '?' }}</b>
-         {% else %}error: {{ state.last.error }}{% endif %}</p>
-    {% endif %}
-  </div>
-</div>
-
-<h2>Recent evidence packs</h2>
-<div class="table-wrap">
-<table>
-  <tr><th>sha256</th><th>Phase</th><th>Deep source</th><th>Quick verdict</th><th>truly_green</th></tr>
-  {% for p in packs[:10] %}
-  <tr>
-    <td class="mono"><a href="/packs/{{ p.sha }}">{{ p.short }}…</a></td>
-    {% if p.audit %}
-      {% set dyn = p.audit.checks|selectattr('stage','equalto','dynamic')|first %}
-      <td>{% if dyn and dyn.ran %}<span class="pill warn">static+dynamic</span>
-          {% else %}<span class="pill flat">static</span>{% endif %}</td>
-      {% set deep = p.audit.checks|selectattr('stage','equalto','deep')|first %}
-      <td>{% if deep and deep.fallback %}<span class="pill warn">fallback</span>
-          {% else %}<span class="pill up">llm_judge</span>{% endif %}</td>
-      <td class="muted">—</td>
-      <td>{% if p.audit.truly_green %}<span class="pill up">GREEN</span>
-          {% else %}<span class="pill down">not green</span>{% endif %}</td>
-    {% else %}<td colspan="4" class="muted">no audit yet</td>{% endif %}
-  </tr>
-  {% else %}
-  <tr><td colspan="5" class="muted">No packs yet — start a run.</td></tr>
-  {% endfor %}
-</table>
 </div>
 {% endblock %}

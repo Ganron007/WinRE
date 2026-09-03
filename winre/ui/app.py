@@ -188,9 +188,16 @@ def create_app() -> "Flask":
     app = Flask(__name__)
     app.config["JSON_SORT_KEYS"] = False
 
+    @app.context_processor
+    def _inject_health():
+        """Give every template the VM/MCP health for the topbar pill."""
+        return {"health": _vm_health()}
+
     @app.route("/")
     def index():
-        return render_template("index.html", packs=_packs(),
+        pk = _packs()
+        greens = sum(1 for p in pk if p.get("audit") and p["audit"].get("truly_green"))
+        return render_template("index.html", packs=pk, greens=greens,
                                health=_vm_health(),
                                state={k: _run_state[k] for k in
                                       ("running", "last")})

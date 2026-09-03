@@ -1,39 +1,46 @@
 {% extends "base.html" %}
 {% block title %}WinRE — MCP servers{% endblock %}
 {% block content %}
-<h1>MCP servers</h1>
-<p class="sub">FlareVM execution plane · reachable from this host over the lab NIC</p>
+<div class="page">
+  <div class="page-head">
+    <h1>MCP servers</h1>
+    <span class="sub">FlareVM tool plane · reachable over the lab NIC</span>
+  </div>
 
-<div class="grid">
-  <div class="card">
-    <h3>x64dbg-MCP · :9094</h3>
-    {% if health.mcp.get('x64dbg') %}
-      <div class="val green">Up</div>
-    {% else %}<div class="val red">Down</div>{% endif %}
-    <p>71 tools · debugger control (load/BP/run/regs/disasm/dump).
-       Starts with x64dbg on the VM console.</p>
+  <div class="board" style="max-width:840px">
+    <div class="board-head"><h3>Status</h3></div>
+    <div class="board-body">
+      <div style="display:flex; gap:10px; flex-wrap:wrap">
+        <div class="stat" style="flex:1; min-width:200px">
+          <div class="stat-label">x64dbg-MCP · :9094</div>
+          <div class="stat-value {{ 'accent' if health.mcp.get('x64dbg') else 'danger' }}"
+               style="font-size:var(--tx-md)">
+            {{ 'UP' if health.mcp.get('x64dbg') else 'DOWN' }}</div>
+          <p class="muted" style="font-size:var(--tx-xs); margin-top:6px">71 tools · debugger control</p>
+        </div>
+        <div class="stat" style="flex:1; min-width:200px">
+          <div class="stat-label">Malcat-MCP · :9009</div>
+          <div class="stat-value {{ 'accent' if health.mcp.get('malcat') else 'danger' }}"
+               style="font-size:var(--tx-md)">
+            {{ 'UP' if health.mcp.get('malcat') else 'DOWN' }}</div>
+          <p class="muted" style="font-size:var(--tx-xs); margin-top:6px">45 tools · analyse/decompile</p>
+        </div>
+        <div class="stat" style="flex:1; min-width:200px">
+          <div class="stat-label">WinDbg-MCP · :9097</div>
+          <div class="stat-value {{ 'accent' if health.mcp.get('windbg') else 'danger' }}"
+               style="font-size:var(--tx-md)">
+            {{ 'UP' if health.mcp.get('windbg') else 'DOWN' }}</div>
+          <p class="muted" style="font-size:var(--tx-xs); margin-top:6px">10 tools · dump/kernel/remote</p>
+        </div>
+      </div>
+    </div>
   </div>
-  <div class="card">
-    <h3>Malcat-MCP · :9009</h3>
-    {% if health.mcp.get('malcat') %}
-      <div class="val green">Up</div>
-    {% else %}<div class="val red">Down</div>{% endif %}
-    <p>45 tools · analyse/decompile/transforms/unpack.</p>
-  </div>
-  <div class="card">
-    <h3>WinDbg-MCP · :9097</h3>
-    {% if health.mcp.get('windbg') %}
-      <div class="val green">Up</div>
-    {% else %}<div class="val red">Down</div>{% endif %}
-    <p>10 tools · crash-dump analysis, remote &amp; kernel sessions
-       (<span class="mono">mcp-windbg</span>).</p>
-  </div>
-</div>
 
-<div class="notice ok" style="max-width:760px">
-  <b>Auto-start at boot.</b> The VM auto-logs-on and the Startup launcher runs
-  <span class="mono">winre\mcp\start_servers.ps1</span> — Malcat and WinDbg come
-  up automatically; x64dbg starts minimized for :9094. If one is down here,
-  run the launcher on the VM console.
+  <div class="notice ok" style="max-width:840px">
+    <b>Auto-start at boot.</b> The FlareVM auto-logs-on and its Startup launcher
+    runs <span class="mono">winre\mcp\start_servers.ps1</span> — Malcat &amp; WinDbg
+    come up automatically; x64dbg starts minimized for :9094. The dynamic phase
+    can also bring x64dbg up on demand (<span class="mono">x64dbg_manager</span>).
+  </div>
 </div>
 {% endblock %}
