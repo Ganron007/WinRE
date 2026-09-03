@@ -14,12 +14,14 @@ the LangGraph agent and the dynamic phase can drive them reliably. Discipline
 Scenarios (each = one checklist item, test one-by-one):
     ep_break(sample)        LoadBinary -> run -> auto-EP break -> state   [1]
     oep_by_section(sample)  UPX/unpack: mem-BP on original .text exec
-                            region -> run -> OEP break -> dump            [2, parked]
+                            region -> run -> OEP break -> dump            [2]
     wpm_dump(sample)        BP WriteProcessMemory -> run -> on hit, decode
                             x64 args (rcx,rdx,r8,r9), ReadMemory src buf,
                             dump it -> bounded hits                      [3]
     api_loop(sample, api)   BP on API (e.g. CryptDecrypt) -> run ->
                             capture args on hit -> bounded hits           [4]
+    agentic_unpack(sample)  OEP -> DumpModule -> static re-analysis of the
+                            dump -> compare original vs unpacked verdict [5]
 
 All return {"ok", "evidence": {...}, "error"} — evidence is the LLM-usable
 record of every pause (rip, regs, disasm).
@@ -646,6 +648,91 @@ def api_loop(sample: str, api: str, xc: X64DbgClient | None = None,
     return {"ok": True, "hits": hits, "api": api, "evidence": evidence}
 
 
+# ---------------------------------------------------------------------------
+# Scenario 5 — agentic unpack (deterministic composer)
+# ---------------------------------------------------------------------------
+def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
+                   dump_suffix: str = "_unpacked.exe") -> dict:
+    """OEP -> DumpModule -> static re-analysis of the dump -> compare.
+
+    Deterministic fixed sequence (no LLM decisions): find the OEP with
+    oep_by_section, dump the module from the live session, re-analyze the
+    dumped image with Malcat, and compare original-vs-unpacked verdicts.
+    The LangGraph agent drives strategy around this (when to unpack, what
+    the comparison means); this function is the reliable tactic.
+    """
+    import os
+    xc = xc or X64DbgClient()
+    evidence: list[dict] = []
+
+    # 1. OEP
+    oep_res = oep_by_section(sample, xc)
+    evidence.extend(oep_res.get("evidence") or [])
+    if not oep_res.get("ok"):
+        return {"ok": False, "error": f"OEP failed: {oep_res.get('error')}",
+                "evidence": evidence}
+    oep = oep_res["oep"]
+    evidence.append({"label": "oep_found", "oep": hex(oep)})
+
+    # 2. DumpModule from the live session (VM-side path)
+    stem = os.path.splitext(os.path.basename(sample))[0]
+    vm_dir = os.path.dirname(sample).replace("/", "\\") or r"C:\samples"
+    dump_path = f"{vm_dir}\\{stem}{dump_suffix}"
+    # module name as x64dbg knows it (stem usually matches ListModules entry)
+    try:
+        from winre.remote_driver import flare_cfg
+        host = flare_cfg()["host"]
+    except Exception:
+        host = None
+    _ = host  # xc already bound; kept for symmetry with other scenarios
+    dr = xc.dump_module(stem, dump_path)
+    if not dr.get("ok"):
+        # retry once: session may need a beat after the OEP pause
+        time.sleep(2)
+        dr = xc.dump_module(stem, dump_path)
+    if not dr.get("ok"):
+        return {"ok": False,
+                "error": f"DumpModule failed: {dr.get('error')}",
+                "evidence": evidence}
+    evidence.append({"label": "dumped", "dump_path": dump_path,
+                     "dump": dr.get("result")})
+
+    # 3+4. static re-analysis of BOTH images + compare (Malcat MCP).
+    # Malcat MCP binds on the VM — address it explicitly, never the
+    # localhost default (this code runs on the control-plane host).
+    try:
+        from winre.mcp import MalcatClient
+        try:
+            from winre.remote_driver import flare_cfg
+            mhost = flare_cfg()["host"]
+        except Exception:
+            mhost = "192.168.77.42"
+        mc = MalcatClient(base=f"http://{mhost}:9009/mcp")
+        orig = mc.analyse_file(sample).get("result") or {}
+        new = mc.analyse_file(dump_path).get("result") or {}
+    except Exception as e:
+        return {"ok": False, "error": f"malcat re-analysis failed: {e}",
+                "oep": hex(oep), "dump_path": dump_path,
+                "evidence": evidence}
+
+    def _verdict(a: dict) -> str:
+        v = a.get("verdict") or a.get("summary") or {}
+        if isinstance(v, dict):
+            return str(v.get("verdict") or v.get("label") or "unknown")
+        return str(v or "unknown")
+
+    comparison = {
+        "original_verdict": _verdict(orig),
+        "unpacked_verdict": _verdict(new),
+        "verdicts_match": _verdict(orig) == _verdict(new),
+        "original_anomalies": len(orig.get("anomalies") or []),
+        "unpacked_anomalies": len(new.get("anomalies") or []),
+    }
+    evidence.append({"label": "compare", **comparison})
+    return {"ok": True, "oep": hex(oep), "dump_path": dump_path,
+            "comparison": comparison, "evidence": evidence}
+
+
 if __name__ == "__main__":
     import argparse
     from winre.mcp.x64dbg_manager import ensure_mcp
@@ -653,7 +740,8 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser(description="x64dbg debug-loop scenarios")
     ap.add_argument("scenario", choices=["ep_break", "oep_by_section", "oep_by_esp",
-                                         "wpm_dump", "crypt_dump", "api_loop"])
+                                         "wpm_dump", "crypt_dump",
+                                         "agentic_unpack", "api_loop"])
     ap.add_argument("sample", help="VM path e.g. C:\\samples\\foo.exe")
     ap.add_argument("--api", default="WriteProcessMemory")
     ap.add_argument("--dump-dir", default=None, help="where to write dumped buffers (host path)")
@@ -668,6 +756,7 @@ if __name__ == "__main__":
     fn = {"ep_break": ep_break, "oep_by_section": oep_by_section,
           "oep_by_esp": oep_by_esp,
           "wpm_dump": wpm_dump, "crypt_dump": crypt_dump,
+          "agentic_unpack": agentic_unpack,
           "api_loop": api_loop}[args.scenario]
     if args.scenario == "api_loop":
         res = fn(args.sample, args.api, xc)
