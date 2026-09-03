@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}WinRE — Settings{% endblock %}
+{% block content %}
+<div class="page">
+  <div class="page-head">
+    <h1>Settings</h1>
+    <span class="sub">control-plane config · read-only · secrets masked</span>
+  </div>
+
+  <div class="board" style="max-width:760px">
+    <div class="board-head"><h3>Environment file</h3>
+      <span style="margin-left:auto">{% if cfg.env_file.present %}
+        <span class="badge up">present</span>{% else %}<span class="badge warn">missing</span>{% endif %}</span>
+    </div>
+    <div class="board-body">
+      <p class="mono">{{ cfg.env_file.path }}</p>
+      <p class="muted" style="font-size:var(--tx-xs)">
+        Edit <code>.env</code> on the host and restart the console to apply changes.
+        Keys are never displayed here.</p>
+    </div>
+  </div>
+
+  <div class="board" style="max-width:760px">
+    <div class="board-head"><h3>FlareVM (execution plane)</h3></div>
+    <div class="board-body">
+      <div class="table-wrap"><table><tbody>
+        <tr><td class="mono">FLARE_HOST</td><td class="mono">{{ cfg.flare.host }}</td></tr>
+        <tr><td class="mono">FLARE_SSH_PORT</td><td class="mono">{{ cfg.flare.port }}</td></tr>
+        <tr><td class="mono">FLARE_USER</td><td class="mono">{{ cfg.flare.user }}</td></tr>
+        <tr><td class="mono">FLARE_SSH_KEY</td><td class="mono">{{ cfg.flare.key }}</td></tr>
+      </tbody></table></div>
+    </div>
+  </div>
+
+  <div class="board" style="max-width:760px">
+    <div class="board-head"><h3>LLM (control plane)</h3>
+      <span style="margin-left:auto">{% if llm_ok %}<span class="badge up">reachable</span>
+      {% else %}<span class="badge warn">not reachable</span>{% endif %}</span>
+    </div>
+    <div class="board-body">
+      <div class="table-wrap"><table><tbody>
+        <tr><td class="mono">WINRE_LLM_BASE_URL</td><td class="mono">{{ cfg.llm.base_url or '—' }}</td></tr>
+        <tr><td class="mono">WINRE_LLM_MODEL</td><td class="mono">{{ cfg.llm.model or '—' }}</td></tr>
+        <tr><td class="mono">WINRE_LLM_REASONING</td><td class="mono">{{ cfg.llm.reasoning or '—' }}</td></tr>
+        <tr><td class="mono">WINRE_LLM_API_KEY</td><td>{% if cfg.llm.key_set %}
+          <span class="badge up">set (masked)</span>{% else %}<span class="badge warn">not set</span>{% endif %}</td></tr>
+      </tbody></table></div>
+      <p class="muted" style="font-size:var(--tx-xs)">
+        Without a reachable LLM, deep dives record
+        <span class="mono">deterministic_fallback</span> — the spine still runs.</p>
+    </div>
+  </div>
+
+  <div class="board" style="max-width:760px">
+    <div class="board-head"><h3>Paths</h3></div>
+    <div class="board-body">
+      <div class="table-wrap"><table><tbody>
+        <tr><td class="mono">logs_dir</td><td class="mono">{{ cfg.logs_dir }}</td></tr>
+        <tr><td class="mono">GHIDRA_HEADLESS_MAXMEM</td><td class="mono">{{ cfg.ghidra_heap }}</td></tr>
+      </tbody></table></div>
+    </div>
+  </div>
+</div>
+{% endblock %}

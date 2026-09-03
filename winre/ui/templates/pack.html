@@ -7,48 +7,80 @@
     <span class="sub mono">{{ pack.sha }}</span>
   </div>
 
-  {% set deep = pack.stages.get('deep') or {} %}
-  {% set dj = deep.get('deep.json') %}
-  {% set agent = dj.get('agent') if dj is mapping else None %}
-  {% if agent %}
+  {% set v = pack.views %}
+  {# audit banner first — honest gate is the headline #}
   <div class="board">
-    <div class="board-head">
-      {% if agent.get('source') == 'llm_judge' %}
-        <span class="badge up">llm_judge</span>
-      {% else %}<span class="badge warn">deterministic_fallback</span>{% endif %}
-      <h3 style="margin-left:6px">Deep dive · LangGraph agent</h3>
-      {% set v = agent.get('verdict') %}
-      {% if v %}
-        <span style="margin-left:auto; font-size:var(--tx-sm)">
-          verdict <b>{{ v.verdict if v is mapping else v }}</b>
-          <span class="muted">({{ v.confidence if v is mapping else '?' }})</span>
+    <div class="board-body" style="display:flex; align-items:center; gap:12px">
+      {% if v.audit.truly_green %}
+        <span class="badge up">truly_green</span>
+        <span class="muted">all stages ran, no fallbacks, no failed tools</span>
+      {% else %}
+        <span class="badge down">not green</span>
+        <span class="muted">
+          {% if v.audit.fallback_stages %}fallback: {{ v.audit.fallback_stages|join(', ') }} · {% endif %}
+          {% if v.audit.failed_tools %}failed tools: {{ v.audit.failed_tools|length }} · {% endif %}
+          {% if v.audit.dynamic_conflict %}dynamic/static conflict · {% endif %}
+          static_yara_wins
         </span>
       {% endif %}
-    </div>
-    <div class="board-body">
-      <p class="muted" style="margin:0 0 6px">{{ agent.get('tool_calls', 0) }} tool calls · evidence-cited</p>
-      {% if agent.get('llm_analysis') and agent.llm_analysis is string %}
-        <details><summary>LLM analysis text</summary><pre>{{ agent.llm_analysis }}</pre></details>
-      {% endif %}
+      <a href="/packs/{{ pack.sha }}/report/ANALYST-NEXT.md" style="margin-left:auto; font-size:var(--tx-xs)">analyst-next →</a>
     </div>
   </div>
-  {% endif %}
 
-  {% for stage, files in pack.stages.items() %}
-    {% if files %}
-    <div class="page-section-title">{{ stage }}</div>
-    <p style="margin:0 0 8px">
-      {% for fname in files.keys() %}
-        <a class="btn ghost" style="padding:3px 10px; font-size:var(--tx-xs); margin:0 4px 4px 0"
-           href="/packs/{{ pack.sha }}/{{ stage }}/{{ fname }}">{{ fname }}</a>
-      {% endfor %}
-    </p>
-    {% for fname, content in files.items() %}
-      {% if fname in ('META.json','STAGE.json','quick.json','deep.json','report.json','rule_report.json') %}
-        <details open><summary>{{ fname }}</summary><pre>{{ content | tojson(indent=2) }}</pre></details>
-      {% endif %}
+  {% include "partials/intake.html" %}
+  {% include "partials/quick.html" %}
+  {% include "partials/deep.html" %}
+  {% include "partials/dynamic.html" %}
+  {% include "partials/yara.html" %}
+  {% include "partials/report.html" %}
+  {% include "partials/audit.html" %}
+  {% include "partials/rawfiles.html" %}
+
+<div class="page-section-title">Manual stage control</div>
+<div class="board"><div class="board-body">
+  <p class="muted" style="margin:0 0 8px">
+    Rerun a single stage against this pack. Dynamic requires the HITL
+    checkpoint: confirm a clean VM snapshot first (contamination!), then mark
+    it restored after detonation.
+  </p>
+  <div id="hitl" style="margin-bottom:10px">
+    <button class="btn ghost" style="font-size:var(--tx-xs)" onclick="hitl('verified_clean')">
+      ✓ VM is at clean snapshot</button>
+    <button class="btn ghost" style="font-size:var(--tx-xs)" onclick="hitl('restored')">
+      ✓ Snapshot restored after dynamic</button>
+    <span id="hitlState" class="muted" style="font-size:var(--tx-xs); margin-left:8px"></span>
+  </div>
+  <div style="display:flex; gap:6px; flex-wrap:wrap">
+    {% for s in ['quick','dynamic','deep','yara','report','audit'] %}
+    <button class="btn ghost" style="font-size:var(--tx-xs)"
+            onclick="runStage('{{ s }}')">▶ {{ s }}</button>
     {% endfor %}
-    {% endif %}
-  {% endfor %}
+  </div>
+  <pre id="stageOut" style="display:none"></pre>
+</div></div>
+
+<script>
+async function hitl(action) {
+  const r = await fetch('/api/hitl/snapshot', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({sha: '{{ pack.sha }}', action})});
+  const j = await r.json();
+  document.getElementById('hitlState').textContent = JSON.stringify(j.snapshot || j);
+}
+async function runStage(stage) {
+  const el = document.getElementById('stageOut');
+  el.style.display = 'block';
+  let body = {};
+  if (stage === 'dynamic') {
+    body = {confirm_snapshot: true, max_seconds: 45};
+  }
+  el.textContent = 'starting ' + stage + '…';
+  const r = await fetch('/stages/{{ pack.sha }}/' + stage, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)});
+  const j = await r.json();
+  el.textContent = JSON.stringify(j, null, 2);
+}
+</script>
 </div>
 {% endblock %}

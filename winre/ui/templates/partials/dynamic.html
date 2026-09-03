@@ -1,0 +1,92 @@
+{% set dy = pack.views.dynamic %}
+<div class="page-section-title">Dynamic detonation</div>
+{% if not dy.ran %}
+  <p class="muted">Not run for this pack (static-only). Dynamic is an opt-in,
+     segregated phase — enable it on the Run page (requires a clean-snapshot VM).</p>
+{% else %}
+<div class="notice warn" style="max-width:840px">
+  <b>Contaminated environment.</b> This sample was detonated on the FlareVM.
+  Anything after this point in a subsequent run must start from a restored snapshot.
+  <span class="mono">static_yara_wins</span> — dynamic corroborates, never clears.
+</div>
+
+{% set m = dy.meta or {} %}
+<div class="board" style="max-width:840px">
+  <div class="board-head">
+    {% if m.get('ok') %}<span class="badge up">pack ok</span>
+    {% else %}<span class="badge down">incomplete</span>{% endif %}
+    <span class="muted" style="margin-left:8px; font-size:var(--tx-xs)">
+      frida events <b>{{ m.get('frida_events', '?') }}</b>
+      {% if m.get('verdict') %}· dynamic verdict <b>{{ m.get('verdict') }}</b>{% endif %}
+    </span>
+  </div>
+  <div class="board-body">
+    {% if dy.frida %}
+    <div class="page-section-title">Frida API trace (top calls)</div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>api</th><th>calls</th></tr></thead><tbody>
+      {% for name, count in dy.frida.top_apis %}
+      <tr><td class="mono">{{ name }}</td><td class="mono">{{ count }}</td></tr>
+      {% endfor %}
+      </tbody></table></div>
+    {% if dy.frida.decoded_paths %}
+    <p class="muted" style="font-size:var(--tx-xs); margin-top:8px">touched paths:</p>
+    {% for pth in dy.frida.decoded_paths %}<div class="mono">{{ pth }}</div>{% endfor %}
+    {% endif %}
+    {% if dy.frida.sockaddrs %}
+    <p class="muted" style="font-size:var(--tx-xs); margin-top:8px">sockets:</p>
+    {% for s in dy.frida.sockaddrs %}<div class="mono">{{ s }}</div>{% endfor %}
+    {% endif %}
+    {% endif %}
+
+    {% if dy.procmon %}
+    <div class="page-section-title">Procmon (top operations)</div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>operation</th><th>count</th></tr></thead><tbody>
+      {% for op, count in dy.procmon.top_operations %}
+      <tr><td class="mono">{{ op }}</td><td class="mono">{{ count }}</td></tr>
+      {% endfor %}
+      </tbody></table></div>
+    <p class="muted" style="font-size:var(--tx-xs)">
+      rows total {{ dy.procmon.rows_total }} · sample rows {{ dy.procmon.rows_sample }}</p>
+    {% if dy.procmon.process_creates %}
+    <p class="muted" style="font-size:var(--tx-xs); margin-bottom:2px">process creates:</p>
+    {% for name, count in dy.procmon.process_creates %}<div class="mono">{{ name }} ×{{ count }}</div>{% endfor %}
+    {% endif %}
+    {% endif %}
+
+    {% if dy.network and (dy.network.captures or dy.network.domains) %}
+    <div class="page-section-title">Network (FakeNet sink)</div>
+    {% if dy.network.domains %}
+    <p class="muted" style="font-size:var(--tx-xs); margin-bottom:2px">guessed domains:</p>
+    {% for dm in dy.network.domains %}<div class="mono">{{ dm }}</div>{% endfor %}
+    {% endif %}
+    {% for cap in dy.network.captures %}
+    <p style="font-size:var(--tx-sm); margin:8px 0 2px">
+      <span class="mono">{{ cap.pcap }}</span>
+      <span class="muted">dns {{ cap.counts.dns }} · http {{ cap.counts.http }} · sni {{ cap.counts.sni }}</span>
+    </p>
+    {% if cap.dns %}<p class="muted" style="font-size:var(--tx-xs); margin:2px 0">DNS:</p>
+      {% for q in cap.dns %}<div class="mono">{{ q }}</div>{% endfor %}{% endif %}
+    {% if cap.http %}<p class="muted" style="font-size:var(--tx-xs); margin:4px 0 2px">HTTP:</p>
+      <div class="table-wrap"><table><tbody>
+      {% for h in cap.http %}<tr><td class="mono">{{ h }}</td></tr>{% endfor %}
+      </tbody></table></div>{% endif %}
+    {% endfor %}
+    {% endif %}
+
+    {% if dy.artifacts %}
+    <div class="page-section-title">Artifacts (download)</div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>file</th><th>size</th><th></th></tr></thead><tbody>
+      {% for a in dy.artifacts %}
+      <tr><td class="mono">{{ a.name }}</td>
+          <td class="mono">{{ a.size }}</td>
+          <td><a class="btn ghost" style="padding:2px 10px; font-size:var(--tx-xs)"
+                 href="/packs/{{ pack.sha }}/dynamic/{{ a.name }}?download=1">download</a></td></tr>
+      {% endfor %}
+      </tbody></table></div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}

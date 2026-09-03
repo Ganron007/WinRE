@@ -1,0 +1,34 @@
+{% set a = pack.views.audit %}
+<div class="page-section-title">Audit gate</div>
+<div class="board"><div class="board-body">
+  <p style="margin:0 0 10px">
+    {% if a.truly_green %}<span class="badge up">truly_green</span>
+    {% else %}<span class="badge down">not green</span>{% endif %}
+    <span class="muted" style="margin-left:8px">static_yara_wins · dynamic corroborates, never clears</span>
+  </p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>stage</th><th>ran</th><th>summary</th><th>fallback</th><th>error</th></tr></thead>
+    <tbody>
+    {% for c in a.checks %}
+    <tr>
+      <td class="mono">{{ c.stage }}</td>
+      <td>{% if c.ran %}<span class="badge up">yes</span>
+          {% else %}<span class="badge down">no</span>{% endif %}</td>
+      <td class="muted">{{ c.summary or '—' }}</td>
+      <td>{% if c.fallback %}<span class="badge warn">fallback</span>
+          {% else %}<span class="badge flat">—</span>{% endif %}</td>
+      <td class="mono" style="max-width:280px; overflow:hidden; text-overflow:ellipsis">{{ c.error or '—' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% if a.failed_tools %}
+  <p class="muted" style="font-size:var(--tx-xs); margin-top:8px">failed tools:</p>
+  <ul style="color:var(--danger); font-size:var(--tx-sm); margin:4px 0">
+    {% for t in a.failed_tools %}<li class="mono">{{ t }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% if a.dynamic_conflict %}
+  <div class="notice err">Dynamic/static verdict conflict — review before trusting.</div>
+  {% endif %}
+</div></div>

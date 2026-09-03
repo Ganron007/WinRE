@@ -1,0 +1,60 @@
+{% set d = pack.views.deep %}
+<div class="page-section-title">Deep dive · LangGraph agent</div>
+{% set agent = d.agent %}
+{% if agent %}
+<div class="board">
+  <div class="board-head">
+    {% if agent.get('source') == 'llm_judge' %}
+      <span class="badge up">llm_judge</span>
+    {% else %}<span class="badge warn">deterministic_fallback</span>{% endif %}
+    {% set v = agent.get('verdict') %}
+    {% if v %}
+      <span style="margin-left:8px; font-size:var(--tx-sm)">
+        verdict <b>{{ v.verdict if v is mapping else v }}</b>
+        <span class="muted">({{ v.confidence if v is mapping else '?' }})</span>
+      </span>
+    {% endif %}
+    <span class="muted" style="margin-left:auto; font-size:var(--tx-xs)">
+      {{ agent.get('tool_calls', 0) }} tool calls · evidence-cited
+    </span>
+  </div>
+  <div class="board-body">
+    {% if agent.get('llm_analysis') and agent.llm_analysis is string %}
+      <details open><summary>LLM analysis</summary><pre>{{ agent.llm_analysis }}</pre></details>
+    {% endif %}
+    {% if d.history %}
+    <details open>
+      <summary>Agent tool-call timeline ({{ d.history|length }})</summary>
+      <div class="table-wrap" style="margin-top:8px">
+      <table>
+        <thead><tr><th>#</th><th>tool</th><th>args</th><th>result / error</th></tr></thead>
+        <tbody>
+        {% for h in d.history %}
+        <tr>
+          <td class="mono">{{ h.step }}</td>
+          <td><code>{{ h.tool }}</code></td>
+          <td class="mono" style="max-width:280px; overflow:hidden; text-overflow:ellipsis">{{ h.args | tojson }}</td>
+          <td class="mono" style="max-width:380px; overflow:hidden; text-overflow:ellipsis">
+            {% if h.error %}<span style="color:var(--danger)">{{ h.error }}</span>
+            {% else %}{{ h.result }}{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </details>
+    {% endif %}
+    {% if d.mcp is mapping %}
+    <p class="muted" style="font-size:var(--tx-xs)">
+      MCP at run time:
+      x64dbg {{ 'up' if d.mcp.get('x64dbg') else 'down' }} ·
+      malcat {{ 'up' if d.mcp.get('malcat') else 'down' }} ·
+      windbg {{ 'up' if d.mcp.get('windbg') else 'down' }}
+    </p>
+    {% endif %}
+  </div>
+</div>
+{% else %}
+<p class="muted">No deep-dive evidence in this pack.</p>
+{% endif %}

@@ -12,8 +12,7 @@
   <div class="table-wrap">
   <table>
     <thead>
-      <tr><th>sha256</th><th>Phase</th><th>Intake</th><th>Quick</th><th>Deep</th>
-          <th>Yara</th><th>Report</th><th>Dynamic</th><th>Gate</th></tr>
+      <tr><th>sha256</th><th>Phase</th><th>Quick</th><th>Deep</th><th>Intake</th><th>Yara</th><th>Report</th><th>Dynamic</th><th>Gate</th></tr>
     </thead>
     <tbody>
     {% for p in packs %}
@@ -24,7 +23,16 @@
         {% set dyn = c|selectattr('stage','equalto','dynamic')|first %}
         <td>{% if dyn and dyn.ran %}<span class="badge warn">static+dyn</span>
             {% else %}<span class="badge flat">static</span>{% endif %}</td>
-        {% for s in ['intake','quick','deep','yara','report'] %}
+        {% set qv = p.verdicts.quick %}{% set dv = p.verdicts.deep %}
+        <td>{% if qv == 'malicious' %}<span class="badge malware">malicious</span>
+            {% elif qv == 'benign' %}<span class="badge up">benign</span>
+            {% elif qv %}<span class="badge warn">{{ qv }}</span>
+            {% else %}<span class="badge flat">—</span>{% endif %}</td>
+        <td>{% if dv == 'malicious' %}<span class="badge malware">malicious</span>
+            {% elif dv == 'benign' %}<span class="badge up">benign</span>
+            {% elif dv %}<span class="badge warn">{{ dv }}</span>
+            {% else %}<span class="badge flat">—</span>{% endif %}</td>
+        {% for s in ['intake','yara','report'] %}
           {% set row = c|selectattr('stage','equalto',s)|first %}
           <td>{% if row and row.ran %}<span class="badge up">ok</span>
               {% else %}<span class="badge down">fail</span>{% endif %}</td>

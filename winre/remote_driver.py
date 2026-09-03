@@ -335,11 +335,25 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
         from winre.agentic import run_langgraph_deep_dive
         agent_result = run_langgraph_deep_dive(sample_name, sha or sample_name,
                                                max_steps=10, dry=dry_llm)
+        history = []
+        for h in (agent_result.get("history") or [])[:60]:
+            entry = {"step": h.get("step"), "tool": h.get("tool"),
+                     "args": h.get("args"), "error": h.get("error")}
+            res = h.get("result")
+            if isinstance(res, dict):
+                res = {k: res.get(k) for k in
+                       ("ok", "verdict", "summary", "row_count", "error")
+                       if k in res}
+                s = json.dumps(res, default=str)
+                entry["result"] = s[:800] + ("…" if len(s) > 800 else "")
+            out_hist = entry
+            history.append(out_hist)
         out["agent"] = {
             "source": agent_result.get("source"),
             "verdict": agent_result.get("verdict"),
             "llm_analysis": agent_result.get("llm_analysis"),
             "tool_calls": len(agent_result.get("history") or []),
+            "history": history,
         }
     except Exception as e:
         failures.append(f"agent:{e}")

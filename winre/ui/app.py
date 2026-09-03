@@ -42,11 +42,39 @@ LOGS_DIR = Path(remote_driver.LOCAL_LOGS)
 
 # A single run at a time (deterministic; avoid VM stampede)
 _run_lock = threading.Lock()
-_run_state: dict = {"running": False, "last": None, "pid": None}
+_run_state: dict = {"running": False, "last": None, "pid": None,
+                    "sha": None, "log": []}
+
+
+def _run_log_tail(n: int = 60) -> list[str]:
+    return list(_run_state.get("log") or [])[-n:]
+
+
+def _read_json(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _pack_verdicts(root: Path) -> dict:
+    """quick/deep verdicts + deep source for a pack row (tolerant of gaps)."""
+    out: dict = {"quick": None, "deep": None, "source": None}
+    quick = _read_json(root / "quick" / "quick.json") or {}
+    if isinstance(quick.get("verdict"), str):
+        out["quick"] = quick["verdict"]
+    deep = _read_json(root / "deep" / "deep.json") or {}
+    agent = deep.get("agent") if isinstance(deep.get("agent"), dict) else None
+    if agent:
+        v = agent.get("verdict")
+        out["deep"] = v.get("verdict") if isinstance(v, dict) else (v if isinstance(v, str) else None)
+        if isinstance(agent.get("source"), str):
+            out["source"] = agent["source"]
+    return out
 
 
 def _packs() -> list[dict]:
-    """List evidence packs (newest first) with audit summaries."""
+    """List evidence packs (newest first) with audit summaries + verdicts."""
     out = []
     if not LOGS_DIR.is_dir():
         return out
@@ -57,15 +85,13 @@ def _packs() -> list[dict]:
         audit = None
         a = d / "audit.json"
         if a.is_file():
-            try:
-                audit = json.loads(a.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                pass
+            audit = _read_json(a)
         out.append({
             "sha": d.name,
             "short": d.name[:16],
             "mtime": d.stat().st_mtime,
             "audit": audit,
+            "verdicts": _pack_verdicts(d),
         })
     return out
 
@@ -74,7 +100,7 @@ def _pack_detail(sha: str) -> dict | None:
     d = LOGS_DIR / sha
     if not d.is_dir():
         return None
-    detail = {"sha": sha, "stages": {}}
+    detail = {"sha": sha, "short": sha[:16], "stages": {}}
     for stage in ("intake", "quick", "dynamic", "deep", "yara", "report"):
         sd = d / stage
         files = {}
@@ -94,7 +120,149 @@ def _pack_detail(sha: str) -> dict | None:
                     except Exception:
                         files[f.name] = {"error": "unreadable"}
         detail["stages"][stage] = files
+    detail["views"] = _pack_views(d, detail["stages"])
     return detail
+
+
+def _analyst_next_html(md_path: Path) -> str:
+    """ANALYST-NEXT.md may be JSON {"md": ...} or raw markdown. Render HTML."""
+    try:
+        raw = md_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    text = raw
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict) and isinstance(data.get("md"), str):
+            text = data["md"]
+    except json.JSONDecodeError:
+        pass
+    try:
+        import markdown as _md
+        return _md.markdown(text)
+    except Exception:
+        return text
+
+
+def _pack_views(root: Path, files: dict) -> dict:
+    """Designed per-stage view models (parsed data, not raw dumps)."""
+    v: dict = {}
+    get = lambda st, fn: (files.get(st) or {}).get(fn)
+
+    # intake — fact chips
+    intake = get("intake", "intake.json") or {}
+    v["intake"] = {
+        "chips": [(k, intake.get(k)) for k in
+                  ("sha256", "size", "format", "magic", "elapsed_s")
+                  if intake.get(k) not in (None, "")] or None,
+        "file": intake.get("file"),
+        "meta": get("intake", "META.json"),
+    }
+
+    # quick — verdict card + evidence
+    quick = get("quick", "quick.json") or {}
+    ev = quick.get("evidence") if isinstance(quick, dict) else None
+    v["quick"] = {
+        "verdict": quick.get("verdict") if isinstance(quick, dict) else None,
+        "evidence": ev if isinstance(ev, dict) else None,
+        "failures": (quick.get("tool_failures") if isinstance(quick, dict) else None) or [],
+        "meta": get("quick", "META.json"),
+        "missing": not bool(quick),
+    }
+
+    # dynamic — detonation summary
+    dyn_meta = get("dynamic", "META.json")
+    stg = get("dynamic", "STAGE.json")
+    fr = get("dynamic", "frida_summary.json") or {}
+    pm = get("dynamic", "procmon_summary.json") or {}
+    net = get("dynamic", "network.json") or {}
+    ni = get("dynamic", "network_intel.json") or {}
+    caps = []
+    if isinstance(ni, dict):
+        for cap in (ni.get("captures") or [])[:4]:
+            caps.append({
+                "pcap": cap.get("pcap"),
+                "counts": cap.get("counts") or {},
+                "dns": (cap.get("dns_queries") or [])[:15],
+                "http": (cap.get("http_requests") or [])[:10],
+                "sni": (cap.get("tls_sni") or [])[:10],
+            })
+    arts = []
+    ddir = root / "dynamic"
+    if ddir.is_dir():
+        for f in sorted(ddir.iterdir()):
+            if f.is_file():
+                arts.append({"name": f.name, "size": f.stat().st_size,
+                             "big": f.stat().st_size > 65536})
+    v["dynamic"] = {
+        "ran": bool(dyn_meta),
+        "meta": dyn_meta, "stage": stg,
+        "frida": {"calls": fr.get("calls"),
+                  "top_apis": (fr.get("top_apis") or [])[:12],
+                  "decoded_paths": (fr.get("decoded_paths") or [])[:10],
+                  "sockaddrs": (fr.get("sockaddrs") or [])[:10]} if fr.get("status") == "ok" else None,
+        "procmon": {"rows_total": pm.get("rows_total"),
+                    "rows_sample": pm.get("rows_sample"),
+                    "top_operations": (pm.get("top_operations") or [])[:12],
+                    "top_paths": (pm.get("top_paths") or [])[:10],
+                    "top_registry": (pm.get("top_registry") or [])[:10],
+                    "process_creates": (pm.get("process_creates") or [])[:10]} if pm.get("status") == "ok" else None,
+        "network": {"pcaps": net.get("pcaps") or [],
+                    "domains": (net.get("domains_guess") or [])[:20],
+                    "captures": caps} if net else None,
+        "artifacts": arts,
+        "sha": root.name,
+    }
+
+    # deep — agent card + timeline + mcp (reuses existing agent block;
+    # deep.json already carries agent {source, verdict, llm_analysis,
+    # tool_calls, history})
+    dj = get("deep", "deep.json") or {}
+    agent = dj.get("agent") if isinstance(dj, dict) else None
+    hist = (agent.get("history") or []) if isinstance(agent, dict) else []
+    v["deep"] = {
+        "agent": agent if isinstance(agent, dict) else None,
+        "history": hist[:60],
+        "mcp": dj.get("mcp") if isinstance(dj, dict) else None,
+        "meta": get("deep", "META.json"),
+    }
+
+    # yara — rules + lineage
+    rr = get("yara", "rule_report.json") or {}
+    yar_files = []
+    ydir = root / "yara"
+    if ydir.is_dir():
+        for f in sorted(ydir.iterdir()):
+            if f.is_file() and f.suffix in (".yar", ".yml"):
+                try:
+                    yar_files.append({
+                        "name": f.name, "size": f.stat().st_size,
+                        "head": f.read_text(encoding="utf-8",
+                                            errors="replace")[:1500],
+                    })
+                except OSError:
+                    continue
+    v["yara"] = {"report": rr if isinstance(rr, dict) else None,
+                 "rules": yar_files, "sha": root.name}
+
+    # report — analyst-next markdown + summary
+    rep = get("report", "report.json") or {}
+    md_html = _analyst_next_html(root / "report" / "ANALYST-NEXT.md")
+    v["report"] = {"report": rep if isinstance(rep, dict) else None,
+                   "analyst_next_html": md_html}
+
+    # audit — gate checklist
+    audit = _read_json(root / "audit.json") or {}
+    v["audit"] = {
+        "truly_green": audit.get("truly_green"),
+        "all_green": audit.get("all_green"),
+        "quality_green": audit.get("quality_green"),
+        "checks": audit.get("checks") or [],
+        "fallback_stages": audit.get("fallback_stages") or [],
+        "failed_tools": audit.get("failed_tools") or [],
+        "dynamic_conflict": audit.get("dynamic_conflict"),
+    }
+    return v
 
 
 _vm_health_cache: dict = {"t": 0.0, "data": None}
@@ -158,25 +326,72 @@ def _vm_health() -> dict:
     return out
 
 
+STAGE_ORDER = ("intake", "quick", "dynamic", "deep", "yara", "report")
+
+
+def _current_stage(sha: str | None) -> str | None:
+    """Which stage is the running pipeline currently in (from landed META)."""
+    if not sha:
+        return None
+    root = LOGS_DIR / sha
+    if not root.is_dir():
+        return "intake"
+    landed = [s for s in STAGE_ORDER
+              if (root / s / "META.json").is_file() or (root / s / "STAGE.json").is_file()]
+    if not landed:
+        return "intake"
+    idx = STAGE_ORDER.index(landed[-1])
+    return STAGE_ORDER[idx] if idx >= len(STAGE_ORDER) - 1 else STAGE_ORDER[idx + 1]
+
+
 def _run_pipeline_in_thread(sample_path: str, max_seconds: int,
                             pesieve: bool, dry_llm: bool, dynamic: bool) -> None:
     """Run the remote pipeline in a background thread; store the result."""
+    import contextlib
+    import datetime
+    import io
     import traceback
 
     def _do():
         with _run_lock:
             _run_state["running"] = True
+            _run_state["log"] = []
+            # set sha up-front so /run/status can report live stage progress
             try:
+                from winre.evidence import sha256_file
+                _run_state["sha"] = sha256_file(Path(sample_path))
+            except Exception:
+                pass
+
+            def _emit(line: str):
+                _run_state["log"].append(line.rstrip())
+                if len(_run_state["log"]) > 400:
+                    _run_state["log"] = _run_state["log"][-400:]
+
+            class _Tee(io.TextIOBase):
+                def write(self, s):
+                    for ln in str(s).splitlines():
+                        _emit(ln)
+                    return len(s)
+
+            # capture pipeline stdout into the in-memory ring log
+            real_out, real_err = sys.stdout, sys.stderr
+            sys.stdout = sys.stderr = _Tee()
+            try:
+                started = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 res = remote_driver.run_remote_pipeline(
                     Path(sample_path), max_seconds=max_seconds,
                     enable_pesieve=pesieve, enable_dynamic=dynamic,
                     dry_llm=dry_llm)
+                _run_state["sha"] = res["sha"]
                 _run_state["last"] = {"ok": True, "sha": res["sha"],
+                                      "started": started,
                                       "audit": res["results"]["audit"]}
             except Exception as e:
                 print("[winre-ui] run failed:", traceback.format_exc(), flush=True)
                 _run_state["last"] = {"ok": False, "error": str(e)}
             finally:
+                sys.stdout, sys.stderr = real_out, real_err
                 _run_state["running"] = False
 
     t = threading.Thread(target=_do, daemon=True)
@@ -218,6 +433,9 @@ def create_app() -> "Flask":
             pesieve = request.form.get("pesieve") == "on"
             dry_llm = request.form.get("dry_llm") == "on"
             dynamic = request.form.get("dynamic") == "on"
+            _run_state["sha"] = None
+            _run_state["log"] = []
+            _run_state["last"] = None
             _run_pipeline_in_thread(sample, max_seconds, pesieve, dry_llm, dynamic)
             return jsonify({"ok": True, "msg": "pipeline started",
                             "sample": sample, "dynamic": dynamic})
@@ -226,7 +444,138 @@ def create_app() -> "Flask":
 
     @app.route("/run/status")
     def run_status():
-        return jsonify({k: _run_state[k] for k in ("running", "last")})
+        sha = _run_state.get("sha")
+        return jsonify({"running": _run_state["running"],
+                        "last": _run_state["last"],
+                        "sha": sha,
+                        "current_stage": _current_stage(sha) if _run_state["running"] else None})
+
+    @app.route("/api/run/log")
+    def run_log():
+        """Capped tail of the running (or last) pipeline log."""
+        try:
+            n = max(10, min(200, int(request.args.get("n", "60"))))
+        except ValueError:
+            n = 60
+        return jsonify({"running": _run_state["running"],
+                        "sha": _run_state.get("sha"),
+                        "lines": _run_log_tail(n)})
+
+    # --- Manual stage control (RevAI ManualStages equivalent) --------------
+
+    MANUAL_STAGES = ("quick", "dynamic", "deep", "yara", "report", "audit")
+
+    def _stage_sample(pack_root: Path) -> str | None:
+        """Sample name on the VM for a pack (basename of intake file)."""
+        intake = _read_json(pack_root / "intake" / "intake.json") or {}
+        f = intake.get("file") or ""
+        name = f.replace("\\", "/").rstrip("/").split("/")[-1]
+        return name or None
+
+    @app.route("/api/hitl/snapshot", methods=["POST"])
+    def hitl_snapshot():
+        """HITL snapshot ledger: {"sha","action":"verified_clean"|"restored"}."""
+        from winre.evidence import EvidencePack
+        body = request.get_json(force=True, silent=True) or {}
+        sha = (body.get("sha") or "").strip()
+        action = (body.get("action") or "").strip()
+        if action not in ("verified_clean", "restored") or not sha:
+            return jsonify({"ok": False, "error": "need sha + action"}), 400
+        root = LOGS_DIR / sha
+        if not root.is_dir():
+            return jsonify({"ok": False, "error": "pack not found"}), 404
+        import datetime
+        p = root / "snapshot.json"
+        cur = _read_json(p) or {}
+        cur[action] = True
+        cur[action + "_at"] = datetime.datetime.now(
+            datetime.timezone.utc).isoformat()
+        p.write_text(json.dumps(cur, indent=2), encoding="utf-8")
+        return jsonify({"ok": True, "snapshot": cur})
+
+    @app.route("/stages/<sha>/<stage>", methods=["POST"])
+    def run_stage(sha: str, stage: str):
+        """Run ONE stage against an existing pack (manual control).
+
+        Dynamic requires the HITL checkpoint: {"confirm_snapshot": true} in
+        the body, meaning the operator verified a clean VM snapshot.
+        """
+        from winre.evidence import EvidencePack
+        if stage not in MANUAL_STAGES:
+            return jsonify({"ok": False, "error": f"unknown stage {stage}"}), 400
+        if _run_state["running"]:
+            return jsonify({"ok": False, "error": "pipeline already running"}), 409
+        root = LOGS_DIR / sha
+        if not root.is_dir():
+            return jsonify({"ok": False, "error": "pack not found"}), 404
+        body = request.get_json(force=True, silent=True) or {}
+        if stage == "dynamic" and not body.get("confirm_snapshot"):
+            return jsonify({
+                "ok": False,
+                "error": ("dynamic refused: confirm a clean VM snapshot first "
+                          "(POST /api/hitl/snapshot verified_clean, then "
+                          "retry with confirm_snapshot=true)"),
+            }), 403
+
+        from winre import remote_driver as _rd
+
+        def _run_one():
+            cfg = _rd.flare_cfg()
+            pack = EvidencePack(LOGS_DIR, sha).ensure()
+            name = _stage_sample(root)
+            if not name:
+                return {"ok": False, "error": "intake sample unknown"}
+            try:
+                if stage == "quick":
+                    out = _rd.remote_quick(name, pack, cfg)
+                    return {"ok": True, "result": out}
+                if stage == "dynamic":
+                    out = _rd.remote_dynamic(
+                        name, sha, pack, cfg,
+                        int(body.get("max_seconds", 45)),
+                        bool(body.get("pesieve", False)))
+                    return {"ok": True, "result": out}
+                if stage == "deep":
+                    out = _rd.remote_deep(name, pack, cfg,
+                                          bool(body.get("dry_llm", False)), sha=sha)
+                    return {"ok": True, "result": out}
+                if stage == "yara":
+                    from winre import yara_gen
+                    rep = yara_gen.generate_rules(pack.root, pack.stages["yara"])
+                    return {"ok": True, "result": rep}
+                if stage == "report":
+                    from winre.pipeline import _report
+                    quick = pack.read("quick", "quick.json") or {}
+                    dynamic = pack.read("dynamic", "STAGE.json")
+                    deep = pack.read("deep", "deep.json") or {}
+                    rep = _report(pack, sha, quick, dynamic, deep)
+                    return {"ok": True, "result": rep}
+                if stage == "audit":
+                    from winre import audit as audit_mod
+                    res = audit_mod.audit(pack.root)
+                    (pack.root / "audit.json").write_text(
+                        json.dumps(res, indent=2) + "\n", encoding="utf-8")
+                    return {"ok": True, "result": res}
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "error": str(e)[:300]}
+
+        def _do():
+            with _run_lock:
+                _run_state["running"] = True
+                _run_state["sha"] = sha
+                _run_state["log"] = []
+                try:
+                    # reuse the same capture helper by calling inline
+                    _run_state["last"] = _run_one()
+                    if not isinstance(_run_state["last"], dict):
+                        _run_state["last"] = {"ok": False, "error": "no result"}
+                except Exception as e:  # noqa: BLE001
+                    _run_state["last"] = {"ok": False, "error": str(e)}
+                finally:
+                    _run_state["running"] = False
+
+        threading.Thread(target=_do, daemon=True).start()
+        return jsonify({"ok": True, "msg": f"stage {stage} started", "sha": sha})
 
     @app.route("/packs")
     def packs():
@@ -263,14 +612,96 @@ def create_app() -> "Flask":
 
     @app.route("/packs/<sha>/<stage>/<fname>")
     def pack_file(sha: str, stage: str, fname: str):
-        d = LOGS_DIR / sha / stage / fname
+        from flask import Response, abort
+        # Path-traversal guard: all segments must be plain names, and the
+        # resolved path must stay inside the pack's stage directory.
+        for seg in (sha, stage, fname):
+            if not seg or seg in (".", "..") or "/" in seg or "\\" in seg:
+                abort(400, "invalid path segment")
+        base = (LOGS_DIR / sha / stage).resolve()
+        d = (base / fname).resolve()
+        try:
+            d.relative_to(base)
+        except ValueError:
+            abort(400, "path escapes pack directory")
         if not d.is_file():
             return jsonify({"error": "not found"}), 404
-        return d.read_text(encoding="utf-8", errors="replace")
+        # ?download=1 streams the whole file as an attachment (large CSV/pcap
+        # logs). Inline view is capped at 64KB with ?offset= for paging.
+        if request.args.get("download") == "1":
+            def _stream():
+                with d.open("rb") as fh:
+                    while True:
+                        chunk = fh.read(65536)
+                        if not chunk:
+                            break
+                        yield chunk
+            return Response(_stream(), mimetype="application/octet-stream",
+                            headers={"Content-Disposition":
+                                     f"attachment; filename={fname}"})
+        try:
+            offset = max(0, int(request.args.get("offset", "0")))
+        except ValueError:
+            offset = 0
+        size = d.stat().st_size
+        cap = 65536
+        with d.open("rb") as fh:
+            fh.seek(offset)
+            chunk = fh.read(cap + 1)
+        truncated = len(chunk) > cap
+        text = chunk[:cap].decode("utf-8", errors="replace")
+        return jsonify({"sha": sha, "stage": stage, "file": fname,
+                        "size": size, "offset": offset,
+                        "truncated": truncated,
+                        "next_offset": offset + cap if truncated else None,
+                        "text": text})
 
     @app.route("/mcp")
     def mcp():
         return render_template("mcp.html", health=_vm_health())
+
+    @app.route("/settings")
+    def settings():
+        """Config state (read-only; secrets masked, never shown)."""
+        import os as _os
+        from winre import envfile as _env  # noqa: F401  (ensures .env loaded)
+        env_path = Path(_os.environ.get(
+            "WINRE_ENV", str(REPO / ".env")))
+        cfg = {
+            "flare": {
+                "host": _os.environ.get("FLARE_HOST", "192.168.77.42"),
+                "port": _os.environ.get("FLARE_SSH_PORT", "22"),
+                "user": _os.environ.get("FLARE_USER", "FLARE-VM"),
+                "key": _os.environ.get("FLARE_SSH_KEY", "~/.ssh/cadre-77.42-key"),
+            },
+            "llm": {
+                "base_url": _os.environ.get("WINRE_LLM_BASE_URL", ""),
+                "model": _os.environ.get("WINRE_LLM_MODEL", ""),
+                "reasoning": _os.environ.get("WINRE_LLM_REASONING", ""),
+                "key_set": bool(_os.environ.get("WINRE_LLM_API_KEY")),
+            },
+            "env_file": {"path": str(env_path), "present": env_path.is_file()},
+            "logs_dir": str(LOGS_DIR),
+            "ghidra_heap": _os.environ.get("GHIDRA_HEADLESS_MAXMEM", "(ghidra default 2G)"),
+        }
+        llm_ok = False
+        try:
+            from winre import llm_client
+            llm_ok = llm_client.available()
+        except Exception:
+            pass
+        return render_template("settings.html", cfg=cfg, llm_ok=llm_ok)
+
+    @app.route("/help")
+    def help_page():
+        """Render the pipeline doc as HTML."""
+        try:
+            import markdown as _md
+            src = (REPO / "docs" / "PIPELINE.md").read_text(encoding="utf-8")
+            html = _md.markdown(src)
+        except Exception as e:  # noqa: BLE001
+            html = f"<p class='muted'>docs unavailable: {e}</p>"
+        return render_template("help.html", body=html)
 
     return app
 

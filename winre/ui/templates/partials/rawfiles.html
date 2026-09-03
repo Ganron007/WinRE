@@ -1,0 +1,16 @@
+{% set raw = pack.stages %}
+<details style="margin-top:20px">
+  <summary>Raw stage files (for inspection)</summary>
+  {% for stage, files in raw.items() %}
+    {% if files %}
+    <p class="muted" style="font-size:var(--tx-xs); margin:10px 0 4px"><b>{{ stage }}</b></p>
+    <p style="margin:0">
+      {% for fname in files.keys() %}
+        <a class="btn ghost" style="padding:2px 10px; font-size:var(--tx-xs); margin:0 4px 4px 0"
+           href="/packs/{{ pack.sha }}/{{ stage }}/{{ fname }}">{{ fname }}</a>
+      {% endfor %}
+    </p>
+    {% endif %}
+  {% endfor %}
+  <p class="muted" style="font-size:var(--tx-xs)">Inline view is capped at 64KB per file; large artifacts use download links in the stage sections.</p>
+</details>

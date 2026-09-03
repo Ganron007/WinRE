@@ -18,8 +18,14 @@
     <a href="/run" class="{{ 'active' if p.startswith('/run') }}">Run</a>
     <a href="/packs" class="{{ 'active' if p.startswith('/packs') }}">Cases</a>
     <a href="/mcp" class="{{ 'active' if p == '/mcp' }}">MCP</a>
+    <a href="/settings" class="{{ 'active' if p == '/settings' }}">Settings</a>
+    <a href="/help" class="{{ 'active' if p == '/help' }}">Help</a>
   </nav>
   <div class="topbar-right">
+    <button class="btn ghost" style="font-size:var(--tx-xs); padding:3px 10px"
+            onclick="togglePalette(true)" title="jump to pack">
+      ⌘K <span class="muted">jump</span>
+    </button>
     <span class="api-health {{ 'up' if health and health.ssh else 'down' }}"
           data-tip="{{ 'FlareVM reachable' if health and health.ssh else 'FlareVM unreachable' }}">
       <span class="dot"></span>{{ 'Flare' if health and health.ssh else 'DOWN' }}
@@ -27,5 +33,47 @@
   </div>
 </header>
 {% block content %}{% endblock %}
+<div id="palette" style="display:none; position:fixed; inset:0; z-index:100;
+     background:rgba(0,0,0,0.55)" onclick="if(event.target===this)togglePalette(false)">
+  <div style="max-width:560px; margin:12vh auto 0; background:var(--bg-1);
+       border:1px solid var(--line-hi); border-radius:var(--r-md); overflow:hidden">
+    <input id="paletteInput" placeholder="jump to pack (sha prefix)…" autocomplete="off"
+           style="border:none; border-bottom:1px solid var(--line); border-radius:0">
+    <div id="paletteList" style="max-height:320px; overflow:auto"></div>
+  </div>
+</div>
+<script>
+(function(){
+  let packs = [];
+  function togglePalette(show){
+    const el = document.getElementById('palette');
+    const open = show === undefined ? el.style.display === 'none' : show;
+    el.style.display = open ? 'block' : 'none';
+    if (open) {
+      fetch('/api/packs').then(r => r.json()).then(j => { packs = j; render(''); });
+      const inp = document.getElementById('paletteInput');
+      inp.value = ''; setTimeout(() => inp.focus(), 0);
+    }
+  }
+  function render(q){
+    const ql = (q || '').toLowerCase();
+    const rows = packs.filter(p => p.sha.toLowerCase().startsWith(ql)).slice(0, 12);
+    document.getElementById('paletteList').innerHTML = rows.length
+      ? rows.map(p => `<a href="/packs/${p.sha}" style="display:flex; gap:8px; align-items:center;
+           padding:8px 12px; color:var(--tx-1)">
+           <span class="mono" style="flex:1">${p.short}…</span>
+           <span style="font-size:var(--tx-xs); color:var(--tx-2)">${p.source || ''} · ${p.phase || ''}</span>
+         </a>`).join('')
+      : '<div class="muted" style="padding:12px">no matches</div>';
+  }
+  document.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault(); togglePalette();
+    } else if (e.key === 'Escape') { togglePalette(false); }
+  });
+  document.getElementById('paletteInput').addEventListener('input', e => render(e.target.value));
+  window.togglePalette = togglePalette;
+})();
+</script>
 </body>
 </html>

@@ -1,0 +1,41 @@
+{% set q = pack.views.quick %}
+<div class="page-section-title">Quick triage</div>
+{% if q.meta is none and not q.verdict %}
+  <p class="muted">Quick stage did not run for this pack.</p>
+{% else %}
+<div class="board"><div class="board-body">
+  <p style="margin:0 0 8px">
+    verdict:
+    {% if q.verdict == 'malicious' %}<span class="badge malware">malicious</span>
+    {% elif q.verdict == 'benign' %}<span class="badge up">benign</span>
+    {% elif q.verdict %}<span class="badge warn">{{ q.verdict }}</span>
+    {% else %}<span class="badge flat">—</span>{% endif %}
+    {% if q.meta and q.meta.fallback %}<span class="badge warn">fallback</span>{% endif %}
+  </p>
+  {% if q.evidence %}
+  {% set mal = q.evidence.malcat %}
+  {% if mal is mapping %}
+  <p class="muted" style="margin:4px 0">
+    malcat: anomalies <b>{{ mal.get('anomalies_count', '?') }}</b> ·
+    yara hits <b>{{ mal.get('yara_count', '?') }}</b> ·
+    imports <b>{{ mal.get('imports_count', '?') }}</b>
+    {% if mal.get('yara_hits') %}· hits:
+      {% for h in mal.get('yara_hits')[:8] %}<code>{{ h }}</code> {% endfor %}
+    {% endif %}
+  </p>
+  {% elif mal %}<p class="muted" style="margin:4px 0">malcat: {{ mal }}</p>{% endif %}
+  {% set ida = q.evidence.ida %}{% set gh = q.evidence.ghidra %}
+  <p class="muted" style="margin:4px 0">
+    IDA funcs: <b>{{ ida.get('func_count', '—') if ida is mapping else '—' }}</b> ·
+    Ghidra funcs: <b>{{ (gh.get('func_rows') if gh is mapping else '—') or '—' }}</b>
+  </p>
+  {% endif %}
+  {% if q.failures %}
+  <p class="muted" style="margin:4px 0">tool failures:</p>
+  <ul style="color:var(--danger); font-size:var(--tx-sm); margin:4px 0">
+    {% for f in q.failures %}<li class="mono">{{ f }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% if q.meta and q.meta.error %}<div class="notice err">{{ q.meta.error }}</div>{% endif %}
+</div></div>
+{% endif %}

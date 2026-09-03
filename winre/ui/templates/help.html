@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}WinRE — Pipeline help{% endblock %}
+{% block content %}
+<div class="page">
+  <div class="page-head">
+    <h1>How the pipeline works</h1>
+    <span class="sub">rendered from docs/PIPELINE.md</span>
+  </div>
+  <div class="board" style="max-width:860px"><div class="board-body">
+    {{ body | safe }}
+  </div></div>
+</div>
+{% endblock %}

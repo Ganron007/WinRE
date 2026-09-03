@@ -1,0 +1,18 @@
+{% set rp = pack.views.report %}
+<div class="page-section-title">Analyst report</div>
+{% if rp.report %}
+<div class="board"><div class="board-body">
+  <p style="margin:0 0 8px">
+    source:
+    {% if rp.report.get('source') == 'llm_judge' %}<span class="badge up">llm_judge</span>
+    {% else %}<span class="badge warn">{{ rp.report.get('source', 'deterministic_fallback') }}</span>{% endif %}
+    {% if rp.report.get('phase') %}<span class="badge flat">{{ rp.report.phase }}</span>{% endif %}
+  </p>
+</div></div>
+{% endif %}
+{% if rp.analyst_next_html %}
+<div class="board"><div class="board-head"><h3>Analyst next actions</h3></div>
+<div class="board-body">{{ rp.analyst_next_html | safe }}</div></div>
+{% else %}
+<p class="muted">No analyst-next notes in this pack.</p>
+{% endif %}

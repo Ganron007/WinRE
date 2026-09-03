@@ -1,0 +1,12 @@
+{% set i = pack.views.intake %}
+<div class="page-section-title">Intake</div>
+{% if i.chips %}
+<div class="board"><div class="board-body" style="display:flex; gap:6px; flex-wrap:wrap">
+  {% for k, val in i.chips %}
+  <span class="badge flat">{{ k }}: <span class="mono">{{ val }}</span></span>
+  {% endfor %}
+  {% if i.file %}<span class="badge flat">src: <span class="mono">{{ i.file }}</span></span>{% endif %}
+</div></div>
+{% else %}
+<p class="muted">No intake evidence (pack may predate the stage).</p>
+{% endif %}

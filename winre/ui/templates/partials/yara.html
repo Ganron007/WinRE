@@ -1,0 +1,28 @@
+{% set y = pack.views.yara %}
+<div class="page-section-title">YARA + Sigma (deterministic)</div>
+{% set rr = y.report or {} %}
+{% if y.rules or rr.get('rule_id') %}
+<div class="board"><div class="board-body">
+  {% if rr.get('rule_id') %}
+  <p style="margin:0 0 8px">rule <code>{{ rr.rule_id }}</code>
+     <span class="muted">· deterministic, no LLM-authored content</span></p>
+  {% set evd = rr.get('evidence') or {} %}
+  <p class="muted" style="font-size:var(--tx-xs); margin:0 0 8px">
+    lineage — imports: {{ (evd.get('imports_used') or [])|length }} ·
+    strings: {{ (evd.get('strings_used') or [])|length }} ·
+    network: {{ (evd.get('network_used') or [])|length }}
+  </p>
+  {% if evd.get('imports_used') %}
+  <p style="font-size:var(--tx-xs); margin:4px 0">{% for i in evd.imports_used %}<code>{{ i }}</code> {% endfor %}</p>
+  {% endif %}
+  {% endif %}
+  {% for r in y.rules %}
+  <div class="page-section-title">{{ r.name }} <span class="muted">({{ r.size }}B)</span>
+    <a href="/packs/{{ pack.sha }}/yara/{{ r.name }}?download=1"
+       style="font-size:var(--tx-xs)" class="btn ghost">download</a></div>
+  <pre>{{ r.head }}{% if r.size > 1500 %}…(truncated){% endif %}</pre>
+  {% endfor %}
+</div></div>
+{% else %}
+<p class="muted">No YARA rules in this pack.</p>
+{% endif %}

@@ -18,9 +18,33 @@
     </div>
   </div>
   <script>
+    const STAGES = ['intake','quick','dynamic','deep','yara','report'];
     const t = setInterval(async () => {
       const r = await fetch('/run/status');
       const s = await r.json();
+      let html = '';
+      if (s.current_stage) {
+        const cur = {};
+        STAGES.forEach(st => cur[st] = st === s.current_stage ? 'live' :
+          (STAGES.indexOf(st) < STAGES.indexOf(s.current_stage) ? 'done' : 'todo'));
+        html += '<div style="display:flex; gap:6px; margin-bottom:10px; flex-wrap:wrap">';
+        for (const st of STAGES) {
+          const cls = cur[st] === 'live' ? 'warn' : (cur[st] === 'done' ? 'up' : 'flat');
+          html += `<span class="badge ${cls}">${st}</span>`;
+        }
+        html += '</div>';
+      }
+      const lr = await fetch('/api/run/log?n=12');
+      const lj = await lr.json();
+      if (lj.lines && lj.lines.length) {
+        html += '<pre>' + lj.lines.map(escapeHtml).join('\n') + '</pre>';
+      } else {
+        html += '<p class="muted">Polling stage status…</p>';
+      }
+      document.getElementById('progress').innerHTML = html;
+
+      function escapeHtml(x){ return x.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
       if (!s.running) {
         clearInterval(t);
         const last = s.last || {};
