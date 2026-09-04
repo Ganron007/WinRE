@@ -8,7 +8,10 @@
   </div>
 
   <div class="board" style="max-width:840px">
-    <div class="board-head"><h3>Status</h3></div>
+    <div class="board-head"><h3>Status</h3>
+      <span class="muted" style="margin-left:auto; font-size:var(--tx-xs)"
+            id="mcpChecked">probed at page load · auto-refreshes with header pills</span>
+    </div>
     <div class="board-body">
       <div style="display:flex; gap:10px; flex-wrap:wrap">
         <div class="stat" style="flex:1; min-width:200px">
@@ -17,6 +20,11 @@
                style="font-size:var(--tx-md)">
             {{ 'UP' if health.mcp.get('x64dbg') else 'DOWN' }}</div>
           <p class="muted" style="font-size:var(--tx-xs); margin-top:6px">71 tools · debugger control</p>
+          {% if not health.mcp.get('x64dbg') %}
+          <p class="muted" style="font-size:var(--tx-xs)">on-demand: launched by the
+            pipeline via <span class="mono">WinRE-X64dbg-Once</span>, or
+            <span class="mono">python -m winre.mcp.x64dbg_manager ensure</span></p>
+          {% endif %}
         </div>
         <div class="stat" style="flex:1; min-width:200px">
           <div class="stat-label">Malcat-MCP · :9009</div>
@@ -24,6 +32,10 @@
                style="font-size:var(--tx-md)">
             {{ 'UP' if health.mcp.get('malcat') else 'DOWN' }}</div>
           <p class="muted" style="font-size:var(--tx-xs); margin-top:6px">45 tools · analyse/decompile</p>
+          {% if not health.mcp.get('malcat') %}
+          <p class="muted" style="font-size:var(--tx-xs)">restart on VM console:
+            <span class="mono">C:\WinRE\winre\mcp\start_servers.ps1</span></p>
+          {% endif %}
         </div>
         <div class="stat" style="flex:1; min-width:200px">
           <div class="stat-label">WinDbg-MCP · :9097</div>
@@ -33,6 +45,14 @@
           <p class="muted" style="font-size:var(--tx-xs); margin-top:6px">10 tools · dump/kernel/remote</p>
         </div>
       </div>
+      {% if not health.ssh %}
+      <div class="empty" style="padding:var(--sp-4)">
+        <div class="glyph">⌁</div>
+        <div class="title">FlareVM unreachable</div>
+        <div class="hint">All MCP servers live on the VM — boot it first, then
+          refresh. Probes go over SSH (:9009/:9097 are localhost-bound).</div>
+      </div>
+      {% endif %}
     </div>
   </div>
 
