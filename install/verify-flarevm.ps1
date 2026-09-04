@@ -94,9 +94,14 @@ if (-not $malcatBin) {
 }
 if ($malcatBin) {
     Ok "Malcat bin dir -> $malcatBin"
-    $lic = Get-ChildItem $malcatBin -Filter "license*.dat" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($lic) { Ok "Malcat license file -> $($lic.Name)" }
-    else { Warn "no Malcat license file found in $malcatBin (Malcat may run unlicensed/limited - headless analysis quality depends on it)" }
+    # Functional license check: activation state lives inside Malcat (GUI
+    # activation), NOT in a license.dat file. Query the python API.
+    $malcatPy = Join-Path $malcatBin "python313\python.exe"
+    if (-not (Test-Path $malcatPy)) { $malcatPy = "C:\Python313\python.exe" }
+    $licOut = & $malcatPy -c "import sys; sys.path.insert(0, r'$malcatBin'); import malcat; print(malcat.env.flavor)" 2>$null
+    if ($licOut -match "FULL|OEM|PRO") { Ok "Malcat license ACTIVE ($($licOut.Trim()))" }
+    elseif ($licOut) { Warn "Malcat flavor: $($licOut.Trim()) (unlicensed/limited - headless analysis degraded)" }
+    else { Warn "could not query Malcat license flavor via $malcatPy" }
 } else {
     Fail "Malcat install not found (malcat.mcp.py anywhere under C:\Tools / Program Files)"
 }

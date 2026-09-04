@@ -108,8 +108,11 @@ $malcatBin = @("C:\Tools\malcat\bin", "C:\Program Files\Malcat\bin",
     Where-Object { Test-Path (Join-Path $_ "malcat.mcp.py") } | Select-Object -First 1
 if ($malcatBin) {
     Ok "Malcat -> $malcatBin"
-    if (Get-ChildItem $malcatBin -Filter "license*.dat" -ErrorAction SilentlyContinue) { Ok "Malcat license present" }
-    else { Manual "Install your Malcat license into $malcatBin (headless MCP requires it)." }
+    $malcatPy = Join-Path $malcatBin "python313\python.exe"
+    if (-not (Test-Path $malcatPy)) { $malcatPy = "C:\Python313\python.exe" }
+    $licOut = & $malcatPy -c "import sys; sys.path.insert(0, r'$malcatBin'); import malcat; print(malcat.env.flavor)" 2>$null
+    if ($licOut -match "FULL|OEM|PRO") { Ok "Malcat license ACTIVE ($($licOut.Trim()))" }
+    else { Manual "Activate Malcat (GUI -> Preferences -> license). Headless API reports: $($licOut ?? 'unknown')." }
 } else { Manual "Install Malcat (commercial) with bin\malcat.mcp.py reachable (docs\PREREQUISITES.md)." }
 
 $idaDir = "C:\Program Files\IDA Professional 9.3"
