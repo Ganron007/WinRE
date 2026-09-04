@@ -1068,7 +1068,7 @@ def main() -> int:
         "--mode",
         choices=["ssh", "local"],
         default=os.environ.get("WINRE_ORCHESTRATOR_MODE", "ssh"),
-        help="ssh = Remnux→Flare via SSH (legacy); local = run on Flare (recommended)",
+        help="ssh = Remnux to Flare via SSH (legacy); local = run on Flare (recommended)",
     )
     args = ap.parse_args()
 
