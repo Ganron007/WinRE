@@ -52,7 +52,19 @@ DIRTY_ACTIONS = ("detonated", "debugged")
 
 def mode() -> str:
     m = os.environ.get("WINRE_SNAPSHOT_GATE", "observe").strip().lower()
-    return m if m in ("observe", "enforce", "off") else "observe"
+    if m not in ("observe", "enforce", "off"):
+        # fail-open would silently weaken enforcement - pin to observe but
+        # shout, since the operator typed something we don't know
+        print(f"[snapshot_gate] WARN unknown WINRE_SNAPSHOT_GATE={m!r}; "
+              f"using observe", flush=True)
+        return "observe"
+    return m
+
+
+# Debug-execution session scope: the FIRST debug preflight in this process
+# consumes the marker; later debug calls in the same agent run are allowed
+# against the in-memory flag (the VM is already dirty from call #1).
+_debug_consumed: set = set()
 
 
 def _enc(ps: str) -> str:
@@ -237,16 +249,18 @@ def preflight(kind: str, *, sha: str = "", cfg: dict | None = None,
               consume: bool = True) -> dict:
     """Gate check before executing anything on the VM (detonation or debug).
 
-    Returns {"allowed": bool, "gate": <status>, "action": None|"auto_restored",
-             "consumed": bool|None}.
-    In observe mode always allowed=True (advisory — never hamper testing);
-    everything is still probed, recorded, and reported so flipping to
-    enforce is a one-env-var change with zero surprises.
+    Enforce-mode contract: `allowed=True` is returned ONLY when the marker
+    was atomically consumed this call (consumed=True), a hypervisor
+    auto-restore just re-created and consumed it, or (debug) the marker was
+    already consumed earlier in THIS process run. A consume that reports
+    absent/unknown fails closed — two executions off one restore are
+    impossible, which is the entire point of L1.
     """
     cfg = cfg or flare_cfg()
     m = mode()
     hc = hypervisor_cfg()
     action_taken = None
+    consumed = None
     if m == "enforce" and hc:
         r = hypervisor_restore(hc)
         if not r.get("ok"):
@@ -254,20 +268,45 @@ def preflight(kind: str, *, sha: str = "", cfg: dict | None = None,
                     "action": None, "consumed": None, "error": r.get("error")}
         action_taken = "auto_restored"
         consumed = consume_marker(cfg) if consume else None
+        if consume and consumed is not True:
+            return {"allowed": False, "gate": gate_status(cfg, probe=False),
+                    "action": action_taken, "consumed": consumed,
+                    "error": "snapshot gate: marker consume not confirmed "
+                             f"({consumed}) after restore"}
     else:
-        st = gate_status(cfg)
-        blocked = st["blocked"] and m == "enforce"
-        if blocked:
-            # refusal consumes nothing — the ledger stays an honest audit trail
-            return {"allowed": False, "gate": st, "action": None,
-                    "consumed": None, "error": f"snapshot gate: {st['reason']}"}
-        consumed = (consume_marker(cfg) if (consume and m != "off"
-                                            and st["marker"] is True) else None)
+        # debug calls in this same process already consumed the marker for
+        # this sha: the VM is dirty from call #1, but this agent run's
+        # trajectory continues against the SAME dirty session — allow it.
+        if m == "enforce" and kind == "debug" and consume \
+                and sha in _debug_consumed:
+            consumed = "session"
+        else:
+            st = gate_status(cfg)
+            blocked = st["blocked"] and m == "enforce"
+            if blocked:
+                # refusal consumes nothing — ledger stays an honest trail
+                return {"allowed": False, "gate": st, "action": None,
+                        "consumed": None,
+                        "error": f"snapshot gate: {st['reason']}"}
+            if m == "enforce" and consume:
+                consumed = consume_marker(cfg)
+                if consumed is not True:
+                    return {"allowed": False, "gate": st, "action": None,
+                            "consumed": consumed,
+                            "error": "snapshot gate: marker consume not "
+                                     f"confirmed ({consumed})"}
+                if kind == "debug":
+                    _debug_consumed.add(sha)
     if m != "off":
         record("detonated" if kind == "dynamic" else "debugged", sha=sha,
                detail=action_taken or "gate pass")
-    return {"allowed": True, "gate": gate_status(cfg, probe=False),
-            "action": action_taken, "consumed": consumed, "error": None}
+    # coherent post-decision status: blocked=False is the truth here
+    gate = gate_status(cfg, probe=False)
+    gate["blocked"] = False
+    gate["reason"] = ("executing (auto-restored)" if action_taken
+                      else f"executing (marker {consumed})")
+    return {"allowed": True, "gate": gate, "action": action_taken,
+            "consumed": consumed, "error": None}
 
 
 if __name__ == "__main__":

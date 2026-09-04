@@ -18,6 +18,10 @@ $ErrorActionPreference = "Continue"
 $Sha256 = $Sha256.Trim().ToLower()
 if (-not $WorkRoot) { $WorkRoot = "C:\samples\$Sha256" }
 if (-not $SamplePath) { $SamplePath = Join-Path $WorkRoot "sample.exe" }
+# SSH mode normalizes the sample to sample.exe; LOCAL mode passes the real
+# name (e.g. invoice.exe). Derive the process name so pe-sieve wait and
+# target cleanup work in both modes.
+$SampleProcName = [IO.Path]::GetFileNameWithoutExtension($SamplePath)
 
 $OutDir = Join-Path $WorkRoot "out"
 $LogFile = Join-Path $WorkRoot "job.log"
@@ -147,10 +151,10 @@ try {
 
   if ($EnablePeSieve) {
     New-Item -ItemType Directory -Force -Path $memDir | Out-Null
-    # Wait for sample.exe to appear
+    # Wait for the SAMPLE process to appear (name derived from SamplePath)
     $deadline = (Get-Date).AddSeconds([Math]::Min(20, [Math]::Max(5, $MaxSeconds / 2)))
     while ((Get-Date) -lt $deadline) {
-      $sp = Get-Process -Name "sample" -ErrorAction SilentlyContinue | Select-Object -First 1
+      $sp = Get-Process -Name $SampleProcName -ErrorAction SilentlyContinue | Select-Object -First 1
       if ($sp) {
         $peSievePid = $sp.Id
         break
@@ -177,9 +181,11 @@ try {
         "/shellc", "A",
         "/data", "3",
         "/dnet", "4"
-      ) -Wait -PassThru -WindowStyle Hidden `
+      ) -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput $psLog `
         -RedirectStandardError $psErr
+      # bounded wait: a hung pe-sieve must not stall the whole job
+      if (-not ($psProc | Wait-Process -Timeout 60 -ErrorAction SilentlyContinue)) { Stop-Process -Id $psProc.Id -Force -ErrorAction SilentlyContinue }
       $peSieveRc = $psProc.ExitCode
       $peSieveRan = $true
       # When /json is active pe-sieve writes the report to STDOUT, so make
@@ -198,23 +204,30 @@ try {
         }
       }
       Log ("pe-sieve exit={0} report={1} valid={2} log={3}" -f $peSieveRc, (Test-Path $psReport), $psReportValid, (Test-Path $psLog))
-      # Optional hollows_hunter on same PID (best-effort)
+      # Optional hollows_hunter on same PID (best-effort, bounded)
       if (Test-Path $HollowsHunterExe) {
         $hhOut = Join-Path $memDir "hollows_hunter"
         New-Item -ItemType Directory -Force -Path $hhOut | Out-Null
         Log ("hollows_hunter /pid {0}" -f $peSievePid)
-        Start-Process -FilePath $HollowsHunterExe -ArgumentList @(
+        $hhProc = Start-Process -FilePath $HollowsHunterExe -ArgumentList @(
           "/pid", "$peSievePid",
           "/dir", $hhOut,
           "/quiet"
-        ) -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
+        ) -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
+        if ($hhProc -and -not ($hhProc | Wait-Process -Timeout 60 -ErrorAction SilentlyContinue)) { Stop-Process -Id $hhProc.Id -Force -ErrorAction SilentlyContinue }
       }
     } else {
       Log ("WARN: pe-sieve skipped (pid={0} exe={1})" -f $peSievePid, (Test-Path $PeSieveExe))
     }
   }
 
-  Wait-Process -Id $fridaProc.Id -ErrorAction SilentlyContinue
+  # bounded Frida wait: the script has its own watchdog; this backstop
+  # stops a hung Frida from stalling the job until the orchestrator timeout
+  Wait-Process -Id $fridaProc.Id -Timeout ($MaxSeconds + 90) -ErrorAction SilentlyContinue
+  if (-not $fridaProc.HasExited) {
+    Log "WARN: Frida still running past backstop - killing"
+    Stop-Process -Id $fridaProc.Id -Force -ErrorAction SilentlyContinue
+  }
   $fridaExit = $fridaProc.ExitCode
   if ($null -eq $fridaExit) { $fridaExit = 0 }
 } catch {
@@ -222,7 +235,7 @@ try {
 }
 Log ("Frida exit={0}" -f $fridaExit)
 
-Kill-Image "sample.exe"
+Kill-Image "$SampleProcName.exe"
 Kill-Image "frida-helper-64.exe"
 
 Log "stopping Procmon"
@@ -287,7 +300,7 @@ $summaryPy = Join-Path $PSScriptRoot "summarize_dynamic.py"
 if (-not (Test-Path $summaryPy)) { $summaryPy = "C:\tools\reveng-dynamic\summarize_dynamic.py" }
 if (Test-Path $summaryPy) {
   Log "running summarize_dynamic.py"
-  & $Python $summaryPy --out-dir $OutDir --sample-name "sample.exe" 2>&1 | ForEach-Object { Log "$_" }
+  & $Python $summaryPy --out-dir $OutDir --sample-name "$SampleProcName.exe" 2>&1 | ForEach-Object { Log "$_" }
 } else {
   Log "WARN: summarize_dynamic.py missing"
   @{ status = "partial"; reason = "summarizer missing" } | ConvertTo-Json | Set-Content (Join-Path $OutDir "network.json")

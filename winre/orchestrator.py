@@ -367,9 +367,11 @@ def _lock_pid() -> int | None:
 def _acquire_lock(force: bool = False) -> bool:
     """Mutex to prevent local+SSH jobs from stomping each other.
 
-    Stale-lock recovery: a fresh lockfile whose writer pid is DEAD is
-    takeover-able (crashed run). A live pid holds the lock unless
-    force=True (operator says break it).
+    Atomic exclusive create (no check-then-write TOCTOU). Stale-lock
+    recovery: a fresh lockfile whose writer pid is DEAD is takeover-able
+    (crashed run). A live pid holds the lock unless force=True (operator
+    says break it). Fails CLOSED on unexpected errors — two orchestrators
+    stomping the same VM is worse than a spurious refusal.
     """
     try:
         LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -382,10 +384,20 @@ def _acquire_lock(force: bool = False) -> bool:
             if alive is None and age < 7200 and not force:
                 return False  # unparseable but fresh — respect it
             # stale (dead writer / too old) or forced — take over
-        LOCK_PATH.write_text(f"{_utc()}\n{os.getpid()}\n", encoding="utf-8")
-        return True
+            try:
+                LOCK_PATH.unlink()
+            except Exception:
+                return False
+        try:
+            # O_EXCL: atomic — a concurrent acquirer loses cleanly
+            fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(f"{_utc()}\n{os.getpid()}\n")
+            return True
+        except FileExistsError:
+            return False
     except Exception:
-        return True  # fail open
+        return False  # fail closed
 
 
 def _release_lock() -> None:
@@ -394,6 +406,47 @@ def _release_lock() -> None:
             LOCK_PATH.unlink()
     except Exception:
         pass
+
+
+# Execution-site snapshot gate (L1): the orchestrator RUNS ON THE VM, so the
+# clean-marker check/consume is a local file operation — no SSH, atomic
+# within the single-tenant detonation. The control-plane preflight (remote_
+# driver/snapshot_gate) is the advisory/enforce decision; THIS is the
+# mechanical guarantee. In enforce mode the sample never executes unless the
+# marker was present and is now consumed.
+def _exec_site_gate(kind: str, sha: str, meta: dict) -> bool:
+    marker = Path(os.environ.get(
+        "WINRE_SNAPSHOT_MARKER", r"C:\WinRE\.clean_snapshot"))
+    gmode = os.environ.get("WINRE_SNAPSHOT_GATE", "observe").strip().lower()
+    if gmode not in ("observe", "enforce"):
+        gmode = "observe"
+    meta["gate_mode"] = gmode
+    if gmode == "off":
+        meta["gate"] = "off"
+        return True
+    if marker.exists():
+        try:
+            marker.unlink()
+            consumed = True
+        except Exception:
+            consumed = False
+    else:
+        consumed = False
+    meta["gate_marker_consumed"] = consumed
+    if gmode == "enforce" and not consumed:
+        meta["error"] = ("snapshot gate: clean marker absent — restore the "
+                         "VM snapshot before executing")
+        return False
+    # ledger (best-effort): logs/_vm_state.json next to the packs
+    try:
+        led = LOGS_DIR / "_vm_state.json"
+        led.write_text(json.dumps({
+            "last_action": "detonated" if kind == "dynamic" else "debugged",
+            "ts": _utc(), "sha": sha, "detail": "execution-site consume",
+            "gate_mode": gmode}, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+    return True
 
 
 def _static_pre_scan(sample: Path, dyn_dir: Path, meta: dict) -> None:
@@ -715,6 +768,17 @@ def run_dynamic(
             return meta
         if force and LOCK_PATH.exists() and _lock_pid() not in (None, os.getpid()):
             meta["lock_forced"] = True
+        # execution-site snapshot gate: NO marker consume -> NO execution
+        # in enforce mode (see _exec_site_gate). Runs before anything spawns.
+        if not _exec_site_gate("dynamic", sha, meta):
+            meta["ok"] = False
+            meta["elapsed_s"] = round(time.time() - t0, 1)
+            meta["finished_at"] = _utc()
+            _write_meta(dyn_dir, meta)
+            _release_lock()
+            print(f"[dynamic_run_v2] GATE BLOCKED: {meta.get('error')}",
+                  flush=True)
+            return meta
         try:
             # Malcat triage first (per docs/MALCAT.md:5 stage order)
             try:

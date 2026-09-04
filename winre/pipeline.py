@@ -56,24 +56,27 @@ def _intake(sample: Path, pack: EvidencePack) -> dict:
     meta = {
         "sha256": sha,
         "file": str(sample),
-        "size": sample.stat().st_size,
+        "size": None,
         "magic": "",
-        "format": "pe",
+        "format": "unknown",
     }
-    # magic via file bytes
+    # magic + size via file bytes; unreadable sample = honest unknown
     try:
         with sample.open("rb") as f:
             head = f.read(5)
+        meta["size"] = sample.stat().st_size
         if head[:2] == b"MZ":
             meta["format"] = "pe"
         elif head[:4] == b"\x7fELF":
             meta["format"] = "elf"
         elif head.startswith(b"%PDF"):
             meta["format"] = "pdf"
-        else:
-            meta["format"] = "unknown"
-    except OSError:
-        pass
+    except OSError as e:
+        meta["error"] = f"unreadable: {e}"
+        pack.write("intake", "intake.json", meta)
+        pack.write("intake", "META.json", stage_result(
+            "intake", False, error=meta["error"]))
+        return meta
     meta["elapsed_s"] = round(time.time() - t0, 1)
     pack.write("intake", "intake.json", meta)
     pack.write("intake", "META.json", stage_result("intake", True, summary=meta["format"]))
@@ -93,9 +96,15 @@ def _quick(sample: Path, pack: EvidencePack) -> dict:
         if mc.is_up():
             r = mc.analyse_file(str(sample))
             if r.get("ok"):
-                txt = (r.get("result") or {}).get("text", "")
+                # MCP envelope: {"content":[{"type":"text","text":"<json>"}]}
+                txt = ""
+                res = r.get("result") or {}
+                content = res.get("content") or []
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        txt = part.get("text", "")
+                        break
                 try:
-                    # analyse_file returns JSON text inside content
                     evidence["malcat"] = json.loads(txt)
                 except json.JSONDecodeError:
                     evidence["malcat"] = {"raw": txt[:2000]}
@@ -103,8 +112,10 @@ def _quick(sample: Path, pack: EvidencePack) -> dict:
                 failures.append(f"malcat:{r.get('error','')}")
         else:
             evidence["malcat"] = {"skipped": "server not running on :9009"}
+            failures.append("malcat:server-down")
     except Exception as e:
         evidence["malcat"] = {"skipped": str(e)}
+        failures.append(f"malcat:{str(e)[:80]}")
 
     # IDA SQL — OPTIONAL. Only if a .i64 already exists AND idasql answers
     # quickly (the -q one-shot path can hang on this idasql build; the
@@ -125,13 +136,17 @@ def _quick(sample: Path, pack: EvidencePack) -> dict:
     else:
         evidence["ida"] = {"skipped": "no .i64 yet (create in deep dive)"}
 
-    # Ghidra SQL (canonical funcs)
+    # Ghidra SQL (canonical funcs + high-signal imports for YARA)
     ghidra = _run_sql("ghidra", sample, "@funcs")
     if ghidra.get("ok"):
         evidence["ghidra"] = {"func_rows": len(ghidra.get("rows") or [])}
     else:
         failures.append(f"ghidra:{ghidra.get('error','')[:80]}")
         evidence["ghidra"] = {"error": ghidra.get("error", "")}
+    ghidra_imp = _run_sql("ghidra", sample, "@imports")
+    if ghidra_imp.get("ok"):
+        rows = ghidra_imp.get("rows") or []
+        evidence["ghidra"]["imports"] = [r[0] for r in rows if r][:20]
 
     verdict = "malicious" if evidence.get("malcat", {}).get("yara_hits") else "unknown"
     pack.write("quick", "quick.json", {
@@ -221,6 +236,7 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
     stage_meta = stage_result("dynamic", ok,
                               error=meta.get("error") or ("" if ok else "no META ok"),
                               summary=f"events={meta.get('frida_events')} ok={ok}",
+                              frida_events=meta.get("frida_events"),
                               verdict=meta.get("verdict"),
                               elapsed_s=round(time.time() - t0, 1))
     pack.write("dynamic", "STAGE.json", stage_meta)
@@ -301,7 +317,10 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False) 
         summary=f"mcp={mcp} fallback={fallback}",
         fallback=fallback, tool_failures=failures,
         elapsed_s=round(time.time() - t0, 1)))
-    return {"ok": True, "fallback": fallback, "failures": failures, "mcp": mcp}
+    # surface the agent block so _report can source-tag correctly
+    return {"ok": True, "fallback": fallback, "failures": failures, "mcp": mcp,
+            "agent": out.get("agent"), "llm_analysis": out.get("llm_analysis"),
+            "x64dbg": out.get("x64dbg")}
 
 
 def _deep_prompt(sample: Path, quick: dict, deep_evidence: dict) -> str:
@@ -322,10 +341,15 @@ def _yara(pack: EvidencePack, quick: dict, dynamic: dict | None) -> dict:
     t0 = time.time()
     try:
         rep = yara_gen.generate_rules(pack.root, pack.stages["yara"])
+        # honesty: a rule with no evidence (condition: false) is a fallback,
+        # not a success — the audit must see it
         pack.write("yara", "META.json", stage_result(
             "yara", True, summary=f"rule={rep.get('rule_id')}",
-            rule_id=rep.get("rule_id")))
-        return {"ok": True, "rule_id": rep.get("rule_id")}
+            rule_id=rep.get("rule_id"),
+            fallback=bool(rep.get("empty_rule")),
+            error="empty rule (no evidence)" if rep.get("empty_rule") else None))
+        return {"ok": True, "rule_id": rep.get("rule_id"),
+                "empty_rule": rep.get("empty_rule")}
     except Exception as e:
         pack.write("yara", "META.json", stage_result("yara", False, error=str(e)))
         return {"ok": False, "error": str(e)}

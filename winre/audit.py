@@ -64,24 +64,38 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
 
     # dynamic honesty: static_yara_wins. If dynamic ran but its verdict says
     # 'benign' while static says malicious, that's a conflict — not green.
+    # Reads the CURRENT writers: static verdict from quick/quick.json (written
+    # by pipeline._quick AND remote_quick), dynamic verdict from the
+    # dynamic STAGE.json wrapper (frida_events/verdict kwargs) then META.json.
     static = _stage_ok(evidence, "quick")
     dynamic = _stage_ok(evidence, "dynamic")
     static_verdict = None
     dynamic_verdict = None
-    qf = evidence / "quick" / "verdict.json"
+    qf = evidence / "quick" / "quick.json"
     if qf.is_file():
         try:
             static_verdict = (json.loads(qf.read_text(encoding="utf-8"))
                               .get("verdict"))
         except json.JSONDecodeError:
             pass
-    df = evidence / "dynamic" / "META.json"
-    if df.is_file():
-        try:
-            dynamic_verdict = (json.loads(df.read_text(encoding="utf-8"))
-                               .get("verdict"))
-        except json.JSONDecodeError:
-            pass
+    if static_verdict is None:
+        qm = evidence / "quick" / "META.json"
+        if qm.is_file():
+            try:
+                static_verdict = (json.loads(qm.read_text(encoding="utf-8"))
+                                  .get("verdict"))
+            except json.JSONDecodeError:
+                pass
+    for dyn_name in ("STAGE.json", "META.json"):
+        df = evidence / "dynamic" / dyn_name
+        if df.is_file():
+            try:
+                dynamic_verdict = (json.loads(df.read_text(encoding="utf-8"))
+                                   .get("verdict"))
+                if dynamic_verdict is not None:
+                    break
+            except json.JSONDecodeError:
+                pass
 
     dynamic_conflict = False
     if dynamic.get("ran") and static_verdict == "malicious" \
@@ -91,26 +105,28 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
     # snapshot-gate honesty: when the gate is in enforce mode, a dynamic
     # stage that ran must carry gate evidence (auto-restore or attestation
     # pass). observe mode is advisory — recorded, never penalizes.
+    # Fail CLOSED: if the gate mode cannot be resolved at all, enforce
+    # posture is assumed (missing evidence then fails the audit).
     gate = None
     gate_ok = True
     try:
         from .snapshot_gate import mode as gate_mode
-        from .remote_driver import LOCAL_LOGS
         gm = gate_mode()
+    except Exception as e:
+        gm = "enforce"  # fail closed
+        gate = {"error": f"gate mode unresolved: {e}"}
+    try:
         stg_file = evidence / "dynamic" / "STAGE.json"
         stg = json.loads(stg_file.read_text(encoding="utf-8")) \
             if stg_file.is_file() else {}
-        gate = stg.get("gate") or None
+        gate = stg.get("gate") or gate
         if dynamic.get("ran"):
             if gm == "enforce":
                 gate_ok = bool(stg.get("gate_pass"))
             else:
                 gate_ok = True
-        if gm != "off":
-            pass  # gate field surfaces below regardless
-    except Exception:
-        gm = "observe"
-        gate_ok = True
+    except json.JSONDecodeError:
+        gate = gate or {"error": "dynamic STAGE.json unreadable"}
 
     quality_green = not fallbacks and not failed_tools \
         and not dynamic_conflict and gate_ok

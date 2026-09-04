@@ -172,9 +172,10 @@ class X64DbgClient:
     def eval(self, expression: str) -> dict:
         return self.call("EvalExpression", {"expression": expression})
     def comment(self, address: int, text: str) -> dict:
+        # plugin schema declares address as string (like all other wrappers)
         return self.call("CommentOrLabelAtAddress",
-                         {"address": address, "text": text, "type": "comment"})
+                         {"address": hex(address), "text": text, "type": "comment"})
     def bookmark(self, address: int, text: str) -> dict:
-        return self.call("SetBookmark", {"address": address, "text": text})
+        return self.call("SetBookmark", {"address": hex(address), "text": text})
     def execute_command(self, command: str) -> dict:
         return self.call("ExecuteDebuggerCommand", {"command": command})

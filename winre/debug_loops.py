@@ -122,14 +122,19 @@ def ep_break(sample: str, xc: X64DbgClient | None = None,
     xc.run()
     deadline = time.time() + max_wait_s
     rip = None
+    paused = False
     while time.time() < deadline:
         time.sleep(2)
-        rip = _rip(xc)
         st = _parse_state(xc.get_state())
+        # capture RIP only when the target actually paused - a stale
+        # currentAddress must never masquerade as the EP/OEP
         if st.get("isRunning") == "false" and st.get("status") == "LOCKED":
+            rip = _rip(xc)
+            paused = True
             break
-    if rip is None:
-        return {"ok": False, "error": "never paused", "evidence": evidence}
+    if not paused or rip is None:
+        return {"ok": False, "error": "never paused (timeout without LOCKED state)",
+                "evidence": evidence}
     evidence.append(_pause_evidence(xc, "ep_break", rip))
     return {"ok": True, "oep": rip, "evidence": evidence,
             "module": _parse_state(xc.get_state()).get("currentModule")}
@@ -634,18 +639,29 @@ def api_loop(sample: str, api: str, xc: X64DbgClient | None = None,
         return {"ok": False, "error": f"bp {api} failed: {bp.get('error')}",
                 "evidence": evidence}
     hits = 0
+    real_pauses = 0
     for _ in range(max_hits):
         xc.run()
         deadline = time.time() + max_wait_s
+        paused = False
         while time.time() < deadline:
             time.sleep(2)
             st = _parse_state(xc.get_state())
             if st.get("isRunning") == "false":
+                paused = True
                 break
-        rip = _rip(xc)
+        state_txt = _state_text(xc.get_state())
+        rip = _rip(xc) if paused else None
+        if not paused or rip is None or "NO_TARGET" in state_txt:
+            # timeout-without-pause or target exit is EVIDENCE, not a hit
+            label = f"{api}_hit{hits + 1}_{'exited' if 'NO_TARGET' in state_txt else 'timeout'}"
+            evidence.append({"label": label, "rip": None, "note": state_txt[:120]})
+            break
         hits += 1
+        real_pauses += 1
         evidence.append(_pause_evidence(xc, f"{api}_hit{hits}", rip))
-    return {"ok": True, "hits": hits, "api": api, "evidence": evidence}
+    return {"ok": real_pauses > 0, "hits": hits, "api": api, "evidence": evidence,
+            "error": None if real_pauses else f"no {api} pause within budget"}
 
 
 # ---------------------------------------------------------------------------
@@ -724,14 +740,26 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
             return str(v.get("verdict") or v.get("label") or "unknown")
         return str(v or "unknown")
 
+    orig_v, new_v = _verdict(orig), _verdict(new)
+    # an "unknown == unknown" match is vacuous - both analyses said nothing.
+    # The compare only corroborates when at least one side produced a real
+    # verdict and the structured results are non-empty.
+    vacuous = (orig_v == "unknown" and new_v == "unknown")
     comparison = {
-        "original_verdict": _verdict(orig),
-        "unpacked_verdict": _verdict(new),
-        "verdicts_match": _verdict(orig) == _verdict(new),
+        "original_verdict": orig_v,
+        "unpacked_verdict": new_v,
+        "verdicts_match": (orig_v == new_v) and not vacuous,
+        "vacuous_compare": vacuous,
         "original_anomalies": len(orig.get("anomalies") or []),
         "unpacked_anomalies": len(new.get("anomalies") or []),
     }
     evidence.append({"label": "compare", **comparison})
+    if vacuous:
+        # unpack mechanics succeeded (OEP + dump), but the compare proved
+        # nothing - record it honestly so the agent can't cite corroboration
+        return {"ok": True, "oep": hex(oep), "dump_path": dump_path,
+                "comparison": comparison, "evidence": evidence,
+                "note": "unpack ok; compare vacuous (both analyses empty/unknown)"}
     return {"ok": True, "oep": hex(oep), "dump_path": dump_path,
             "comparison": comparison, "evidence": evidence}
 

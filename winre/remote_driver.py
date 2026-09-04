@@ -182,22 +182,35 @@ def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict) -> dict:
            f'"{remote_sample}" --json 2>&1"')
     r = ssh_run(cfg, cmd, timeout=900)
     evidence: dict = {}
+    parsed = False
     if r.returncode == 0:
         try:
             data = json.loads(r.stdout)
             evidence = data.get("evidence") or {}
+            parsed = True
         except json.JSONDecodeError:
             pass
     if not evidence:
         evidence = {"ghidra": {"error": (r.stderr or r.stdout)[-200:]}}
+    # honesty: a quick stage where the helper failed or every source errored
+    # is a fallback, not a success
+    failed_sources = [k for k, v in evidence.items()
+                      if isinstance(v, dict) and (v.get("error") or v.get("skipped"))]
+    tool_failures = [f"{k}:{(v.get('error') or v.get('skipped'))[:80]}"
+                     for k, v in evidence.items()
+                     if isinstance(v, dict) and (v.get("error") or v.get("skipped"))]
+    ok = parsed and len(failed_sources) < len(evidence)
 
     verdict = "unknown"
     pack.write("quick", "quick.json", {"evidence": evidence, "verdict": verdict,
-                                       "tool_failures": []})
+                                       "tool_failures": tool_failures})
     pack.write("quick", "META.json", stage_result(
-        "quick", True, summary=f"ghidra={evidence.get('ghidra',{}).get('func_rows')} "
-                               f"ida={evidence.get('ida',{}).get('func_count')}",
-        verdict=verdict, elapsed_s=round(time.time() - t0, 1)))
+        "quick", ok,
+        error=None if ok else "quick helper failed or all sources errored",
+        summary=f"ghidra={evidence.get('ghidra',{}).get('func_rows')} "
+                f"ida={evidence.get('ida',{}).get('func_count')}",
+        verdict=verdict, tool_failures=tool_failures,
+        fallback=not ok, elapsed_s=round(time.time() - t0, 1)))
     return {"evidence": evidence, "verdict": verdict}
 
 
@@ -255,9 +268,12 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                    max_seconds: int, enable_pesieve: bool) -> dict:
     """SSH: run orchestrator --mode local on the VM via helper, scp pack back."""
     t0 = time.time()
-    # --- snapshot gate (observe by default; enforce blocks + auto-restores) ---
+    started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    # --- snapshot gate: control plane decides (probe / auto-restore); the
+    # VM-side orchestrator does the ATOMIC marker consume at the execution
+    # site (its local file op). Control plane never consumes here.
     from . import snapshot_gate
-    gate = snapshot_gate.preflight("dynamic", sha=sha, cfg=cfg)
+    gate = snapshot_gate.preflight("dynamic", sha=sha, cfg=cfg, consume=False)
     if not gate.get("allowed"):
         return stage_result("dynamic", False, error=gate.get("error"),
                             elapsed_s=round(time.time() - t0, 1),
@@ -270,13 +286,34 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
         scp_to(cfg, helper, rf'{cfg["remote_pipeline"]}\winre\_remote_dynamic_helper.py')
     except Exception as e:
         return stage_result("dynamic", False, error=f"scp helper: {e}",
-                            elapsed_s=round(time.time() - t0, 1))
+                            elapsed_s=round(time.time() - t0, 1),
+                            gate=gate.get("gate"))
 
     cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} '
            f'{cfg["remote_pipeline"]}\\winre\\_remote_dynamic_helper.py '
            f'{sha} "{remote_sample}" {int(max_seconds)}'
            f'{" --pesieve" if enable_pesieve else ""} 2>&1"')
     r = ssh_run(cfg, cmd, timeout=int(max_seconds) + 700)
+    # honest RC check: the helper prints RC=<code> as its last line
+    helper_rc = None
+    for line in reversed((r.stdout or "").splitlines()):
+        line = line.strip()
+        if line.startswith("RC="):
+            try:
+                helper_rc = int(line[3:])
+            except ValueError:
+                helper_rc = -1
+            break
+    job_ran = r.returncode == 0 and helper_rc is not None and helper_rc >= 0
+
+    # delete stale local META BEFORE pull so a failed run can't resurrect
+    # a previous run's ok (freshness check below is the second guard)
+    stale = pack.stages["dynamic"] / "META.json"
+    if stale.exists():
+        try:
+            stale.unlink()
+        except Exception:
+            pass
 
     # pull dynamic dir back
     local_dyn = pack.stages["dynamic"]
@@ -284,27 +321,31 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     ok = False
     err = None
     remote_dyn = rf'{cfg["remote_pipeline"]}\logs\{sha}\dynamic'
+    if not job_ran:
+        err = (f"detonation did not run: ssh rc={r.returncode} "
+               f"helper_rc={helper_rc}; stderr={(r.stderr or '')[:200]}")
     try:
         scp_from(cfg, rf"{remote_dyn}\*", local_dyn)
         ok = True
     except Exception as e:
-        err = str(e)
-        # orchestrator may have died but still wrote META
-        probe = ssh_run(cfg, f'powershell -NoProfile -Command (Test-Path "{remote_dyn}\\META.json")',
-                        timeout=30)
-        if probe.returncode == 0 and "True" in probe.stdout:
-            try:
-                scp_from(cfg, rf"{remote_dyn}\META.json", local_dyn / "META.json")
-                ok = True
-            except Exception:
-                pass
+        if err is None:
+            err = str(e)
     meta = pack.read("dynamic", "META.json") or {}
-    ok = ok or bool(meta.get("ok"))
-    gate = gate.get("gate") if isinstance(gate, dict) else None
+    # freshness: only trust a META produced by THIS run
+    fresh = bool(meta) and meta.get("finished_at", "") >= started_at
+    gate_mode = snapshot_gate.mode()
+    gate_pass = (gate_mode != "enforce") or bool(meta.get("gate_marker_consumed"))
+    ok = bool(fresh and meta.get("ok"))
+    if not ok and err is None:
+        err = ("no fresh META from this run"
+               if not fresh else f"orchestrator error: {meta.get('error')}")
     stage_meta = stage_result("dynamic", ok, error=err,
                               summary=f"events={meta.get('frida_events')} ok={ok}",
+                              frida_events=meta.get("frida_events"),
+                              verdict=meta.get("verdict"),
                               elapsed_s=round(time.time() - t0, 1),
-                              gate_pass=True, gate=gate)
+                              gate_pass=gate_pass, gate=gate.get("gate"),
+                              helper_rc=helper_rc)
     pack.write("dynamic", "STAGE.json", stage_meta)
     return stage_meta
 

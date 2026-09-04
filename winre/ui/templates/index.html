@@ -97,7 +97,7 @@
               {% if v == 'malicious' %}<span class="badge malware">malicious</span>
               {% elif v == 'benign' %}<span class="badge up">benign</span>
               {% elif v %}<span class="badge warn">{{ v }}</span>{% endif %}
-              {% set dyn = (p.audit.checks|selectattr('stage','equalto','dynamic')|first) if p.audit else none %}
+              {% set dyn = ((p.audit.checks or [])|selectattr('stage','equalto','dynamic')|first) if p.audit else none %}
               {% if p.audit and p.audit.truly_green %}<span class="badge up">green</span>
               {% elif p.audit %}<span class="badge {{ 'warn' if dyn and dyn.ran else 'flat' }}">
                 {{ 'static+dyn' if dyn and dyn.ran else 'static' }}{{ '+dbg' if p.verdicts.engine == 'langgraph+dbg' }}</span>

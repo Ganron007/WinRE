@@ -209,12 +209,13 @@ class ToolRegistry:
     def _dbg_gate(self) -> dict | None:
         """Snapshot-gate check before ANY debugger execution on the VM.
 
-        enforce: blocked -> the tool returns an error, agent must fall back
-        to static. observe (default): advisory only — never blocks testing.
+        enforce: the FIRST debug call consumes the marker (same-sha calls
+        later in this agent run pass via session scope); blocked -> tools
+        return an error, agent falls back to static. observe (default):
+        advisory only — never blocks testing.
         """
         from winre import snapshot_gate
-        g = snapshot_gate.preflight("debug", sha=self.sha, cfg=self.cfg,
-                                    consume=False)
+        g = snapshot_gate.preflight("debug", sha=self.sha, cfg=self.cfg)
         if g.get("allowed"):
             return None
         return {"error": f"{g.get('error')} — falling back to static analysis"}

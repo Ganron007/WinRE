@@ -148,7 +148,8 @@ def generate_rules(evidence: Path, out_dir: Path) -> dict:
     qj = evidence / "quick" / "quick.json"
     if qj.is_file():
         try:
-            quick = json.loads(qj.read_text(encoding="utf-8"))
+            # quick.json wraps evidence: {"evidence": {...}, "verdict": ...}
+            quick = (json.loads(qj.read_text(encoding="utf-8")) or {}).get("evidence")
         except json.JSONDecodeError:
             quick = None
     dynamic = None
@@ -166,9 +167,13 @@ def generate_rules(evidence: Path, out_dir: Path) -> dict:
 
     out_dir.mkdir(parents=True, exist_ok=True)
     yara_path = out_dir / f"{rule_id}.yar"
-    yara_path.write_text(_yara_body(rule_id, strings, imports), encoding="utf-8")
+    yara_body = _yara_body(rule_id, strings, imports)
+    yara_path.write_text(yara_body, encoding="utf-8")
     sigma_path = out_dir / f"{rule_id}.yml"
     sigma_path.write_text(_sigma_body(rule_id, dynamic), encoding="utf-8")
+
+    # honesty: a rule with no evidence can never match - say so loudly
+    empty_rule = "condition: false" in yara_body
 
     report = {
         "rule_id": rule_id,
@@ -181,6 +186,7 @@ def generate_rules(evidence: Path, out_dir: Path) -> dict:
             "strings_used": strings,
             "network_used": sorted({s for s in strings if _is_url_or_host(s)}),
         },
+        "empty_rule": empty_rule,
         "honesty": "rules are deterministic; no LLM-authored content",
     }
     (out_dir / "rule_report.json").write_text(

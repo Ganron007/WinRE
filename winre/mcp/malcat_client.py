@@ -64,7 +64,14 @@ class MalcatClient:
         if "error" in raw:
             return {"ok": False, "error": str(raw["error"]),
                     "result": raw, "name": name}
-        return {"ok": True, "error": None, "result": raw.get("result"), "name": name}
+        res = raw.get("result")
+        # MCP tool-level failures arrive as isError=true with HTTP 200
+        if isinstance(res, dict) and res.get("isError"):
+            texts = [c.get("text", "") for c in (res.get("content") or [])
+                     if isinstance(c, dict)]
+            return {"ok": False, "error": "\n".join(texts)[:500] or "tool isError",
+                    "result": res, "name": name}
+        return {"ok": True, "error": None, "result": res, "name": name}
 
     def list_tools(self) -> list[str]:
         """Return the tool names advertised by the Malcat MCP server."""

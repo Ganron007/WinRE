@@ -17,7 +17,7 @@
       <p class="muted">Polling stage status…</p>
     </div>
   </div>  <script>
-    const STAGES = ['intake','quick','dynamic','deep','yara','report'];
+    const STAGES = ['intake','quick','deep','dynamic','yara','report'];
     const t = setInterval(async () => {
       const r = await fetch('/run/status');
       const s = await r.json();
@@ -48,13 +48,14 @@
         clearInterval(t);
         const last = s.last || {};
         const el = document.getElementById('progress');
+        const esc = escapeHtml;
         if (last.ok) {
           el.innerHTML = `<p><span class="badge up">complete</span>
-             <span class="mono">${last.sha ? last.sha.slice(0,16)+'…' : ''}</span>
-             truly_green = <b>${last.audit ? last.audit.truly_green : '?'}</b></p>
-             <pre>${JSON.stringify(last, null, 2)}</pre>`;
+             <span class="mono">${esc(last.sha ? last.sha.slice(0,16)+'…' : '')}</span>
+             truly_green = <b>${last.audit ? esc(String(last.audit.truly_green)) : '?'}</b></p>
+             <pre>${esc(JSON.stringify(last, null, 2))}</pre>`;
         } else {
-          el.innerHTML = `<div class="notice err">Run failed: ${last.error || 'unknown'}</div>`;
+          el.innerHTML = `<div class="notice err">Run failed: ${esc(last.error || 'unknown')}</div>`;
         }
       }
     }, 3000);

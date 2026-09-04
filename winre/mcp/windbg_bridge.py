@@ -182,7 +182,18 @@ def _resolve_target(args: dict, state: dict) -> list[str]:
 
 
 def _pid_alive(pid: int) -> bool:
+    # WARNING: os.kill(pid, 0) TERMINATES the target on Windows (maps to
+    # TerminateProcess for non-CTRL signals). Probe with OpenProcess instead.
     try:
+        if os.name == "nt":
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            h = ctypes.windll.kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, 0, int(pid))
+            if h:
+                ctypes.windll.kernel32.CloseHandle(h)
+                return True
+            return False
         os.kill(pid, 0)
         return True
     except OSError:

@@ -26,7 +26,7 @@ import urllib.request
 from pathlib import Path
 
 try:
-    from flask import Flask, render_template, request, jsonify
+    from flask import Flask, render_template, request, jsonify, redirect
 except ImportError:
     print("ERROR: flask not installed (pip install flask)", file=sys.stderr)
     sys.exit(1)
@@ -99,6 +99,8 @@ def _packs() -> list[dict]:
 
 
 def _pack_detail(sha: str) -> dict | None:
+    if not _valid_sha(sha):
+        return None
     d = LOGS_DIR / sha
     if not d.is_dir():
         return None
@@ -127,7 +129,13 @@ def _pack_detail(sha: str) -> dict | None:
 
 
 def _analyst_next_html(md_path: Path) -> str:
-    """ANALYST-NEXT.md may be JSON {"md": ...} or raw markdown. Render HTML."""
+    """ANALYST-NEXT.md may be JSON {"md": ...} or raw markdown. Render HTML.
+
+    XSS-safe: the source text derives from LLM output and sample-controlled
+    strings (mutexes, URLs, file names from malware). HTML-escape FIRST so
+    raw markup can never survive into the rendered page, then markdown it.
+    """
+    import html as _html
     try:
         raw = md_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -139,11 +147,12 @@ def _analyst_next_html(md_path: Path) -> str:
             text = data["md"]
     except json.JSONDecodeError:
         pass
+    text = _html.escape(text)
     try:
         import markdown as _md
         return _md.markdown(text)
     except Exception:
-        return text
+        return "<pre>" + text + "</pre>"
 
 
 def _pack_views(root: Path, files: dict) -> dict:
@@ -370,7 +379,15 @@ def _vm_health() -> dict:
     return out
 
 
-STAGE_ORDER = ("intake", "quick", "dynamic", "deep", "yara", "report")
+# Actual execution order in run_remote_pipeline: static first, dynamic LAST
+# (opt-in; absent in static-only runs). Used for run-page stage display.
+STAGE_ORDER = ("intake", "quick", "deep", "dynamic", "yara", "report")
+
+
+def _valid_sha(sha: str) -> bool:
+    """64-hex only - every sha-taking route joins paths with it."""
+    import re as _re
+    return bool(_re.fullmatch(r"[0-9a-fA-F]{64}", sha or ""))
 
 
 def _current_stage(sha: str | None) -> str | None:
@@ -380,12 +397,18 @@ def _current_stage(sha: str | None) -> str | None:
     root = LOGS_DIR / sha
     if not root.is_dir():
         return "intake"
-    landed = [s for s in STAGE_ORDER
-              if (root / s / "META.json").is_file() or (root / s / "STAGE.json").is_file()]
-    if not landed:
-        return "intake"
-    idx = STAGE_ORDER.index(landed[-1])
-    return STAGE_ORDER[idx] if idx >= len(STAGE_ORDER) - 1 else STAGE_ORDER[idx + 1]
+    landed = {s for s in STAGE_ORDER
+              if (root / s / "META.json").is_file()
+              or (root / s / "STAGE.json").is_file()}
+    for s in STAGE_ORDER:
+        if s not in landed:
+            # dynamic is optional: skip it for static-only runs
+            if s == "dynamic" and "deep" in landed and \
+                    not (root / "dynamic" / "STAGE.json").is_file() and \
+                    (root / "deep" / "META.json").is_file():
+                continue
+            return s
+    return STAGE_ORDER[-1]
 
 
 def _run_pipeline_in_thread(sample_path: str, max_seconds: int,
@@ -414,14 +437,35 @@ def _run_pipeline_in_thread(sample_path: str, max_seconds: int,
                     _run_state["log"] = _run_state["log"][-400:]
 
             class _Tee(io.TextIOBase):
+                """Captures into the ring log AND forwards to the real
+                stdout — never swallow other threads' output, and never
+                leave a dead stream behind if a handler binds stderr."""
+
+                def __init__(self, real):
+                    self._real = real
+
                 def write(self, s):
                     for ln in str(s).splitlines():
                         _emit(ln)
+                    try:
+                        self._real.write(str(s))
+                        self._real.flush()
+                    except Exception:
+                        pass
                     return len(s)
+
+                def flush(self):
+                    try:
+                        self._real.flush()
+                    except Exception:
+                        pass
+
+                def isatty(self):
+                    return False
 
             # capture pipeline stdout into the in-memory ring log
             real_out, real_err = sys.stdout, sys.stderr
-            sys.stdout = sys.stderr = _Tee()
+            sys.stdout = sys.stderr = _Tee(real_out)
             try:
                 started = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 res = remote_driver.run_remote_pipeline(
@@ -500,24 +544,39 @@ def create_app() -> "Flask":
     @app.route("/run", methods=["GET", "POST"])
     def run():
         if request.method == "POST":
-            if _run_state["running"]:
-                return jsonify({"ok": False, "error": "pipeline already running"}), 409
-            sample = request.form.get("sample", "").strip()
-            if not sample or not Path(sample).is_file():
-                return jsonify({"ok": False, "error": f"sample not found: {sample}"}), 400
-            max_seconds = int(request.form.get("max_seconds", 45))
-            pesieve = request.form.get("pesieve") == "on"
-            dry_llm = request.form.get("dry_llm") == "on"
-            dynamic = request.form.get("dynamic") == "on"
-            agentic_dbg = request.form.get("agentic_dbg") == "on"
-            _run_state["sha"] = None
-            _run_state["log"] = []
-            _run_state["last"] = None
-            _run_pipeline_in_thread(sample, max_seconds, pesieve, dry_llm,
-                                    dynamic, agentic_dbg)
-            return jsonify({"ok": True, "msg": "pipeline started",
-                            "sample": sample, "dynamic": dynamic,
-                            "agentic_dbg": agentic_dbg})
+            # admission is atomic: check+reserve under the lock so two rapid
+            # POSTs can't both spawn pipelines (execution still serializes)
+            with _run_lock:
+                if _run_state["running"]:
+                    return jsonify({"ok": False,
+                                    "error": "pipeline already running"}), 409
+                _run_state["running"] = True  # reserved; thread keeps it true
+            try:
+                sample = request.form.get("sample", "").strip()
+                if not sample or not Path(sample).is_file():
+                    return jsonify({"ok": False,
+                                    "error": f"sample not found: {sample}"}), 400
+                try:
+                    max_seconds = max(10, min(600,
+                                              int(request.form.get("max_seconds", 45))))
+                except ValueError:
+                    max_seconds = 45
+                pesieve = request.form.get("pesieve") == "on"
+                dry_llm = request.form.get("dry_llm") == "on"
+                dynamic = request.form.get("dynamic") == "on"
+                agentic_dbg = request.form.get("agentic_dbg") == "on"
+                _run_state["sha"] = None
+                _run_state["log"] = []
+                _run_state["last"] = None
+                _run_pipeline_in_thread(sample, max_seconds, pesieve, dry_llm,
+                                        dynamic, agentic_dbg)
+                # form POST: redirect back so the browser lands on the live
+                # progress board instead of a raw JSON body
+                return redirect("/run", 303)
+            except Exception:
+                with _run_lock:
+                    _run_state["running"] = False  # release the reservation
+                raise
         return render_template("run.html", running=_run_state["running"],
                                last=_run_state["last"])
 
@@ -558,7 +617,7 @@ def create_app() -> "Flask":
         body = request.get_json(force=True, silent=True) or {}
         sha = (body.get("sha") or "").strip()
         action = (body.get("action") or "").strip()
-        if action not in ("verified_clean", "restored") or not sha:
+        if action not in ("verified_clean", "restored") or not _valid_sha(sha):
             return jsonify({"ok": False, "error": "need sha + action"}), 400
         root = LOGS_DIR / sha
         if not root.is_dir():
@@ -582,6 +641,8 @@ def create_app() -> "Flask":
         from winre.evidence import EvidencePack
         if stage not in MANUAL_STAGES:
             return jsonify({"ok": False, "error": f"unknown stage {stage}"}), 400
+        if not _valid_sha(sha):
+            return jsonify({"ok": False, "error": "invalid sha"}), 400
         if _run_state["running"]:
             return jsonify({"ok": False, "error": "pipeline already running"}), 409
         root = LOGS_DIR / sha

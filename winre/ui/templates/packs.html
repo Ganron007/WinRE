@@ -19,7 +19,7 @@
     <tr>
       <td class="mono"><a href="/packs/{{ p.sha }}">{{ p.short }}…</a></td>
       {% if p.audit %}
-        {% set c = p.audit.checks %}
+        {% set c = p.audit.checks or [] %}
         {% set dyn = c|selectattr('stage','equalto','dynamic')|first %}
         <td>{% if dyn and dyn.ran %}<span class="badge warn">static+dyn</span>
             {% else %}<span class="badge flat">static</span>{% endif %}</td>

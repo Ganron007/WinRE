@@ -118,6 +118,12 @@ class WinDbgMCPClient:
             return {"ok": False, "error": str(raw["error"]),
                     "result": raw, "name": name}
         result = raw.get("result")
+        # MCP tool-level failures arrive as isError=true with HTTP 200
+        if isinstance(result, dict) and result.get("isError"):
+            texts = [c.get("text", "") for c in (result.get("content") or [])
+                     if isinstance(c, dict)]
+            return {"ok": False, "error": "\n".join(texts)[:500] or "tool isError",
+                    "result": result, "name": name}
         # MCP content blocks: result.content[].text
         if isinstance(result, dict) and "content" in result:
             texts = [c.get("text", "") for c in result["content"] if isinstance(c, dict)]
