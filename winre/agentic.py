@@ -66,10 +66,29 @@ if engine == "ghidra":
                        capture_output=True, text=True, timeout=900,
                        encoding="utf-8", errors="replace")
 else:  # ida
-    p = subprocess.run([py, str(tools / "flarevm_ida_query.py"), str(sample),
-                        sql, "--json"],
-                       capture_output=True, text=True, timeout=120,
+    # HTTP transport FIRST (idasql --http): the one-shot `idasql -q` spawn
+    # hangs on this idasql build (P-B5). Only fall back to one-shot when the
+    # HTTP wrapper fails to produce valid JSON.
+    out = None
+    p = subprocess.run([py, str(tools / "flarevm_ida_query.py"), "--http",
+                        str(sample), sql, "--json"],
+                       capture_output=True, text=True, timeout=180,
                        encoding="utf-8", errors="replace")
+    try:
+        out = json.loads(p.stdout)
+    except json.JSONDecodeError:
+        out = None
+    if not (isinstance(out, dict) and out.get("ok")):
+        p = subprocess.run([py, str(tools / "flarevm_ida_query.py"),
+                            str(sample), sql, "--json"],
+                           capture_output=True, text=True, timeout=120,
+                           encoding="utf-8", errors="replace")
+        try:
+            out = json.loads(p.stdout)
+        except json.JSONDecodeError:
+            out = {"ok": False, "error": (p.stderr or p.stdout)[-300:]}
+    print(json.dumps(out))
+    raise SystemExit(0)
 try:
     out = json.loads(p.stdout)
     print(json.dumps(out))

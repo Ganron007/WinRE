@@ -36,7 +36,13 @@ function Kill-Image {
 }
 
 function Kill-Stale {
-  foreach ($im in @("sample.exe","frida-helper-64.exe","frida-helper-32.exe","fakenet.exe","Procmon64.exe","Procmon.exe")) {
+  # Full leftover coverage: detonation workers + stale MCP/debug hosts.
+  # Deliberately NOT ida64.exe (static engine — dynamic runs after static).
+  foreach ($im in @("sample.exe","frida-helper-64.exe","frida-helper-32.exe",
+                    "fakenet.exe","Procmon64.exe","Procmon.exe",
+                    "hollows_hunter.exe","pe-sieve.exe",
+                    "idasql.exe","java.exe",
+                    "windbg.exe","x64dbg.exe","x32dbg.exe")) {
     Kill-Image $im
   }
   Start-Sleep -Seconds 1
@@ -63,6 +69,10 @@ function Snapshot-Processes {
 
 New-Item -ItemType Directory -Force -Path $WorkRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+# job.log size cap: rotate a runaway previous log instead of appending forever
+if ((Test-Path $LogFile) -and ((Get-Item $LogFile).Length -gt 5MB)) {
+  Move-Item $LogFile (Join-Path $WorkRoot "job.prev.log") -Force -ErrorAction SilentlyContinue
+}
 if (Test-Path $LogFile) { Remove-Item $LogFile -Force }
 Log "START sha=$Sha256 max_seconds=$MaxSeconds"
 Log "sample=$SamplePath"
@@ -119,6 +129,7 @@ $memDir = Join-Path $OutDir "memory"
 $peSieveRan = $false
 $peSievePid = $null
 $peSieveRc = $null
+$psReportValid = $false
 Log ("Frida start EnablePeSieve={0}" -f [bool]$EnablePeSieve)
 $fridaExit = -1
 try {
@@ -172,11 +183,21 @@ try {
       $peSieveRc = $psProc.ExitCode
       $peSieveRan = $true
       # When /json is active pe-sieve writes the report to STDOUT, so make
-      # pe_sieve_report.json the real JSON artifact.
+      # pe_sieve_report.json the real JSON artifact — and PROVE it parses.
+      # A non-JSON stdout (CLI banner, error text) is kept as .invalid.txt
+      # so downstream never mistakes prose for a report.
+      $psReportValid = $false
       if ((Test-Path $psLog) -and ((Get-Item $psLog).Length -gt 0)) {
         Copy-Item $psLog $psReport -Force -ErrorAction SilentlyContinue
+        try {
+          $null = Get-Content $psReport -Raw | ConvertFrom-Json
+          $psReportValid = $true
+        } catch {
+          Move-Item $psReport (Join-Path $memDir "pe_sieve_report.invalid.txt") -Force -ErrorAction SilentlyContinue
+          Log ("WARN: pe-sieve report not valid JSON: {0}" -f $_.Exception.Message)
+        }
       }
-      Log ("pe-sieve exit={0} report={1} log={2}" -f $peSieveRc, (Test-Path $psReport), (Test-Path $psLog))
+      Log ("pe-sieve exit={0} report={1} valid={2} log={3}" -f $peSieveRc, (Test-Path $psReport), $psReportValid, (Test-Path $psLog))
       # Optional hollows_hunter on same PID (best-effort)
       if (Test-Path $HollowsHunterExe) {
         $hhOut = Join-Path $memDir "hollows_hunter"
@@ -290,6 +311,7 @@ if (Test-Path $trace) {
   pe_sieve_ran = $peSieveRan
   pe_sieve_pid = $peSievePid
   pe_sieve_rc = $peSieveRc
+  pe_sieve_report_valid = $psReportValid
   memory_dir = if (Test-Path $memDir) { $memDir } else { $null }
   snapshot_restore_required = $true
   finished_at = (Get-Date).ToUniversalTime().ToString("o")
@@ -309,7 +331,11 @@ if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
 $zip = [System.IO.Compression.ZipFile]::Open($ZipPath, 'Create')
 try {
   Get-ChildItem $OutDir -Recurse -File | ForEach-Object {
+    # procmon.pml: huge binary, CSV suffices (PML stays on disk).
+    # frida_trace.json: byte-duplicate of frida_trace.jsonl — zip the
+    # canonical .jsonl only, skip the compat copy.
     if ($_.Name -ieq "procmon.pml") { return }
+    if ($_.Name -ieq "frida_trace.json") { return }
     $rel = $_.FullName.Substring($OutDir.Length).TrimStart('\', '/').Replace('\', '/')
     [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $rel, 'Optimal') | Out-Null
   }

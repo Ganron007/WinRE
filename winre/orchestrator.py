@@ -317,15 +317,71 @@ def _env_truthy(name: str) -> bool:
 LOCAL_JOB_PS1 = Path(__file__).resolve().parent / "flare_dynamic_job.ps1"
 LOCK_PATH = Path(os.environ.get("WINRE_ORCH_LOCK", r"C:\WinRE\lock\orchestrator.lock"))
 
+# Images that must never survive into a fresh detonation. Deliberately NOT
+# including ida64.exe (the static engine) — dynamic runs after static in the
+# spine, and killing a live analysis would break the pack. Everything here is
+# either a detonation worker or a stale MCP/debug leftover that the manager
+# can relaunch on demand.
+STALE_IMAGES = (
+    "sample.exe", "frida-helper-64.exe", "frida-helper-32.exe",
+    "fakenet.exe", "Procmon64.exe", "Procmon.exe",
+    "hollows_hunter.exe", "pe-sieve.exe",
+    "idasql.exe", "java.exe",
+    "windbg.exe", "x64dbg.exe", "x32dbg.exe",
+)
 
-def _acquire_lock() -> bool:
-    """Mutex to prevent local+SSH jobs from stomping each other."""
+
+def _kill_stale_ssh(cfg, extra_timeout: int = 45) -> None:
+    """SSH-path cleanup, same image list as the job's Kill-Stale."""
+    cmd = " & ".join(f"taskkill /F /IM {im} /T 2>nul" for im in STALE_IMAGES)
+    _ssh_run(cfg, f"{cmd} & exit /b 0", timeout=extra_timeout)
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            import ctypes
+            SYNCHRONIZE = 0x00100000
+            h = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, 0, pid)
+            if h:
+                ctypes.windll.kernel32.CloseHandle(h)
+                return True
+            return False
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def _lock_pid() -> int | None:
+    """Second line of the lockfile holds the writer's pid."""
+    try:
+        lines = LOCK_PATH.read_text(encoding="utf-8").splitlines()
+        return int(lines[1].strip())
+    except Exception:
+        return None
+
+
+def _acquire_lock(force: bool = False) -> bool:
+    """Mutex to prevent local+SSH jobs from stomping each other.
+
+    Stale-lock recovery: a fresh lockfile whose writer pid is DEAD is
+    takeover-able (crashed run). A live pid holds the lock unless
+    force=True (operator says break it).
+    """
     try:
         LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
         if LOCK_PATH.exists():
             age = time.time() - LOCK_PATH.stat().st_mtime
-            if age < 7200:  # 2h freshness
+            pid = _lock_pid()
+            alive = _pid_alive(pid) if pid else None  # None = unknown
+            if alive is True and age < 7200 and not force:
                 return False
+            if alive is None and age < 7200 and not force:
+                return False  # unparseable but fresh — respect it
+            # stale (dead writer / too old) or forced — take over
         LOCK_PATH.write_text(f"{_utc()}\n{os.getpid()}\n", encoding="utf-8")
         return True
     except Exception:
@@ -533,6 +589,8 @@ def run_dynamic(
     deploy_tools: bool = True,
     enable_pesieve: bool | None = None,
     mode: str | None = None,
+    force: bool = False,
+    sample_override: str | None = None,
 ) -> dict:
     cfg = _flare_cfg()
     dyn_dir = LOGS_DIR / sha / "dynamic"
@@ -571,10 +629,30 @@ def run_dynamic(
     try:
         session = load_session(sha)
     except Exception as e:
-        meta["error"] = f"session load failed: {e}"
-        meta["finished_at"] = _utc()
-        _write_meta(dyn_dir, meta)
-        return meta
+        # Session fallback: sha-only invocation with an explicit --sample
+        # (or a session file lost on the VM). Repair the session instead of
+        # dying — the caller told us where the sample lives.
+        if sample_override and Path(sample_override).is_file():
+            try:
+                SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+                (SESSIONS_DIR / f"{sha}.json").write_text(json.dumps({
+                    "sha256": sha,
+                    "sample_path": str(sample_override),
+                    "file_type": {"format": "pe"},
+                }), encoding="utf-8")
+                meta["session_repaired"] = str(sample_override)
+                session = load_session(sha)
+            except Exception as e2:
+                meta["error"] = f"session repair failed: {e2}"
+                meta["finished_at"] = _utc()
+                _write_meta(dyn_dir, meta)
+                return meta
+        else:
+            meta["error"] = (f"session load failed: {e} — pass --sample "
+                             f"<path> to repair")
+            meta["finished_at"] = _utc()
+            _write_meta(dyn_dir, meta)
+            return meta
 
     sample = session.get("sample_path") or ""
     if not sample or not Path(sample).is_file():
@@ -627,13 +705,16 @@ def run_dynamic(
 
     # --- Local mode: run on Flare directly, no SSH hop ---
     if mode == "local" and fmt in ("pe",):
-        if not _acquire_lock():
-            meta["error"] = f"orchestrator lock held: {LOCK_PATH}"
+        if not _acquire_lock(force=force):
+            meta["error"] = (f"orchestrator lock held: {LOCK_PATH} "
+                             f"(writer pid={_lock_pid()}; --force to break)")
             meta["ok"] = False
             meta["elapsed_s"] = round(time.time() - t0, 1)
             meta["finished_at"] = _utc()
             _write_meta(dyn_dir, meta)
             return meta
+        if force and LOCK_PATH.exists() and _lock_pid() not in (None, os.getpid()):
+            meta["lock_forced"] = True
         try:
             # Malcat triage first (per docs/MALCAT.md:5 stage order)
             try:
@@ -718,15 +799,8 @@ def run_dynamic(
         if probe.returncode != 0 or "FLARE_OK" not in (probe.stdout or ""):
             raise RuntimeError(f"flare ssh probe failed: {probe.stderr[:300]}")
 
-        # Cleanup hung tools
-        _ssh_run(
-            cfg,
-            'taskkill /F /IM sample.exe /T 2>nul & '
-            'taskkill /F /IM frida-helper-64.exe /T 2>nul & '
-            'taskkill /F /IM fakenet.exe /T 2>nul & '
-            'taskkill /F /IM Procmon64.exe /T 2>nul & exit /b 0',
-            timeout=45,
-        )
+        # Cleanup hung tools (same coverage as the job's Kill-Stale)
+        _kill_stale_ssh(cfg)
 
         _ssh_run(cfg, f'cmd /c "if not exist {remote_dir_win} mkdir {remote_dir_win}"', timeout=60)
         _ssh_run(cfg, f'cmd /c "if not exist {tools_win} mkdir {tools_win}"', timeout=60)
@@ -791,14 +865,7 @@ def run_dynamic(
             meta["job_rc"] = -1
             meta["job_stderr_tail"] = f"ssh timeout after {ssh_budget}s: {te}"
             jr = subprocess.CompletedProcess(args=[], returncode=-1, stdout="", stderr=str(te))
-            _ssh_run(
-                cfg,
-                'taskkill /F /IM sample.exe /T 2>nul & '
-                'taskkill /F /IM fakenet.exe /T 2>nul & '
-                'taskkill /F /IM Procmon64.exe /T 2>nul & '
-                'taskkill /F /IM frida-helper-64.exe /T 2>nul & exit /b 0',
-                timeout=45,
-            )
+            _kill_stale_ssh(cfg)
 
         meta["job_rc"] = jr.returncode
         meta["job_stdout_tail"] = (jr.stdout or "")[-800:]
@@ -915,12 +982,19 @@ def run_dynamic(
 
 
 def main() -> int:
+    import hashlib
+
     ap = argparse.ArgumentParser(description="V6.2 Flare dynamic detonation (Remnux orchestrator)")
-    ap.add_argument("sha256")
+    ap.add_argument("sample_or_sha",
+                    help="64-hex sha256 (session lookup) OR a path to the sample")
+    ap.add_argument("--sample", default=None,
+                    help="explicit sample path (repairs a missing session)")
     ap.add_argument("--max-seconds", type=int, default=60)
     ap.add_argument("--apis", default=None, help="comma-separated API list override")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-deploy", action="store_true", help="skip SCP of job scripts (SSH mode only)")
+    ap.add_argument("--force", action="store_true",
+                    help="break a held orchestrator lock (operator override)")
     ap.add_argument(
         "--pesieve",
         action="store_true",
@@ -933,14 +1007,38 @@ def main() -> int:
         help="ssh = Remnux→Flare via SSH (legacy); local = run on Flare (recommended)",
     )
     args = ap.parse_args()
+
+    arg = args.sample_or_sha.strip()
+    sample_override = args.sample
+    if len(arg) == 64 and all(c in "0123456789abcdefABCDEF" for c in arg):
+        sha = arg.lower()
+    elif Path(arg).is_file():
+        # path given positionally — compute sha, align --sample
+        p = Path(arg).resolve()
+        h = hashlib.sha256()
+        with p.open("rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        sha = h.hexdigest()
+        sample_override = str(p)
+    else:
+        print(f"ERROR: {arg!r} is neither 64-hex sha256 nor an existing file",
+              file=sys.stderr)
+        return 2
+    if sample_override and not Path(sample_override).is_file():
+        print(f"ERROR: --sample not found: {sample_override}", file=sys.stderr)
+        return 2
+
     meta = run_dynamic(
-        args.sha256.strip().lower(),
+        sha,
         max_seconds=args.max_seconds,
         dry_run=args.dry_run,
         apis=args.apis,
         deploy_tools=not args.no_deploy,
         enable_pesieve=True if args.pesieve else None,
         mode=args.mode,
+        force=args.force,
+        sample_override=sample_override,
     )
     if meta.get("skipped") or meta.get("ok"):
         return 0

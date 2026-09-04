@@ -68,6 +68,18 @@ def ssh_run(cfg: dict, remote_cmd: str, timeout: int = 600) -> subprocess.Comple
                           errors="replace")
 
 
+def ssh_ps(cfg: dict, script: str, timeout: int = 120) -> subprocess.CompletedProcess:
+    """Run a PowerShell script on the VM via -EncodedCommand.
+
+    The ONLY reliable way to send non-trivial PowerShell over SSH — inline
+    -Command strings get mangled by the cmd→ssh nesting ($, @, quotes).
+    """
+    import base64
+    enc = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return ssh_run(cfg, f"powershell -NoProfile -EncodedCommand {enc}",
+                   timeout=timeout)
+
+
 def scp_to(cfg: dict, local: Path, remote: str) -> None:
     cmd = ["scp", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no",
            "-o", "ConnectTimeout=15", "-P", str(cfg["port"]),
