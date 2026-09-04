@@ -2,9 +2,18 @@
 {% block title %}WinRE — Case {{ pack.short }}{% endblock %}
 {% block content %}
 <div class="page">
+  <div class="crumbs">
+    <a href="/">home</a><span class="sep">/</span>
+    <a href="/packs">cases</a><span class="sep">/</span>
+    <span class="here mono">{{ pack.short }}…</span>
+  </div>
   <div class="page-head">
     <h1>Case <span class="mono" style="color:var(--tx-mono)">{{ pack.short }}…</span></h1>
     <span class="sub mono">{{ pack.sha }}</span>
+    <button class="copybtn" style="margin-left:8px"
+            onclick="winreCopy(this, '{{ pack.sha }}')">copy</button>
+    <a class="btn ghost" style="margin-left:auto; font-size:var(--tx-xs); padding:3px 10px"
+       href="/packs/{{ pack.sha }}/export" title="zip the whole evidence pack">⬇ export pack</a>
   </div>
 
   {% set v = pack.views %}

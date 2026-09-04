@@ -17,13 +17,13 @@
   --tx-2: #6b7480;
   --tx-mono: #c9d1d9;
 
-  /* Accent — Emerald */
-  --accent: #34d399;
-  --accent-hi: #6ee7b7;
-  --accent-dim: #059669;
-  --accent-wash: rgba(52, 211, 153, 0.12);
-  --accent-wash-2: rgba(52, 211, 153, 0.22);
-  --on-accent: #04140c;
+  /* Accent — Emerald (matches RevAI shield mark exactly: family parity) */
+  --accent: #22c55e;
+  --accent-hi: #4ade80;
+  --accent-dim: #15803d;
+  --accent-wash: rgba(34, 197, 94, 0.12);
+  --accent-wash-2: rgba(34, 197, 94, 0.22);
+  --on-accent: #052e16;
 
   /* Semantic */
   --ok: #34c98e;        --ok-wash: rgba(52, 201, 142, 0.12);
@@ -50,7 +50,75 @@
   --topbar-h: 48px;
   --shadow-pop: 0 8px 24px rgba(0,0,0,0.5);
   --ease: 120ms ease-out;
+  --focus-ring: 0 0 0 1px var(--bg-0), 0 0 0 3px var(--accent-dim);
 }
+
+/* ── Accessibility ─────────────────────────────────────────────────── */
+:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important; }
+}
+
+/* ── Component: sticky-header table (sort + density) ───────────────── */
+.table-wrap { overflow: auto; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--line); font-size: var(--tx-sm); }
+thead th { position: sticky; top: 0; background: var(--bg-2);
+  color: var(--tx-1); font-weight: 600; font-size: var(--tx-xs);
+  text-transform: uppercase; letter-spacing: 0.06em; z-index: 1; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--tx-0); }
+th.sortable::after { content: "↕"; opacity: 0.35; margin-left: 4px;
+  font-size: var(--tx-xs); }
+th.sortable.asc::after { content: "↑"; opacity: 1; color: var(--accent); }
+th.sortable.desc::after { content: "↓"; opacity: 1; color: var(--accent); }
+tbody tr:hover { background: var(--bg-2); }
+.dense th, .dense td { padding: var(--sp-1) var(--sp-2); }
+
+/* ── Component: skeleton loader ────────────────────────────────────── */
+.skel { display: block; height: 0.9em; border-radius: var(--r-sm);
+  background: linear-gradient(90deg, var(--bg-2) 25%, var(--bg-3) 50%,
+    var(--bg-2) 75%);
+  background-size: 200% 100%; animation: skel 1.1s infinite linear; }
+@keyframes skel { 0% { background-position: 200% 0; }
+                  100% { background-position: -200% 0; } }
+
+/* ── Component: empty state ────────────────────────────────────────── */
+.empty { display: flex; flex-direction: column; align-items: center;
+  gap: var(--sp-2); padding: var(--sp-8) var(--sp-4);
+  color: var(--tx-2); text-align: center; }
+.empty .glyph { font-size: var(--tx-2xl); opacity: 0.5; }
+.empty .title { color: var(--tx-1); font-weight: 600; }
+.empty .hint { font-size: var(--tx-sm); max-width: 40ch; }
+
+/* ── Component: breadcrumbs ────────────────────────────────────────── */
+.crumbs { display: flex; gap: var(--sp-2); align-items: center;
+  font-size: var(--tx-xs); color: var(--tx-2); margin-bottom: var(--sp-3); }
+.crumbs a { color: var(--tx-2); }
+.crumbs a:hover { color: var(--accent-hi); }
+.crumbs .sep { opacity: 0.4; }
+.crumbs .here { color: var(--tx-1); }
+
+/* ── Component: copy button ────────────────────────────────────────── */
+.copybtn { border: 1px solid var(--line); background: var(--bg-2);
+  color: var(--tx-2); border-radius: var(--r-sm); cursor: pointer;
+  font-size: var(--tx-xs); padding: 1px 6px; }
+.copybtn:hover { color: var(--tx-0); border-color: var(--line-hi); }
+.copybtn.done { color: var(--ok); border-color: var(--ok); }
+
+/* ── Responsive: collapse grids below 1280px ───────────────────────── */
+@media (max-width: 1280px) {
+  .landing-grid, .grid-2 { grid-template-columns: 1fr !important; }
+}
+
+/* ── Keyboard-shortcut help overlay ────────────────────────────────── */
+.kbd { display: inline-block; border: 1px solid var(--line-hi);
+  border-bottom-width: 2px; border-radius: var(--r-sm);
+  background: var(--bg-2); color: var(--tx-1);
+  font-family: var(--font-mono); font-size: var(--tx-xs);
+  padding: 0 5px; min-width: 1.4em; text-align: center; }
 
 * { box-sizing: border-box; }
 html, body { height: 100%; }

@@ -8,54 +8,84 @@
   </div>
 
   {% if running %}
-  <div class="board" style="max-width:760px">
+  <div class="board" style="max-width:820px">
     <div class="board-head">
       <span class="dot live"></span><h3>Run in progress</h3>
       <span class="badge warn" style="margin-left:auto">live</span>
     </div>
-    <div class="board-body" id="progress">
-      <p class="muted">Polling stage status…</p>
+    <div class="board-body">
+      <div id="timeline" style="margin-bottom:10px">
+        <span class="skel" style="width:60%"></span>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center; margin-bottom:6px">
+        <input id="logfilter" placeholder="filter log…"
+               style="flex:1; padding:3px 8px; font-size:var(--tx-xs)">
+        <label class="check" style="margin:0"><input type="checkbox" id="autoscroll" checked>
+          autoscroll</label>
+      </div>
+      <pre id="logpre" style="max-height:260px; overflow:auto">waiting for output…</pre>
     </div>
   </div>  <script>
+    // real execution order: static first, dynamic LAST (opt-in)
     const STAGES = ['intake','quick','deep','dynamic','yara','report'];
+    const escapeHtml = x => String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    let autoScroll = true;
+    let logFilter = '';
+
+    function timeline(s) {
+      const t = s.stage_timings || {};
+      if (!s.current_stage && !Object.keys(t).length)
+        return '<span class="muted" style="font-size:var(--tx-xs)">waiting for first stage…</span>';
+      const order = STAGES.indexOf(s.current_stage || 'intake');
+      let html = '<div style="display:flex; gap:6px; flex-wrap:wrap">';
+      for (const st of STAGES) {
+        const done = t[st] != null;
+        const live = st === s.current_stage;
+        const past = STAGES.indexOf(st) < order;
+        const cls = live ? 'warn' : ((past || done) ? 'up' : 'flat');
+        const ts = done ? ` <span class="muted">${t[st]}s</span>` : '';
+        html += `<span class="badge ${cls}">${st}${ts}</span>`;
+      }
+      return html + '</div>';
+    }
+
+    document.getElementById('logfilter').addEventListener('input', e => {
+      logFilter = e.target.value; renderLog();
+    });
+    document.getElementById('autoscroll').addEventListener('change', e => {
+      autoScroll = e.target.checked; renderLog();
+    });
+
+    function renderLog(lines) {
+      const shown = (lines || []).filter(l => !logFilter ||
+        l.toLowerCase().includes(logFilter.toLowerCase()));
+      const pre = document.getElementById('logpre');
+      pre.textContent = shown.length ? shown.join('\n') : 'waiting for output…';
+      if (autoScroll) pre.scrollTop = pre.scrollHeight;
+    }
+
     const t = setInterval(async () => {
       const r = await fetch('/run/status');
       const s = await r.json();
-      let html = '';
-      if (s.current_stage) {
-        const cur = {};
-        STAGES.forEach(st => cur[st] = st === s.current_stage ? 'live' :
-          (STAGES.indexOf(st) < STAGES.indexOf(s.current_stage) ? 'done' : 'todo'));
-        html += '<div style="display:flex; gap:6px; margin-bottom:10px; flex-wrap:wrap">';
-        for (const st of STAGES) {
-          const cls = cur[st] === 'live' ? 'warn' : (cur[st] === 'done' ? 'up' : 'flat');
-          html += `<span class="badge ${cls}">${st}</span>`;
-        }
-        html += '</div>';
-      }
-      const lr = await fetch('/api/run/log?n=12');
+      document.getElementById('timeline').innerHTML = timeline(s);
+      const lr = await fetch('/api/run/log?n=60');
       const lj = await lr.json();
-      if (lj.lines && lj.lines.length) {
-        html += '<pre>' + lj.lines.map(escapeHtml).join('\n') + '</pre>';
-      } else {
-        html += '<p class="muted">Polling stage status…</p>';
-      }
-      document.getElementById('progress').innerHTML = html;
-
-      function escapeHtml(x){ return x.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+      renderLog(lj.lines || []);
 
       if (!s.running) {
         clearInterval(t);
         const last = s.last || {};
-        const el = document.getElementById('progress');
+        const el = document.getElementById('timeline');
         const esc = escapeHtml;
         if (last.ok) {
-          el.innerHTML = `<p><span class="badge up">complete</span>
+          el.innerHTML = timeline(s) +
+            `<p style="margin-top:10px"><span class="badge up">complete</span>
              <span class="mono">${esc(last.sha ? last.sha.slice(0,16)+'…' : '')}</span>
              truly_green = <b>${last.audit ? esc(String(last.audit.truly_green)) : '?'}</b></p>
              <pre>${esc(JSON.stringify(last, null, 2))}</pre>`;
         } else {
-          el.innerHTML = `<div class="notice err">Run failed: ${esc(last.error || 'unknown')}</div>`;
+          el.innerHTML = timeline(s) +
+            `<div class="notice err" style="margin-top:10px">Run failed: ${esc(last.error || 'unknown')}</div>`;
         }
       }
     }, 3000);

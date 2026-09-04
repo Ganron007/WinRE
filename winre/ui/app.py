@@ -411,6 +411,21 @@ def _current_stage(sha: str | None) -> str | None:
     return STAGE_ORDER[-1]
 
 
+def _stage_timings(sha: str | None) -> dict:
+    """elapsed_s per landed stage (from META.json) for the run timeline."""
+    if not sha or not _valid_sha(sha):
+        return {}
+    root = LOGS_DIR / sha
+    out = {}
+    for stage in STAGE_ORDER:
+        for name in ("META.json", "STAGE.json"):
+            m = _read_json(root / stage / name) or {}
+            if m.get("elapsed_s") is not None:
+                out[stage] = m["elapsed_s"]
+                break
+    return out
+
+
 def _run_pipeline_in_thread(sample_path: str, max_seconds: int,
                             pesieve: bool, dry_llm: bool, dynamic: bool,
                             agentic_dbg: bool = False) -> None:
@@ -586,7 +601,8 @@ def create_app() -> "Flask":
         return jsonify({"running": _run_state["running"],
                         "last": _run_state["last"],
                         "sha": sha,
-                        "current_stage": _current_stage(sha) if _run_state["running"] else None})
+                        "current_stage": _current_stage(sha) if _run_state["running"] else None,
+                        "stage_timings": _stage_timings(sha) if sha else {}})
 
     @app.route("/api/run/log")
     def run_log():
@@ -750,6 +766,28 @@ def create_app() -> "Flask":
                                    error=f"pack not found: {sha}"), 404
         return render_template("pack.html", pack=detail)
 
+    @app.route("/packs/<sha>/export")
+    def pack_export(sha: str):
+        """Zip the whole evidence pack (analyst export)."""
+        import io
+        import zipfile
+        from flask import Response, abort
+        if not _valid_sha(sha):
+            abort(400, "invalid sha")
+        root = (LOGS_DIR / sha).resolve()
+        if not root.is_dir():
+            return jsonify({"error": "not found"}), 404
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in sorted(root.rglob("*")):
+                if not f.is_file() or f.stat().st_size > 64 * 1024 * 1024:
+                    continue  # skip >64MB monsters (pcaps dumps are separate)
+                zf.write(f, f.relative_to(root))
+        buf.seek(0)
+        return Response(buf.getvalue(), mimetype="application/zip",
+                        headers={"Content-Disposition":
+                                 f"attachment; filename=winre-{sha[:16]}.zip"})
+
     @app.route("/packs/<sha>/<stage>/<fname>")
     def pack_file(sha: str, stage: str, fname: str):
         from flask import Response, abort
@@ -805,20 +843,26 @@ def create_app() -> "Flask":
         """Config state (read-only; secrets masked, never shown)."""
         import os as _os
         from winre import envfile as _env  # noqa: F401  (ensures .env loaded)
+        from winre import snapshot_gate as _sg
         env_path = Path(_os.environ.get(
             "WINRE_ENV", str(REPO / ".env")))
         cfg = {
             "flare": {
-                "host": _os.environ.get("FLARE_HOST", "192.168.77.42"),
+                "host": _os.environ.get("FLARE_HOST", "(set FLARE_HOST)"),
                 "port": _os.environ.get("FLARE_SSH_PORT", "22"),
                 "user": _os.environ.get("FLARE_USER", "FLARE-VM"),
-                "key": _os.environ.get("FLARE_SSH_KEY", "~/.ssh/cadre-77.42-key"),
+                "key": _os.environ.get("FLARE_SSH_KEY", "~/.ssh/<your-key>"),
             },
             "llm": {
                 "base_url": _os.environ.get("WINRE_LLM_BASE_URL", ""),
                 "model": _os.environ.get("WINRE_LLM_MODEL", ""),
                 "reasoning": _os.environ.get("WINRE_LLM_REASONING", ""),
                 "key_set": bool(_os.environ.get("WINRE_LLM_API_KEY")),
+            },
+            "gate": {
+                "mode": _sg.mode(),
+                "marker_path": _sg.MARKER,
+                "hypervisor": _sg.hypervisor_cfg(),
             },
             "env_file": {"path": str(env_path), "present": env_path.is_file()},
             "logs_dir": str(LOGS_DIR),
@@ -842,6 +886,21 @@ def create_app() -> "Flask":
         except Exception as e:  # noqa: BLE001
             html = f"<p class='muted'>docs unavailable: {e}</p>"
         return render_template("help.html", body=html)
+
+    # ── Error pages (no stack traces, no raw paths) ─────────────────────
+    @app.errorhandler(404)
+    def nf(e):
+        return render_template("error.html", code=404,
+                               title="Not found",
+                               hint="The page or pack does not exist. "
+                                    "It may have been removed."), 404
+
+    @app.errorhandler(500)
+    def ise(e):
+        return render_template("error.html", code=500,
+                               title="Internal error",
+                               hint="The console hit an unexpected error. "
+                                    "Check the console log on the host."), 500
 
     return app
 

@@ -9,10 +9,19 @@
 
   {% if error %}<div class="notice err">{{ error }}</div>{% endif %}
 
+  {% if not packs %}
+  <div class="empty">
+    <div class="glyph">▤</div>
+    <div class="title">No cases yet</div>
+    <div class="hint">Run your first sample from the Run page — every analysis
+      lands here as a stage-tagged evidence pack with an honest audit gate.</div>
+    <a class="btn" href="/run" style="margin-top:var(--sp-2)">Analyze a sample</a>
+  </div>
+  {% else %}
   <div class="table-wrap">
   <table>
     <thead>
-      <tr><th>sha256</th><th>Phase</th><th>Quick</th><th>Deep</th><th>Intake</th><th>Yara</th><th>Report</th><th>Dynamic</th><th>Gate</th></tr>
+      <tr><th class="sortable">sha256</th><th class="sortable">Phase</th><th class="sortable">Quick</th><th class="sortable">Deep</th><th>Intake</th><th>Yara</th><th>Report</th><th>Dynamic</th><th>Gate</th></tr>
     </thead>
     <tbody>
     {% for p in packs %}
@@ -43,11 +52,10 @@
             {% else %}<span class="badge down">no</span>{% endif %}</td>
       {% else %}<td colspan="9" class="muted">no audit</td>{% endif %}
     </tr>
-    {% else %}
-    <tr><td colspan="9" class="muted" style="text-align:center; padding:24px">No cases yet.</td></tr>
     {% endfor %}
     </tbody>
   </table>
   </div>
+  {% endif %}
 </div>
 {% endblock %}

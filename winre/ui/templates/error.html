@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}WinRE — {{ code }}{% endblock %}
+{% block content %}
+<div class="page">
+  <div class="empty" style="min-height:50vh">
+    <div class="glyph">◈</div>
+    <div class="title">{{ code }} — {{ title }}</div>
+    <div class="hint">{{ hint }}</div>
+    <div style="display:flex; gap:8px; margin-top:var(--sp-2)">
+      <a class="btn ghost" href="/">home</a>
+      <a class="btn ghost" href="/packs">cases</a>
+    </div>
+  </div>
+</div>
+{% endblock %}

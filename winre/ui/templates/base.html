@@ -126,6 +126,81 @@
     document.addEventListener('DOMContentLoaded', refreshHealth);
   } else { refreshHealth(); }
 })();
+
+// ── Shared UI helpers: copy buttons, sortable tables, kbd shortcuts ──
+(function(){
+  // copy-to-clipboard (textContent only — never innerHTML)
+  window.winreCopy = function(btn, text){
+    const done = () => { btn.classList.add('done'); btn.textContent = 'copied';
+      setTimeout(() => { btn.classList.remove('done'); btn.textContent = 'copy'; }, 1200); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, done);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); } catch(e) {}
+      document.body.removeChild(ta); done();
+    }
+  };
+  // enhance any <span class="copyable" data-copy="...">: needs a sibling button
+  document.addEventListener('DOMContentLoaded', () => {
+    document.querySelectorAll('table th.sortable').forEach(th => {
+      th.addEventListener('click', () => {
+        const table = th.closest('table');
+        const idx = Array.from(th.parentElement.children).indexOf(th);
+        const asc = !th.classList.contains('asc');
+        table.querySelectorAll('th.sortable').forEach(o =>
+          o.classList.remove('asc', 'desc'));
+        th.classList.add(asc ? 'asc' : 'desc');
+        const tbody = table.querySelector('tbody');
+        if (!tbody) return;
+        Array.from(tbody.rows)
+          .sort((a, b) => {
+            const av = a.cells[idx] ? a.cells[idx].textContent.trim() : '';
+            const bv = b.cells[idx] ? b.cells[idx].textContent.trim() : '';
+            const an = parseFloat(av), bn = parseFloat(bv);
+            const cmp = (!isNaN(an) && !isNaN(bn)) ? an - bn
+              : av.localeCompare(bv);
+            return asc ? cmp : -cmp;
+          })
+          .forEach(row => tbody.appendChild(row));
+      });
+    });
+  });
+  // keyboard: g+h/g+r/g+c/g+m/g+s jumps, / focuses palette, ? shows help
+  const ROUTES = { h: '/', r: '/run', c: '/packs', m: '/mcp', s: '/settings' };
+  let pendingG = false;
+  document.addEventListener('keydown', (e) => {
+    if (e.target.matches('input, textarea, select')) return;
+    if (pendingG) {
+      pendingG = false;
+      const r = ROUTES[e.key.toLowerCase()];
+      if (r) { e.preventDefault(); location.href = r; return; }
+    }
+    if (e.key.toLowerCase() === 'g') { pendingG = true;
+      setTimeout(() => { pendingG = false; }, 900); return; }
+    if (e.key === '/') { e.preventDefault(); togglePalette(true); }
+    if (e.key === '?') { e.preventDefault(); toggleKbdHelp(); }
+  });
+  window.toggleKbdHelp = function(){
+    let el = document.getElementById('kbdhelp');
+    if (el) { el.remove(); return; }
+    el = document.createElement('div');
+    el.id = 'kbdhelp';
+    el.style.cssText = 'position:fixed;inset:0;z-index:120;background:rgba(0,0,0,0.55);' +
+      'display:flex;align-items:center;justify-content:center';
+    el.innerHTML = '<div style="background:var(--bg-1);border:1px solid var(--line-hi);' +
+      'border-radius:var(--r-md);padding:20px 26px;font-size:var(--tx-sm);color:var(--tx-1)">' +
+      '<div style="font-weight:700;color:var(--tx-0);margin-bottom:10px">Keyboard</div>' +
+      '<div><span class="kbd">g</span> then <span class="kbd">h</span> home · ' +
+      '<span class="kbd">r</span> run · <span class="kbd">c</span> cases · ' +
+      '<span class="kbd">m</span> mcp · <span class="kbd">s</span> settings</div>' +
+      '<div style="margin-top:6px"><span class="kbd">/</span> jump to pack · ' +
+      '<span class="kbd">?</span> this help · <span class="kbd">esc</span> close</div></div>';
+    el.addEventListener('click', () => el.remove());
+    document.body.appendChild(el);
+  };
+})();
 </script>
 </body>
 </html>
