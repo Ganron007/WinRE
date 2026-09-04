@@ -21,10 +21,21 @@ from a non-interactive SSH process).
 """
 from __future__ import annotations
 
+import threading
 import time
 
 from winre import remote_driver
 from winre.mcp import X64DbgClient
+
+# serialize ensure/teardown: two concurrent callers (pipeline + manual stage)
+# must not double-launch or race the kill
+_lock = threading.Lock()
+
+
+def keep_debugger() -> bool:
+    """WINRE_KEEP_DEBUGGER=1 preserves x64dbg across runs (interactive work)."""
+    import os
+    return os.environ.get("WINRE_KEEP_DEBUGGER", "").strip().lower() in ("1", "true", "yes")
 
 
 def _launch_on_vm(cfg: dict) -> bool:
@@ -44,27 +55,28 @@ def _launch_on_vm(cfg: dict) -> bool:
 
 def ensure_mcp(base: str | None = None, wait_s: int = 90) -> tuple[bool, dict]:
     """Ensure x64dbg MCP :9094 is up. Launch on VM if down. Returns (ok, info)."""
-    cfg = remote_driver.flare_cfg()
-    host = cfg["host"]
-    xc = X64DbgClient(base=base or f"http://{host}:9094", default_timeout=10)
-    info: dict = {"host": host, "already_up": False, "launched": False}
+    with _lock:
+        cfg = remote_driver.flare_cfg()
+        host = cfg["host"]
+        xc = X64DbgClient(base=base or f"http://{host}:9094", default_timeout=10)
+        info: dict = {"host": host, "already_up": False, "launched": False}
 
-    if xc.is_up():
-        info["already_up"] = True
-        return True, info
-
-    # not up — launch x64dbg on the VM console
-    if not _launch_on_vm(cfg):
-        return False, {**info, "error": "scheduled-task launch failed"}
-
-    # wait for MCP to come up
-    deadline = time.time() + wait_s
-    while time.time() < deadline:
-        time.sleep(3)
         if xc.is_up():
-            info["launched"] = True
+            info["already_up"] = True
             return True, info
-    return False, {**info, "error": f":9094 not up after {wait_s}s"}
+
+        # not up — launch x64dbg on the VM console
+        if not _launch_on_vm(cfg):
+            return False, {**info, "error": "scheduled-task launch failed"}
+
+        # wait for MCP to come up
+        deadline = time.time() + wait_s
+        while time.time() < deadline:
+            time.sleep(3)
+            if xc.is_up():
+                info["launched"] = True
+                return True, info
+        return False, {**info, "error": f":9094 not up after {wait_s}s"}
 
 
 def health(base: str | None = None) -> dict:
@@ -77,25 +89,47 @@ def health(base: str | None = None) -> dict:
     return {"up": True, "state": st.get("result")}
 
 
-def teardown(base: str | None = None, *, kill_vm: bool = True) -> dict:
-    """Stop debugging (if any) and optionally close x64dbg on the VM."""
-    cfg = remote_driver.flare_cfg()
-    host = cfg["host"]
-    xc = X64DbgClient(base=base or f"http://{host}:9094", default_timeout=10)
-    out: dict = {}
-    if xc.is_up():
-        # StopDebug if a session is active
-        st = xc.get_state()
-        txt = ""
-        res = st.get("result") or {}
-        if isinstance(res, dict) and res.get("content"):
-            txt = res["content"][0].get("text", "")
-        if "isDebugging: true" in txt:
-            out["stop_debug"] = xc.call("StopDebug")
-    if kill_vm:
-        r = remote_driver.ssh_run(cfg, "taskkill /F /IM x64dbg.exe", timeout=30)
-        out["kill"] = r.returncode == 0
-    return out
+def teardown(base: str | None = None, *, kill_vm: bool = True,
+             wait_s: int = 8) -> dict:
+    """Neatly close the debug session and the x64dbg GUI.
+
+    Order matters: 1) StopDebug terminates the debuggee (the SAMPLE must
+    never keep running inside a tool), 2) a graceful 'exit' command closes
+    the GUI, 3) only if the GUI is still alive after the wait, a forced
+    taskkill. Never raises — cleanup must be best-effort.
+    """
+    with _lock:
+        cfg = remote_driver.flare_cfg()
+        host = cfg["host"]
+        xc = X64DbgClient(base=base or f"http://{host}:9094", default_timeout=10)
+        out: dict = {"stopped": False, "exited": False, "killed": False}
+
+        if xc.is_up():
+            try:
+                r = xc.stop_debug()
+                out["stopped"] = bool(r.get("ok"))
+            except Exception as e:
+                out["stop_error"] = str(e)[:120]
+            # graceful GUI exit; the response may be lost if the GUI closes
+            # mid-request — verify by process state, not by return value
+            try:
+                xc.exit_gui()
+            except Exception:
+                pass
+            deadline = time.time() + wait_s
+            while time.time() < deadline:
+                time.sleep(1.5)
+                if not xc.is_up():
+                    out["exited"] = True
+                    break
+
+        if kill_vm and not out.get("exited"):
+            # forced fallback: every x64dbg on this VM is ours (detonation
+            # appliance — operator interactive sessions use --keep to skip)
+            r = remote_driver.ssh_run(cfg, "taskkill /F /IM x64dbg.exe /T 2>nul "
+                                           "& exit /b 0", timeout=30)
+            out["killed"] = r.returncode == 0
+        return out
 
 
 if __name__ == "__main__":

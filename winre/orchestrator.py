@@ -529,6 +529,34 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
             meta["artifacts"]["x64dbg/dump/"] = str(dump_dir)
     except Exception as e:
         meta["x64dbg_mcp_error"] = str(e)
+    finally:
+        # neat closure: stop the debuggee and close the x64dbg GUI — the
+        # local-mode post-detonation dump must not leave a halted sample
+        # inside a live debugger. WINRE_KEEP_DEBUGGER=1 preserves it.
+        if os.environ.get("WINRE_KEEP_DEBUGGER", "").strip().lower() not in \
+                ("1", "true", "yes"):
+            try:
+                cli.stop_debug()
+            except Exception:
+                pass
+            try:
+                cli.exit_gui()
+            except Exception:
+                pass
+            subprocess.run(["taskkill", "/F", "/IM", "x64dbg.exe", "/T"],
+                           capture_output=True, timeout=30)
+
+
+def _kill_stale_local() -> None:
+    """Local-mode orphan sweep (orchestrator RUNS ON THE VM — direct
+    taskkill, no SSH). Mirrors the job's Kill-Stale so a timed-out or
+    crashed job cannot leave the sample/Frida/FakeNet/Procmon running."""
+    for im in STALE_IMAGES:
+        try:
+            subprocess.run(["taskkill", "/F", "/IM", im, "/T"],
+                           capture_output=True, timeout=30)
+        except Exception:
+            pass
 
 
 def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
@@ -554,6 +582,7 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
     if enable_pesieve:
         job_args.append("-EnablePeSieve")
     print(f"[dynamic_run_v2] LOCAL powershell job -> {LOCAL_JOB_PS1}", flush=True)
+    timed_out = False
     try:
         cp = subprocess.run(job_args, capture_output=True, text=True,
                             timeout=int(max_seconds) + 300,
@@ -565,9 +594,14 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
         meta["job_timeout"] = True
         meta["error"] = f"local powershell timeout: {te}"
         meta["ok"] = False
-        return meta
+        timed_out = True
+        # python killed only the powershell child — Frida/sample/FakeNet/
+        # Procmon (grandchildren) survive. Sweep them NOW; never leave a
+        # sample running independently of the pipeline.
+        _kill_stale_local()
 
-    # Pull artifacts from <work_root>\out into dyn_dir
+    # Pull artifacts from <work_root>\out into dyn_dir (also on timeout —
+    # a nearly-complete pack is evidence, not trash)
     out_dir = work_root / "out"
     if out_dir.is_dir():
         for src in out_dir.rglob("*"):
@@ -630,6 +664,9 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
     meta["ok"] = has_core
     if not meta["ok"] and not meta.get("error"):
         meta["error"] = f"incomplete local pack job_rc={meta.get('job_rc')}"
+    # final local sweep: the job cleaned its own children; this catches any
+    # survivor (hung helper, resumed sample) — nothing outlives the pipeline
+    _kill_stale_local()
     return meta
 
 

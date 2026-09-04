@@ -766,7 +766,7 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
 
 if __name__ == "__main__":
     import argparse
-    from winre.mcp.x64dbg_manager import ensure_mcp
+    from winre.mcp.x64dbg_manager import ensure_mcp, teardown
     from winre.remote_driver import flare_cfg
 
     ap = argparse.ArgumentParser(description="x64dbg debug-loop scenarios")
@@ -776,6 +776,9 @@ if __name__ == "__main__":
     ap.add_argument("sample", help="VM path e.g. C:\\samples\\foo.exe")
     ap.add_argument("--api", default="WriteProcessMemory")
     ap.add_argument("--dump-dir", default=None, help="where to write dumped buffers (host path)")
+    ap.add_argument("--keep", action="store_true",
+                    help="keep x64dbg + sample alive after the scenario "
+                         "(default: neat teardown)")
     args = ap.parse_args()
 
     ok, info = ensure_mcp()
@@ -789,13 +792,22 @@ if __name__ == "__main__":
           "wpm_dump": wpm_dump, "crypt_dump": crypt_dump,
           "agentic_unpack": agentic_unpack,
           "api_loop": api_loop}[args.scenario]
-    if args.scenario == "api_loop":
-        res = fn(args.sample, args.api, xc)
-    elif args.scenario in ("wpm_dump", "crypt_dump"):
-        res = fn(args.sample, xc, dump_dir=args.dump_dir)
-    else:
-        res = fn(args.sample, xc)
+    res = None
+    try:
+        if args.scenario == "api_loop":
+            res = fn(args.sample, args.api, xc)
+        elif args.scenario in ("wpm_dump", "crypt_dump"):
+            res = fn(args.sample, xc, dump_dir=args.dump_dir)
+        else:
+            res = fn(args.sample, xc)
+    finally:
+        if not args.keep:
+            # neat closure: terminate the debuggee and close the GUI — the
+            # scenario must not leave a halted malware process behind
+            t = teardown()
+            print(f"[teardown] stopped={t.get('stopped')} "
+                  f"exited={t.get('exited')} killed={t.get('killed')}")
     import json as _json
-    print(_json.dumps({k: v for k, v in res.items() if k != "evidence"},
+    print(_json.dumps({k: v for k, v in (res or {}).items() if k != "evidence"},
                       indent=2, default=str))
-    print(f"evidence pauses: {len(res.get('evidence') or [])}")
+    print(f"evidence pauses: {len((res or {}).get('evidence') or [])}")

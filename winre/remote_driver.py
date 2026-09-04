@@ -523,7 +523,20 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
         "deep", True, summary=f"mcp={mcp} engine={engine} fallback={fallback}",
         fallback=fallback, tool_failures=failures,
         elapsed_s=round(time.time() - t0, 1)))
-    return {"ok": True, "fallback": fallback, "failures": failures, "mcp": mcp}
+    # neat closure: if the agent had debug tools, x64dbg + the sample must
+    # not outlive this stage (covers manual single-stage runs; the full
+    # pipeline's final sweep is idempotent on top of this)
+    if dynamic:
+        try:
+            from .mcp.x64dbg_manager import teardown, keep_debugger
+            if not keep_debugger():
+                out["x64dbg_teardown"] = teardown()
+        except Exception as e:
+            out["x64dbg_teardown"] = {"error": str(e)[:150]}
+    # surface the agent block so _report can source-tag correctly
+    return {"ok": True, "fallback": fallback, "failures": failures, "mcp": mcp,
+            "agent": out.get("agent"), "llm_analysis": out.get("llm_analysis"),
+            "x64dbg": out.get("x64dbg")}
 
 
 def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
@@ -585,10 +598,42 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
         json.dumps(audit_res, indent=2) + "\n", encoding="utf-8")
     results["audit"] = audit_res
 
+    # ---- final tool sweep: nothing keeps running after the pipeline ----
+    results["cleanup"] = _final_sweep(cfg, dynamic=enable_dynamic,
+                                      debug=enable_agentic_dbg)
+
     print(f"[winre-remote] {sha[:16]}… quick={results['quick'].get('verdict')} "
           f"dynamic={'ok' if results.get('dynamic',{}).get('ok') else 'not-run'} "
           f"truly_green={audit_res['truly_green']}", flush=True)
     return {"sha": sha, "results": results}
+
+
+def _final_sweep(cfg: dict, *, dynamic: bool, debug: bool) -> dict:
+    """Neat tool closure after a run: no sample, frida helper, or x64dbg GUI
+    left alive on the VM. Idempotent, best-effort, never raises. Skipped
+    entirely with WINRE_KEEP_DEBUGGER=1 (operator wants the session)."""
+    from .mcp.x64dbg_manager import teardown, keep_debugger
+    out: dict = {"skipped": keep_debugger()}
+    if out["skipped"]:
+        return out
+    try:
+        if debug:
+            out["x64dbg"] = teardown()
+    except Exception as e:
+        out["x64dbg_error"] = str(e)[:150]
+    try:
+        if dynamic:
+            # catch detonation orphans (job-timeout survivors etc.) — the
+            # job's own Kill-Stale handles the normal path; this is the net
+            images = ["sample.exe", "frida-helper-64.exe", "frida-helper-32.exe",
+                      "hollows_hunter.exe", "pe-sieve.exe", "fakenet.exe",
+                      "Procmon64.exe"]
+            cmd = " & ".join(f"taskkill /F /IM {i} /T 2>nul" for i in images)
+            r = ssh_run(cfg, f"{cmd} & exit /b 0", timeout=60)
+            out["process_sweep"] = r.returncode == 0
+    except Exception as e:
+        out["sweep_error"] = str(e)[:150]
+    return out
 
 
 def main() -> int:

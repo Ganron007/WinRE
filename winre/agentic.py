@@ -499,8 +499,23 @@ if __name__ == "__main__":
                     help="no LLM — deterministic fallback only")
     ap.add_argument("--dynamic", action="store_true",
                     help="expose bounded x64dbg debug-loop tools to the agent")
+    ap.add_argument("--keep", action="store_true",
+                    help="keep x64dbg + sample alive after the run "
+                         "(default: neat teardown)")
     args = ap.parse_args()
-    out = run_langgraph_deep_dive(args.sample_name, args.sha,
-                                  max_steps=args.max_steps, dry=args.dry,
-                                  dynamic=args.dynamic)
+    out = None
+    try:
+        out = run_langgraph_deep_dive(args.sample_name, args.sha,
+                                      max_steps=args.max_steps, dry=args.dry,
+                                      dynamic=args.dynamic)
+    finally:
+        if args.dynamic and not args.keep:
+            # neat closure: no halted sample, no x64dbg GUI left behind
+            try:
+                from winre.mcp.x64dbg_manager import teardown
+                t = teardown()
+                print(f"[teardown] stopped={t.get('stopped')} "
+                      f"exited={t.get('exited')} killed={t.get('killed')}")
+            except Exception as e:
+                print(f"[teardown] error: {e}")
     print(json.dumps(out, indent=2, default=str))

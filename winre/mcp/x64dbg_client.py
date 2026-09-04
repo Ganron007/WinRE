@@ -179,3 +179,15 @@ class X64DbgClient:
         return self.call("SetBookmark", {"address": hex(address), "text": text})
     def execute_command(self, command: str) -> dict:
         return self.call("ExecuteDebuggerCommand", {"command": command})
+    def stop_debug(self) -> dict:
+        """Terminate the debuggee (x64dbg 'stop'). Sample stops running."""
+        return self.call("StopDebug")
+    def exit_gui(self) -> dict:
+        """Close the x64dbg GUI ('exit'). Fire-and-forget: the GUI may close
+        before the MCP response arrives, so callers must tolerate a
+        transport error here and verify via process state instead."""
+        try:
+            return self.call("ExecuteDebuggerCommand", {"command": "exit"},
+                             timeout=5)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
