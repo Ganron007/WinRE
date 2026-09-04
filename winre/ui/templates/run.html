@@ -16,8 +16,7 @@
     <div class="board-body" id="progress">
       <p class="muted">Polling stage status…</p>
     </div>
-  </div>
-  <script>
+  </div>  <script>
     const STAGES = ['intake','quick','dynamic','deep','yara','report'];
     const t = setInterval(async () => {
       const r = await fetch('/run/status');
@@ -61,6 +60,29 @@
     }, 3000);
   </script>
   {% else %}
+
+  <!-- Snapshot gate card: L1 marker · L2 hypervisor auto-restore · L3 ledger -->
+  <div class="board" style="max-width:760px; margin-bottom:14px">
+    <div class="board-head">
+      <h3>Snapshot gate</h3>
+      <span class="badge flat" id="gateMode" style="margin-left:8px">…</span>
+      <span class="badge flat" id="gateState" style="margin-left:auto">probing…</span>
+    </div>
+    <div class="board-body" style="font-size:var(--tx-sm)">
+      <div id="gateDetail" class="muted" style="font-size:var(--tx-xs)">
+        Checking VM clean-marker, hypervisor config and run ledger…
+      </div>
+      <div id="gateActions" style="margin-top:8px; display:none; gap:8px">
+        <button class="btn ghost" style="font-size:var(--tx-xs); padding:3px 10px"
+                onclick="gateAttest('restored')">I restored the snapshot</button>
+        <button class="btn ghost" style="font-size:var(--tx-xs); padding:3px 10px"
+                onclick="gateAttest('verified_clean')">I verified the VM clean</button>
+        <span class="muted" style="font-size:var(--tx-xs)">
+          verified-clean is marker-checked server-side; attestations are single-use
+        </span>
+      </div>
+    </div>
+  </div>
 
   <div class="board" style="max-width:760px">
     <div class="board-body">
@@ -136,6 +158,53 @@
     dbg.addEventListener('change', refreshMode);
     dry.addEventListener('change', refreshMode);
     refreshMode();
+
+    // ---- snapshot gate live card ------------------------------------------
+    async function gateAttest(action) {
+      const r = await fetch('/api/gate/attest', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action})
+      });
+      const j = await r.json();
+      if (!j.ok) { alert('Attestation refused: ' + (j.error || 'unknown')); }
+      gateRefresh();
+    }
+    async function gateRefresh() {
+      try {
+        const g = await (await fetch('/api/gate')).json();
+        const modeEl = document.getElementById('gateMode');
+        const stateEl = document.getElementById('gateState');
+        const detEl = document.getElementById('gateDetail');
+        const actEl = document.getElementById('gateActions');
+        const enforce = g.mode === 'enforce';
+        modeEl.textContent = enforce ? 'enforce' : (g.mode === 'off' ? 'off' : 'observe (advisory)');
+        modeEl.className = 'badge ' + (enforce ? 'warn' : 'flat');
+        let state, cls;
+        if (g.blocked) { state = 'BLOCKED'; cls = 'down'; }
+        else if (g.marker === true || g.ledger_clean) { state = 'armed'; cls = 'up'; }
+        else { state = 'dirty'; cls = 'warn'; }
+        stateEl.textContent = state;
+        stateEl.className = 'badge ' + cls;
+        const st = g.vm_state || {};
+        detEl.innerHTML =
+          `marker <b>${g.marker === null ? 'unknown' : (g.marker ? 'clean' : 'absent')}</b>` +
+          ` · ledger <b>${st.last_action || 'none'}</b>` +
+          `${st.ts ? ' <span class=muted>(' + st.ts + ')</span>' : ''}` +
+          ` · auto-restore <b>${g.hypervisor ? g.hypervisor.hypervisor + ' / ' + g.hypervisor.snapshot : 'not configured'}</b>` +
+          `<br><span class=muted>${g.reason || ''}</span>`;
+        // attest buttons only matter when there's no hypervisor automation
+        actEl.style.display = (!g.hypervisor && g.mode !== 'off') ? 'flex' : 'none';
+        // in enforce mode a blocked gate locks the detonation checkbox;
+        // observe mode (default) never blocks testing.
+        if (chk) {
+          chk.disabled = enforce && g.blocked;
+          chk.title = (enforce && g.blocked) ? 'gate blocked — restore/attest first' : '';
+        }
+      } catch (e) { /* keep probing text */ }
+    }
+    gateRefresh();
+    setInterval(gateRefresh, 20000);
   </script>
 
   {% if last %}

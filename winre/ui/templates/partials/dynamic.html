@@ -11,6 +11,20 @@
 </div>
 
 {% set m = dy.meta or {} %}
+{% set stg = dy.stage or {} %}
+{% if stg.gate %}
+<div class="board" style="max-width:840px; margin-bottom:10px">
+  <div class="board-body" style="font-size:var(--tx-xs)">
+    <span class="badge {{ 'up' if stg.gate_pass else 'warn' }}">snapshot gate</span>
+    <span class="muted" style="margin-left:6px">
+      mode <b>{{ (stg.gate or {}).get('mode', '?') }}</b> ·
+      marker <b>{{ 'clean' if (stg.gate or {}).get('marker') else (stg.gate or {}).get('marker') == false and 'absent' or 'unknown' }}</b> ·
+      {% if (stg.gate or {}).get('action') %}action <b>{{ stg.gate.action }}</b> ·{% endif %}
+      ledger before run: <b>{{ ((stg.gate or {}).get('vm_state') or {}).get('last_action', 'none') }}</b>
+    </span>
+  </div>
+</div>
+{% endif %}
 <div class="board" style="max-width:840px">
   <div class="board-head">
     {% if m.get('ok') %}<span class="badge up">pack ok</span>

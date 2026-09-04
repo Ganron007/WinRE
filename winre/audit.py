@@ -88,7 +88,32 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
             and dynamic_verdict == "benign":
         dynamic_conflict = True
 
-    quality_green = not fallbacks and not failed_tools and not dynamic_conflict
+    # snapshot-gate honesty: when the gate is in enforce mode, a dynamic
+    # stage that ran must carry gate evidence (auto-restore or attestation
+    # pass). observe mode is advisory — recorded, never penalizes.
+    gate = None
+    gate_ok = True
+    try:
+        from .snapshot_gate import mode as gate_mode
+        from .remote_driver import LOCAL_LOGS
+        gm = gate_mode()
+        stg_file = evidence / "dynamic" / "STAGE.json"
+        stg = json.loads(stg_file.read_text(encoding="utf-8")) \
+            if stg_file.is_file() else {}
+        gate = stg.get("gate") or None
+        if dynamic.get("ran"):
+            if gm == "enforce":
+                gate_ok = bool(stg.get("gate_pass"))
+            else:
+                gate_ok = True
+        if gm != "off":
+            pass  # gate field surfaces below regardless
+    except Exception:
+        gm = "observe"
+        gate_ok = True
+
+    quality_green = not fallbacks and not failed_tools \
+        and not dynamic_conflict and gate_ok
     truly_green = all_green and quality_green
 
     return {
@@ -102,6 +127,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
         "static_yara_wins": True,
         "static_verdict": static_verdict,
         "dynamic_verdict": dynamic_verdict,
+        "snapshot_gate": {"mode": gm, "ok": gate_ok, "detail": gate},
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 

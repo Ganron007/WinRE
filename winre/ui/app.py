@@ -470,6 +470,33 @@ def create_app() -> "Flask":
     def health():
         return jsonify(_vm_health())
 
+    # --- Snapshot gate (L1 marker / L2 hypervisor / L3 ledger) -------------
+
+    @app.route("/api/gate")
+    def api_gate():
+        """Live gate picture: mode, marker probe, ledger, blocked?."""
+        from winre import snapshot_gate
+        try:
+            return jsonify(snapshot_gate.gate_status())
+        except Exception as e:
+            return jsonify({"mode": "observe", "marker": None,
+                            "vm_state": {}, "ledger_clean": False,
+                            "hypervisor": None, "blocked": False,
+                            "reason": f"probe error: {e}"}), 200
+
+    @app.route("/api/gate/attest", methods=["POST"])
+    def api_gate_attest():
+        """HITL attestation: {"action": "restored"|"verified_clean", "sha"?}.
+
+        `verified_clean` is marker-verified server-side (L1) — a false claim
+        is refused. Single-use: the next execution dirties the ledger.
+        """
+        from winre import snapshot_gate
+        body = request.get_json(force=True, silent=True) or {}
+        r = snapshot_gate.attest((body.get("action") or "").strip(),
+                                 sha=(body.get("sha") or "").strip())
+        return jsonify(r), (200 if r.get("ok") else 400)
+
     @app.route("/run", methods=["GET", "POST"])
     def run():
         if request.method == "POST":

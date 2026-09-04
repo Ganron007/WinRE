@@ -187,8 +187,24 @@ class ToolRegistry:
         from winre.mcp import X64DbgClient
         return X64DbgClient(base=f"http://{self.cfg['host']}:9094")
 
+    def _dbg_gate(self) -> dict | None:
+        """Snapshot-gate check before ANY debugger execution on the VM.
+
+        enforce: blocked -> the tool returns an error, agent must fall back
+        to static. observe (default): advisory only — never blocks testing.
+        """
+        from winre import snapshot_gate
+        g = snapshot_gate.preflight("debug", sha=self.sha, cfg=self.cfg,
+                                    consume=False)
+        if g.get("allowed"):
+            return None
+        return {"error": f"{g.get('error')} — falling back to static analysis"}
+
     def x64dbg_oep(self) -> dict:
         """Find the unpack OEP via memory-execute BP (verified method)."""
+        gate = self._dbg_gate()
+        if gate:
+            return gate
         try:
             from winre import debug_loops
             r = debug_loops.oep_by_section(self.remote_sample,
@@ -200,6 +216,9 @@ class ToolRegistry:
 
     def x64dbg_wpm_dump(self, max_hits: int = 3) -> dict:
         """BP WriteProcessMemory, dump written buffers (bounded hits)."""
+        gate = self._dbg_gate()
+        if gate:
+            return gate
         try:
             from winre import debug_loops
             r = debug_loops.wpm_dump(self.remote_sample,
@@ -212,6 +231,9 @@ class ToolRegistry:
 
     def x64dbg_crypt_dump(self, max_hits: int = 2) -> dict:
         """BP CryptDecrypt, capture ciphertext then plaintext (bounded)."""
+        gate = self._dbg_gate()
+        if gate:
+            return gate
         try:
             from winre import debug_loops
             r = debug_loops.crypt_dump(self.remote_sample,
@@ -224,6 +246,9 @@ class ToolRegistry:
 
     def x64dbg_unpack(self) -> dict:
         """Full unpack: OEP -> DumpModule -> Malcat compare (deterministic)."""
+        gate = self._dbg_gate()
+        if gate:
+            return gate
         try:
             from winre import debug_loops
             r = debug_loops.agentic_unpack(self.remote_sample,

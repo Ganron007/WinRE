@@ -243,6 +243,13 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                    max_seconds: int, enable_pesieve: bool) -> dict:
     """SSH: run orchestrator --mode local on the VM via helper, scp pack back."""
     t0 = time.time()
+    # --- snapshot gate (observe by default; enforce blocks + auto-restores) ---
+    from . import snapshot_gate
+    gate = snapshot_gate.preflight("dynamic", sha=sha, cfg=cfg)
+    if not gate.get("allowed"):
+        return stage_result("dynamic", False, error=gate.get("error"),
+                            elapsed_s=round(time.time() - t0, 1),
+                            gate=gate.get("gate"))
     py = _remote_py(cfg)
     remote_sample = rf"C:\samples\{sample_name}"
     helper = REPO / "winre" / "_remote_dynamic_helper.py"
@@ -281,9 +288,11 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                 pass
     meta = pack.read("dynamic", "META.json") or {}
     ok = ok or bool(meta.get("ok"))
+    gate = gate.get("gate") if isinstance(gate, dict) else None
     stage_meta = stage_result("dynamic", ok, error=err,
                               summary=f"events={meta.get('frida_events')} ok={ok}",
-                              elapsed_s=round(time.time() - t0, 1))
+                              elapsed_s=round(time.time() - t0, 1),
+                              gate_pass=True, gate=gate)
     pack.write("dynamic", "STAGE.json", stage_meta)
     return stage_meta
 
