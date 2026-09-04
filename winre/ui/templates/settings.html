@@ -52,6 +52,30 @@
   </div>
 
   <div class="board" style="max-width:760px">
+    <div class="board-head"><h3>Snapshot gate</h3>
+      <span style="margin-left:auto">
+        {% if cfg.gate.mode == 'enforce' %}<span class="badge warn">enforce</span>
+        {% elif cfg.gate.mode == 'off' %}<span class="badge flat">off</span>
+        {% else %}<span class="badge flat">observe (advisory)</span>{% endif %}
+      </span>
+    </div>
+    <div class="board-body">
+      <div class="table-wrap"><table><tbody>
+        <tr><td class="mono">WINRE_SNAPSHOT_GATE</td><td class="mono">{{ cfg.gate.mode }}</td></tr>
+        <tr><td class="mono">marker</td><td class="mono">{{ cfg.gate.marker_path }}</td></tr>
+        <tr><td class="mono">auto-restore</td><td class="mono">
+          {% if cfg.gate.hypervisor %}{{ cfg.gate.hypervisor.hypervisor }} ·
+            {{ cfg.gate.hypervisor.snapshot }}{% else %}not configured
+            (set WINRE_HYPERVISOR / WINRE_VM_PATH / WINRE_SNAPSHOT){% endif %}</td></tr>
+      </tbody></table></div>
+      <p class="muted" style="font-size:var(--tx-xs)">
+        observe records gate evidence but never blocks. enforce refuses
+        detonation/debug unless the clean marker was just consumed or
+        auto-restored. See <code>python -m winre.snapshot_gate --help</code>.</p>
+    </div>
+  </div>
+
+  <div class="board" style="max-width:760px">
     <div class="board-head"><h3>Paths</h3></div>
     <div class="board-body">
       <div class="table-wrap"><table><tbody>
