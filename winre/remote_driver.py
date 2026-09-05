@@ -216,7 +216,21 @@ if i64.is_file():
     else:
         out["ida"] = {"error": i.get("error")}
 else:
-    out["ida"] = {"skipped": "no .i64 on VM (deep dive will create)"}
+    # IDA runs EQUALLY (licensed) — create the .i64 NOW via idat auto-analysis
+    # (same as RevAI's intake bridge) so deep's ida_query participates fully.
+    i = run(tools / "flarevm_ida_query.py", str(sample), "SELECT count(*) FROM funcs",
+            "--json", timeout=1500)
+    if i.get("ok"):
+        rows = i.get("rows") or []
+        out["ida"] = {"func_count": rows[0][0] if rows and rows[0] else None,
+                      "i64_created": True}
+    else:
+        err_txt = i.get("error") or ""
+        if "timeout" in err_txt.lower():
+            out["ida"] = {"error": err_txt[:120],
+                          "note": "idat auto-analysis budget exceeded; .i64 may exist partially"}
+        else:
+            out["ida"] = {"error": err_txt[:200]}
 
 print(json.dumps({"evidence": out}))
 '''
@@ -574,18 +588,16 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
                                                dynamic=dynamic,
                                                available_tools=names)
         history = []
-        for h in (agent_result.get("history") or [])[:60]:
+        for h in (agent_result.get("history") or [])[:80]:
             entry = {"step": h.get("step"), "tool": h.get("tool"),
-                     "args": h.get("args"), "error": h.get("error")}
+                     "args": h.get("args"), "error": h.get("error"),
+                     "reason": h.get("reason")}
             res = h.get("result")
             if isinstance(res, dict):
-                res = {k: res.get(k) for k in
-                       ("ok", "verdict", "summary", "row_count", "error")
-                       if k in res}
-                s = json.dumps(res, default=str)
-                entry["result"] = s[:800] + ("…" if len(s) > 800 else "")
-            out_hist = entry
-            history.append(out_hist)
+                # FULL result preserved (evidence contract — raw outputs are
+                # citable); only stringified blobs get a sane length cap
+                entry["result"] = res
+            history.append(entry)
         out["agent"] = {
             "source": agent_result.get("source"),
             "verdict": agent_result.get("verdict"),
@@ -683,7 +695,7 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
     except Exception as e:
         results["yara"] = {"ok": False, "error": str(e)}
 
-    # report + audit (local)
+    # report + audit + RevAI-contract reporting chain (local)
     from .pipeline import _report
     results["report"] = _report(pack, sha, results["quick"], results.get("dynamic"),
                                 results["deep"])
@@ -691,6 +703,11 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
     (pack.root / "audit.json").write_text(
         json.dumps(audit_res, indent=2) + "\n", encoding="utf-8")
     results["audit"] = audit_res
+    try:
+        from .reporting import generate_all
+        results["reporting"] = generate_all(pack.root)
+    except Exception as e:
+        results["reporting"] = {"error": str(e)[:200]}
 
     # ---- final tool sweep: nothing keeps running after the pipeline ----
     results["cleanup"] = _final_sweep(cfg, dynamic=enable_dynamic,
