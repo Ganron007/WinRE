@@ -11,24 +11,6 @@
 > documentation until the v1.0 tag. Use it, break it, tell us — but pin a
 > commit if you depend on anything.
 
-> [!IMPORTANT]
-> **FlareVM is required for dynamic analysis.** The detonation pipeline
-> (FakeNet-NG, Procmon, Frida, pe-sieve) runs inside a **Windows 10/11 VM
-> with [FlareVM](https://github.com/mandiant/flare-vm) installed**, on an
-> isolated/host-only network. The operator must provide and contain that VM —
-> see [`docs/PREREQUISITES.md`](docs/PREREQUISITES.md).
-
-> [!NOTE]
-> **All FREE tools are required — including x64dbg.** Ghidra (primary static
-> engine), x64dbg (+ the bundled MCP plugin), FakeNet-NG, Procmon, pe-sieve,
-> hollows_hunter and Frida are mandatory; setup verifies them and refuses to
-> declare the VM ready without them. **Only commercial tools are optional:**
-> IDA Pro (via `idasql`) and Malcat are drop-in upgrades when present —
-> setup detects them and the pipeline skips those routines gracefully if
-> absent (honest `skipped` annotations, no failures). Ghidra + FlareVM free
-> tooling alone gives the complete intake → quick → deep → YARA → report →
-> audit flow, plus detonation.
-
 <p align="center">
   <a href="https://github.com/Ganron007/WinRE"><img src="https://img.shields.io/badge/Status-LLM--assisted-blue.svg" alt="Status"></a>
   <a href="https://github.com/Ganron007/WinRE"><img src="https://img.shields.io/badge/Platform-Windows%2010%20(FlareVM)-green.svg" alt="Platform"></a>
@@ -36,20 +18,24 @@
   <a href="https://github.com/Ganron007/WinRE"><img src="https://img.shields.io/badge/MCP-x64dbg%20%2B%20WinDbg-orange.svg" alt="MCP"></a>
 </p>
 
-Part of the [CADRE](https://github.com/Ganron007/CADRE) platform — Windows-side malware analysis for the [RevAI](https://github.com/Ganron007/RevAI) LLM-assisted RE pipeline.
+**WinRE is FlareVM-based Windows malware analysis — static and dynamic — with a dynamic remote driver for [RevAI](https://github.com/Ganron007/RevAI).**
+
+It runs where Windows malware lives: on a [FlareVM](https://github.com/mandiant/flare-vm) analysis machine (Windows 10/11, isolated lab network), as the Windows companion to RevAI's Linux pipeline. The contract between them is **files, not shared process** — a versioned artifact pack the Linux side reads for corroboration, driven over SSH by WinRE's remote driver.
+
+**Built entirely on free tooling.** Ghidra is the primary static engine; x64dbg (+ the bundled MCP plugin), FakeNet-NG, Procmon, pe-sieve, hollows_hunter and Frida power the detonation phase — setup verifies the complete set and refuses to declare the VM ready without it. **Commercial tools are pure upgrades, never requirements:** IDA Pro (via `idasql`) and Malcat are detected when present and skipped gracefully when absent (honest `skipped` annotations, no failures). Free tooling alone gives the complete intake → quick → deep → YARA → report → audit flow, plus detonation.
 
 > [!WARNING]
-> **Malware Sandbox Containment.** WinRE is a dynamic detonation host (Frida, Procmon, FakeNet-NG, pe-sieve). Run it only inside an isolated analysis VM (FlareVM recommended), on a host-only lab network, and **revert the VM snapshot after every run**. The authors accept no liability for payload escapes or network contamination from improper containment.
+> **Malware Sandbox Containment.** WinRE is a dynamic detonation host (Frida, Procmon, FakeNet-NG, pe-sieve). Run it only inside an isolated analysis VM (FlareVM), on a host-only lab network, and **revert the VM snapshot after every run**. The authors accept no liability for payload escapes or network contamination from improper containment.
 
 ---
 
 ## What is WinRE?
 
-**WinRE** is the Windows companion to the RevAI/RevEng Linux pipeline. Work that must run on Windows stays on Windows: SQL-first IDA/Ghidra querying, in-VM dynamic detonation, and debugger automation over MCP. The Linux side (RevAI) stays headless and static-first; the contract between them is **files, not shared process** — a versioned artifact pack in `logs/<sha>/dynamic/` that RevAI reads for corroboration.
+**WinRE** is the Windows-side of malware analysis, static and dynamic, with a dynamic remote driver for the RevAI Linux pipeline. Work that must run on Windows stays on Windows: SQL-first Ghidra/IDA querying, in-VM dynamic detonation, and debugger automation over MCP. The Linux side (RevAI) stays headless and static-first; the contract between them is **files, not shared process** — a versioned artifact pack in `logs/<sha>/dynamic/` that RevAI reads for corroboration.
 
 - **Deterministic-first detonation** — a single PowerShell job stages FakeNet-NG (network sink), Procmon (file/reg/process events), Frida (API trace with string/sockaddr decode), and optional pe-sieve + hollows_hunter (injection/hollowing dumps). The LLM can only interpret what these tools emitted — it never runs the sample.
-- **SQL-first Windows RE** — IDA Pro (`idasql`), Ghidra (`analyzeHeadless` + post-script), and Binary Ninja answer the same SQL the Linux agent uses, so the deep-dive agent can query structured evidence on either host.
-- **Debugger MCP** — a vendored 71-tool x64dbg MCP server (Zig, MIT) and a 12-tool WinDbg bridge speak JSON-RPC over HTTP, so an LLM agent (via Remnux `deep_dive_agentic` or locally) can load a binary, find the OEP, dump modules, and step through unpackers.
+- **SQL-first Windows RE** — Ghidra (`analyzeHeadless` + SQL post-script) is the primary engine and always present; IDA Pro (`idasql`) and Binary Ninja are optional upgrades that plug into the same SQL surface when installed.
+- **Debugger MCP** — a vendored 71-tool x64dbg MCP server (Zig, MIT) and a 12-tool WinDbg bridge speak JSON-RPC over HTTP, so an LLM agent can load a binary, find the OEP, dump modules, and step through unpackers.
 - **Honest artifact contract** — every run emits `META.json` (schema-versioned), Frida/Procmon/network/memory artifacts, and `ANALYST-NEXT.md` marking which next steps are **analyst-only**. Dynamic evidence corroborates but **never clears** high-signal static YARA (`static_yara_wins`).
 
 > **Reality check.** WinRE is an analyst assistant, not a finished autonomous product. Detonation results vary by sample; a green `META.json` means the tooling ran and produced artifacts — **not** that the sample is benign or fully understood. Unpacking, deep debugging, and full PCAP review are human work. Treat every pack as a starting point for analyst review, never as ground truth.
