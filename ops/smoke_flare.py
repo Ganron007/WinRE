@@ -118,13 +118,20 @@ def run_smoke() -> list[dict]:
         except Exception as e:
             results.append(_check(name, False, str(e)[:120]))
 
-    # 5. x64dbg MCP direct
+    # 5. x64dbg MCP direct — on-demand by design (manager launches it when
+    #    debug tools are needed), so down after a fresh boot is NORMAL:
+    #    advisory, never fails the battery
     try:
         from winre.mcp import X64DbgClient
-        results.append(_check("MCP x64dbg :9094",
-                              X64DbgClient(base=f"http://{cfg['host']}:9094").is_up()))
+        up = X64DbgClient(base=f"http://{cfg['host']}:9094").is_up()
+        # ok=None (down) renders WARN for advisory checks — on-demand by design
+        results.append(_check("MCP x64dbg :9094 (on-demand)",
+                              True if up else None,
+                              "up" if up else "down = normal until a debug "
+                              "run needs it", critical=False))
     except Exception as e:
-        results.append(_check("MCP x64dbg :9094", False, str(e)[:120]))
+        results.append(_check("MCP x64dbg :9094 (on-demand)", None,
+                              str(e)[:120], critical=False))
 
     # 6. malcat via SSH-exec bridge
     try:

@@ -192,7 +192,21 @@ if (Test-Path $marker) { Ok "clean-snapshot marker present" }
 else { Act "create marker $marker"; if (-not $CheckMode) { New-Item -ItemType File -Path $marker -Force | Out-Null } }
 if (-not $CheckMode) { Manual "TAKE/UPDATE the VM snapshot NOW so the marker is baked in (restores re-create it)." }
 
-# --- 6. verify -----------------------------------------------------------------
+# --- 6. VM desktop status shortcut ---------------------------------------------
+Write-Host ""
+Write-Host "--- VM desktop status shortcut ---"
+$desktop = [Environment]::GetFolderPath("Desktop")
+$statusBat = Join-Path $desktop "WinRE-Status.bat"
+$batBody = "@echo off`r`n" +
+           "title WinRE Status`r`n" +
+           "powershell -NoProfile -ExecutionPolicy Bypass -File `"C:\WinRE\install\verify-flarevm.ps1`"`r`n" +
+           "echo.`r`n" +
+           "pause`r`n"
+if ((Test-Path $statusBat) -and ((Get-Item $statusBat).Length -gt 100)) { Ok "desktop WinRE-Status.bat present" }
+else { Act "create $statusBat"; if (-not $CheckMode) { [System.IO.File]::WriteAllText($statusBat, $batBody, (New-Object System.Text.UTF8Encoding($true))) } }
+Info "double-click it anytime for the full VM-side PASS/FAIL battery"
+
+# --- 7. verify -----------------------------------------------------------------
 Write-Host ""
 if ($CheckMode) {
     Write-Host "=== Check mode complete: $script:ACT action(s) would be taken, $script:ERR blocker(s) ===" -ForegroundColor Cyan
