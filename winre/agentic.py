@@ -164,11 +164,6 @@ class ToolRegistry:
                 out["row_count"] = len(rows[:max_rows])
         return out
 
-    def ida_query(self, sql: str) -> dict:
-        """SQL against the IDA database on the VM (funcs/imports/strings)."""
-        return self._run_remote_py("_remote_sql_helper", "ida",
-                                   self.remote_sample, sql, timeout=120)
-
     def malcat_analyze(self, path: str | None = None) -> dict:
         """Malcat analysis (:9009, localhost-bound on VM — SSH-exec bridge)."""
         try:
@@ -307,19 +302,48 @@ class ToolRegistry:
         """Ghidra decompile one function (headless post-script; address,
         FUN_ name, or 'entry')."""
         import base64
-        b64 = base64.b64encode((function_addr or "entry").encode()).decode()
+        b64a = base64.b64encode((function_addr or "entry").encode()).decode()
+        b64s = base64.b64encode(self.remote_sample.encode()).decode()
+        code = (
+            "import sys, json, base64\n"
+            "sys.path.insert(0, r'C:\\WinRE\\tools')\n"
+            "import flare_static_tools as fst\n"
+            "sample = base64.b64decode(base64s).decode()\n"
+            "fa = base64.b64decode(base64a).decode()\n"
+            "print(json.dumps({'ghidra_decompile': fst.ghidra_decompile(sample, fa)}))\n"
+        )
+        b64c = base64.b64encode(code.encode()).decode()
         py = r"C:\Python313\python.exe"
-        cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} -c '
-               f'"import sys,json,base64; '
-               f'sys.path.insert(0, r\'C:\\WinRE\\tools\'); '
-               f'import flare_static_tools as fst; '
-               f'fa = base64.b64decode(\'{b64}\').decode(); '
-               f'print(json.dumps({{\'ghidra_decompile\': fst.ghidra_decompile(r\'{self.remote_sample}\', fa)}}))" 2>&1"')
+        cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} '
+               f'-c "import base64; exec(base64.b64decode(\'{b64c}\').decode())" 2>&1"')
         r = remote_driver.ssh_run(self.cfg, cmd, timeout=2400)
+        if r.returncode != 0:
+            return {"error": (r.stderr or r.stdout)[-250:]}
         try:
-            return json.loads(r.stdout).get("ghidra_decompile") or {}
-        except Exception:
-            return {"error": (r.stderr or r.stdout)[-200:]}
+            out = json.loads(r.stdout)
+            return out.get("ghidra_decompile") or out
+        except json.JSONDecodeError:
+            return {"error": f"non-JSON: {(r.stdout or '')[-200:]}"}
+
+    def ida_query(self, sql: str) -> dict:
+        """SQL against the IDA database on the VM (funcs/imports/strings).
+        Skips honestly when no .i64 exists yet (idat analysis is a deep-stage
+        pre-step; running it here burns the agent's budget)."""
+        import subprocess as _sp
+        chk = _sp.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"Test-Path 'C:\\samples\\{Path(self.remote_sample).name}.i64'"],
+            capture_output=True, text=True, timeout=30)
+        # NOTE: registry runs on the control plane; existence is VM-side.
+        # Cheap SSH check instead:
+        r = remote_driver.ssh_run(self.cfg, f'powershell -NoProfile -Command "Test-Path '
+                                  f"'C:\\samples\\{Path(self.remote_sample).name}.i64'\"",
+                                  timeout=30)
+        if "True" not in (r.stdout or ""):
+            return {"skipped": "no .i64 on VM yet (deep dive pre-step creates it)",
+                    "hint": "use ghidra_query / ghidra_decompile instead"}
+        return self._run_remote_py("_remote_sql_helper", "ida",
+                                   self.remote_sample, sql, timeout=600)
 
     def _malcat(self, tool: str, args: dict) -> dict:
         """Malcat MCP via SSH-exec bridge (port is localhost-bound on VM)."""
