@@ -42,31 +42,40 @@ binds all interfaces.
 
 Start from a **Windows 10/11 VM on an isolated/host-only network**.
 
-### Automated by setup (free tooling)
+### Install order matters (the VM is air-gapped in operation)
 
-- Python 3.13 installed **for all users** at `C:\Python313`
-- `pip` packages: `frida`, `flask`
-- MCP autostart launcher + scheduled task (installed by the script)
-- Clean-snapshot marker (you take the snapshot afterwards)
+1. **While the VM still has internet (NAT):** run the **FlareVM base
+   installer** (`install.ps1`) — it brings most required free tools
+   (x64dbg, FakeNet-NG, Sysinternals, pe-sieve/hollows_hunter, Python).
+   Install Ghidra now too, and let pip pull the Python deps.
+2. **Air-gap**: switch the VM to host-only networking.
+3. **Run `install/setup-flarevm.ps1`** on the VM: it *ensures* the complete
+   required set exists (verifies every tool, builds the x64dbg MCP plugin
+   from the vendored Zig source, wires autostart + gate marker) and fails
+   with precise instructions for anything missing.
+4. Anything missing while offline: stage it from the host with
+   `ops/provision_tools.ps1` (downloads Ghidra/x64dbg/zig/pe-sieve on the
+   internet-connected host, scps to `C:\Tools-staged\` on the VM).
 
-### Commercial — install manually (setup detects and instructs)
+### Required — free tools (setup FAILS without these)
 
-| Tool | Default location | Notes |
+| Tool | Default location | Source |
 |---|---|---|
-| **FlareVM** base | — | run the official FlareVM `install.ps1` on a fresh VM first |
-| **Ghidra** 12.x | `C:\Tools\ghidra_<version>` | plus the CADRE PE loader extension in `Ghidra\Extensions\` |
-| **Malcat** | `C:\Tools\malcat\bin` (or Program Files) | commercial; headless MCP needs `bin\malcat.mcp.py` + a **license file** |
-| **IDA Professional** 9.x | `C:\Program Files\IDA Professional 9.3` | optional (deep degrades to Ghidra+Malcat); needs `idasql.exe` alongside |
-| **x64dbg** | `C:\Tools\x64dbg` | MCP plugin built from `integrations/x64dbg-mcp-server` (Zig 0.14.x) |
+| **FlareVM base** | — | mandiant/flare-vm `install.ps1` (step 1 above) |
+| **Ghidra** 11.x/12.x + CADRE loader | `C:\Tools\ghidra_<version>` | NSA releases (primary static engine) |
+| **x64dbg** + MCP plugin | `C:\Tools\x64dbg` | x64dbg releases; plugin built by setup from `integrations/x64dbg-mcp-server` |
+| **FakeNet-NG** 3.5 | `C:\Tools\fakenet\fakenet3.5\fakenet.exe` | FlareVM base / mandiant releases |
+| **Procmon** (Sysinternals) | `C:\Tools\sysinternals\Procmon64.exe` | FlareVM base |
+| **pe-sieve** | `C:\ProgramData\chocolatey\bin\pe-sieve.exe` | FlareVM base / hasherezade releases |
+| **hollows_hunter** | `C:\Tools\hollows_hunter\hollows_hunter.exe` | FlareVM base / hasherezade releases |
+| **Python** 3.13 + `frida`, `flask` | `C:\Python313` | FlareVM base; deps also auto-installed by setup |
 
-### Dynamic-analysis tooling
+### Optional — commercial (setup detects; pipeline skips gracefully)
 
-| Tool | Default location |
-|---|---|
-| FakeNet-NG 3.5 | `C:\Tools\fakenet\fakenet3.5\fakenet.exe` |
-| Procmon (Sysinternals) | `C:\Tools\sysinternals\Procmon64.exe` |
-| pe-sieve | `C:\ProgramData\chocolatey\bin\pe-sieve.exe` (`choco install pe-sieve`) |
-| hollows_hunter | `C:\Tools\hollows_hunter\hollows_hunter.exe` |
+| Tool | Default location | Degradation when absent |
+|---|---|---|
+| **Malcat** (+ license) | `C:\Tools\malcat\bin` | quick-triage strings/anomalies and Malcat agent tools are skipped (honest `skipped` annotations); Ghidra + x64dbg carry the analysis |
+| **IDA Professional** 9.x + `idasql` | `C:\Program Files\IDA Professional 9.3` | `ida_query` agent tool disabled; Ghidra SQL is the canonical source |
 
 ## Safety requirements
 

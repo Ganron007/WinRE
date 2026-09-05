@@ -83,36 +83,57 @@ def _intake(sample: Path, pack: EvidencePack) -> dict:
     return meta
 
 
+def _malcat_installed() -> bool:
+    """Commercial-tool awareness: Malcat absent (user opted out) is NOT a
+    malfunction. Distinguish 'not installed' from 'installed but down' so
+    the free-tools path (Ghidra-primary) stays audit-green."""
+    try:
+        import sys as _sys
+        root = Path(__file__).resolve().parents[1]
+        if str(root) not in _sys.path:
+            _sys.path.insert(0, str(root))
+        from tools.malcat_win import MALCAT_BIN_DIR  # type: ignore
+        return MALCAT_BIN_DIR is not None
+    except Exception:
+        return False
+
+
 def _quick(sample: Path, pack: EvidencePack) -> dict:
     """Deterministic triage: Malcat MCP (if up) + IDA/Ghidra SQL counts."""
     t0 = time.time()
     evidence: dict = {}
     failures: list[str] = []
 
-    # Malcat MCP (best-effort; fail-open)
+    # Malcat MCP (best-effort; commercial-optional)
+    #   not installed  -> skipped, NO failure (free-tools path, Ghidra-primary)
+    #   installed down -> failure (real malfunction)
     try:
-        from winre.mcp import MalcatClient
-        mc = MalcatClient()
-        if mc.is_up():
-            r = mc.analyse_file(str(sample))
-            if r.get("ok"):
-                # MCP envelope: {"content":[{"type":"text","text":"<json>"}]}
-                txt = ""
-                res = r.get("result") or {}
-                content = res.get("content") or []
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "text":
-                        txt = part.get("text", "")
-                        break
-                try:
-                    evidence["malcat"] = json.loads(txt)
-                except json.JSONDecodeError:
-                    evidence["malcat"] = {"raw": txt[:2000]}
-            else:
-                failures.append(f"malcat:{r.get('error','')}")
+        if not _malcat_installed():
+            evidence["malcat"] = {"skipped": "not installed (optional) — "
+                                             "Ghidra-primary static path"}
         else:
-            evidence["malcat"] = {"skipped": "server not running on :9009"}
-            failures.append("malcat:server-down")
+            from winre.mcp import MalcatClient
+            mc = MalcatClient()
+            if mc.is_up():
+                r = mc.analyse_file(str(sample))
+                if r.get("ok"):
+                    # MCP envelope: {"content":[{"type":"text","text":"<json>"}]}
+                    txt = ""
+                    res = r.get("result") or {}
+                    content = res.get("content") or []
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            txt = part.get("text", "")
+                            break
+                    try:
+                        evidence["malcat"] = json.loads(txt)
+                    except json.JSONDecodeError:
+                        evidence["malcat"] = {"raw": txt[:2000]}
+                else:
+                    failures.append(f"malcat:{r.get('error','')}")
+            else:
+                evidence["malcat"] = {"skipped": "server not running on :9009"}
+                failures.append("malcat:server-down")
     except Exception as e:
         evidence["malcat"] = {"skipped": str(e)}
         failures.append(f"malcat:{str(e)[:80]}")

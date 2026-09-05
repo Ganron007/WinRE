@@ -103,7 +103,9 @@ if ($malcatBin) {
     elseif ($licOut) { Warn "Malcat flavor: $($licOut.Trim()) (unlicensed/limited - headless analysis degraded)" }
     else { Warn "could not query Malcat license flavor via $malcatPy" }
 } else {
-    Fail "Malcat install not found (malcat.mcp.py anywhere under C:\Tools / Program Files)"
+    # Malcat is COMMERCIAL-OPTIONAL: pipeline degrades to Ghidra-primary
+    # with honest 'skipped' annotations. Not a readiness failure.
+    Warn "Malcat not installed (OPTIONAL commercial) - pipeline runs Ghidra-primary with malcat steps skipped"
 }
 
 Write-Host ""

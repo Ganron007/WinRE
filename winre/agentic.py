@@ -338,8 +338,12 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
                             max_steps: int = 10,
                             log_dir: Path | None = None,
                             dry: bool = False,
-                            dynamic: bool = False) -> dict:
+                            dynamic: bool = False,
+                            available_tools: "list[str] | None" = None) -> dict:
     """Run the LangGraph ReAct agent over the static toolset.
+
+    available_tools: optional subset filter (commercial-optional tools are
+    stripped by the caller when absent on the VM, e.g. Malcat).
 
     Set dynamic=True to also expose the bounded x64dbg debug-loop tools
     (oep/wpm_dump/crypt_dump/unpack). They run inside the VM snapshot and
@@ -393,7 +397,10 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
                                             description=_runner.__doc__,
                                             args_schema=model)
 
-    tools = [_make(n) for n in TOOL_NAMES]
+    names = list(TOOL_NAMES)
+    if available_tools is not None:
+        names = [n for n in names if n in set(available_tools)]
+    tools = [_make(n) for n in names]
     dyn_note = ""
     if dynamic:
         tools += [_make(n) for n in DYNAMIC_TOOL_NAMES]

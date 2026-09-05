@@ -7,11 +7,27 @@
 > [!IMPORTANT]
 > **⚠️ WORK IN PROGRESS — PUBLIC BETA (pre-v1.0).** This repository is
 > published early as a project in progress. The pipeline is actively being
-> hardened and evaluated against real malware samples; expect breaking
-> changes, rough edges, and incomplete documentation until the v1.0 tag.
-> The malware-analysis **campaign** (RevAI-comparison, real-sample reports)
-> is the next milestone. Use it, break it, tell us — but pin a commit if you
-> depend on anything.
+> hardened and tested; expect breaking changes, rough edges, and incomplete
+> documentation until the v1.0 tag. Use it, break it, tell us — but pin a
+> commit if you depend on anything.
+
+> [!IMPORTANT]
+> **FlareVM is required for dynamic analysis.** The detonation pipeline
+> (FakeNet-NG, Procmon, Frida, pe-sieve) runs inside a **Windows 10/11 VM
+> with [FlareVM](https://github.com/mandiant/flare-vm) installed**, on an
+> isolated/host-only network. The operator must provide and contain that VM —
+> see [`docs/PREREQUISITES.md`](docs/PREREQUISITES.md).
+
+> [!NOTE]
+> **All FREE tools are required — including x64dbg.** Ghidra (primary static
+> engine), x64dbg (+ the bundled MCP plugin), FakeNet-NG, Procmon, pe-sieve,
+> hollows_hunter and Frida are mandatory; setup verifies them and refuses to
+> declare the VM ready without them. **Only commercial tools are optional:**
+> IDA Pro (via `idasql`) and Malcat are drop-in upgrades when present —
+> setup detects them and the pipeline skips those routines gracefully if
+> absent (honest `skipped` annotations, no failures). Ghidra + FlareVM free
+> tooling alone gives the complete intake → quick → deep → YARA → report →
+> audit flow, plus detonation.
 
 <p align="center">
   <a href="https://github.com/Ganron007/WinRE"><img src="https://img.shields.io/badge/Status-LLM--assisted-blue.svg" alt="Status"></a>

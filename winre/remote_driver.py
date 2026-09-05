@@ -417,6 +417,20 @@ def malcat_remote_is_up(timeout: int = 20) -> bool:
     return len(tools) > 0
 
 
+def malcat_installed(cfg: dict | None = None, timeout: int = 30) -> bool:
+    """Is Malcat (commercial-optional) present on the VM at all?
+    Checks the known bin locations for malcat.mcp.py. 'Not installed' is
+    NOT a malfunction - the pipeline degrades to Ghidra-primary."""
+    cfg = cfg or flare_cfg()
+    script = (
+        "@('C:\\Tools\\malcat\\bin', 'C:\\Program Files\\Malcat\\bin', "
+        "'C:\\Users\\FLARE-VM\\Downloads\\malcat\\bin') | "
+        "Where-Object { Test-Path (Join-Path $_ 'malcat.mcp.py') } | "
+        "Select-Object -First 1")
+    r = ssh_ps(cfg, script, timeout=timeout)
+    return bool((r.stdout or "").strip())
+
+
 def remote_mcp_health(cfg: dict) -> dict:
     """Probe the VM's MCP servers.
 
@@ -459,6 +473,11 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
     from . import llm_client
     t0 = time.time()
     mcp = remote_mcp_health(cfg)
+    # commercial-optional: strip Malcat agent tools when Malcat is not
+    # installed on the VM (honest degradation, no failures for absence)
+    malcat_present = malcat_installed(cfg)
+    if not malcat_present:
+        mcp["malcat"] = "not-installed"
     engine = "langgraph+dbg" if dynamic else "langgraph"
     out: dict = {"mcp": mcp, "remote": True, "engine": engine}
     fallback = False
@@ -477,10 +496,14 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
     # LangGraph agent (static toolset) — llm_judge if LLM up
     agent_result = None
     try:
-        from winre.agentic import run_langgraph_deep_dive
+        from winre.agentic import (run_langgraph_deep_dive, TOOL_NAMES)
+        names = list(TOOL_NAMES)
+        if not malcat_present:
+            names = [n for n in names if not n.startswith("malcat_")]
         agent_result = run_langgraph_deep_dive(sample_name, sha or sample_name,
                                                max_steps=10, dry=dry_llm,
-                                               dynamic=dynamic)
+                                               dynamic=dynamic,
+                                               available_tools=names)
         history = []
         for h in (agent_result.get("history") or [])[:60]:
             entry = {"step": h.get("step"), "tool": h.get("tool"),

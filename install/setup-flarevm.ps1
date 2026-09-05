@@ -146,13 +146,13 @@ if (Test-Path $x64) {
             }
         } else { Manual "MCP plugin missing and zig not on PATH - build per docs\X64DBG-MCP.md (zig 0.14.x)." }
     }
-} else { Manual "Install x64dbg to C:\Tools\x64dbg (docs\PREREQUISITES.md)." }
+} else { Manual "REQUIRED (free): install x64dbg to C:\Tools\x64dbg - run the FlareVM base installer (brings it) or download the release; then re-run setup. docs\PREREQUISITES.md." }
 
-foreach ($t in @(@("C:\Tools\fakenet\fakenet3.5\fakenet.exe", "FakeNet-NG"),
-                 @("C:\Tools\sysinternals\Procmon64.exe", "Procmon"),
-                 @("C:\ProgramData\chocolatey\bin\pe-sieve.exe", "pe-sieve"),
-                 @("C:\Tools\hollows_hunter\hollows_hunter.exe", "hollows_hunter"))) {
-    if (Test-Path $t[0]) { Ok "$($t[1]) present" } else { Manual "Install $($t[1]) at $($t[0]) (docs\PREREQUISITES.md)." }
+foreach ($t in @(@("C:\Tools\fakenet\fakenet3.5\fakenet.exe", "FakeNet-NG (REQUIRED free)"),
+                 @("C:\Tools\sysinternals\Procmon64.exe", "Procmon (REQUIRED free)"),
+                 @("C:\ProgramData\chocolatey\bin\pe-sieve.exe", "pe-sieve (REQUIRED free)"),
+                 @("C:\Tools\hollows_hunter\hollows_hunter.exe", "hollows_hunter (REQUIRED free)"))) {
+    if (Test-Path $t[0]) { Ok "$($t[1]) present" } else { Manual "REQUIRED: install $($t[1]) at $($t[0]) - FlareVM base covers most; else ops\provision_tools.ps1 stages it from the host. docs\PREREQUISITES.md." }
 }
 
 # --- 4. repo-owned: autostart + task ------------------------------------------
