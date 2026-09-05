@@ -470,6 +470,14 @@ def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = 
         json.dumps(audit_res, indent=2) + "\n", encoding="utf-8")
     results["audit"] = audit_res
 
+    # RevAI-contract reporting chain (tools-raw, stage_trace, iocs,
+    # REPORT-TECHNICAL-v3.md, AUDIT-REPORT, EVIDENCE-BUNDLE)
+    try:
+        from .reporting import generate_all
+        results["reporting"] = generate_all(pack.root)
+    except Exception as e:
+        results["reporting"] = {"error": str(e)[:200]}
+
     # summary line
     phase = "static"
     if dynamic:
