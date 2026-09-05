@@ -195,9 +195,16 @@ def run_query_headless(sql: str, sample: Path, timeout: int = 180,
     cmd += [
         "-scriptPath", str(SCRIPTS_DIR),
         "-postScript", "GhidraSql.java", "GHIDRA_SQL_QUERY",
-        "-noanalysis",
         "-deleteProject",
     ]
+    # Analysis: packed samples (RevAI-parity requirement) need Ghidra's
+    # auto-analysis or getFunctionManager() yields ~0 functions. Default ON;
+    # WINRE_GHIDRA_ANALYZE=0 opts out for quick-only re-runs on big binaries.
+    if os.environ.get("WINRE_GHIDRA_ANALYZE", "1").strip().lower() not in ("0", "false", "no"):
+        # -noanalysis omitted -> analyzeHeadless performs auto-analysis
+        pass
+    else:
+        cmd.append("-noanalysis")
     env = os.environ.copy()
     env["GHIDRA_SQL_QUERY"] = sql
     # Heap sizing: default 2G is slow on 16GB hosts; let operators override

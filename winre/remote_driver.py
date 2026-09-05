@@ -115,7 +115,10 @@ REMOTE_QUICK_HELPER = r'''
 """Remote quick-triage helper — runs on FlareVM, prints JSON to stdout.
 
 Usage: python _remote_quick_helper.py <sample_path> --json
-Output: {"evidence": {ghidra: {...}, ida: {...}}}
+Output: {"evidence": {ghidra: {...}, ida: {...}, malcat: {...}}}
+
+Malcat triage runs HERE on the VM (localhost :9009) — the commercial tool
+is optional: absent/down => honest `skipped` annotation, never a failure.
 """
 import json
 import os
@@ -124,12 +127,13 @@ import sys
 from pathlib import Path
 
 sample = Path(sys.argv[1])
-out = {"ghidra": {}, "ida": {}}
+out = {"ghidra": {}, "ida": {}, "malcat": {}}
 py = sys.executable
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 def run(script, *args):
     p = subprocess.run([py, str(script), *args], capture_output=True, text=True,
-                       timeout=900, encoding="utf-8", errors="replace")
+                       timeout=1800, encoding="utf-8", errors="replace")
     try:
         return json.loads(p.stdout)
     except json.JSONDecodeError:
@@ -141,6 +145,42 @@ if g.get("ok"):
     out["ghidra"] = {"func_rows": len(g.get("rows") or [])}
 else:
     out["ghidra"] = {"error": g.get("error")}
+
+g_imp = run(tools / "flare_ghidra_sql.py", "query", "@imports", "--file", str(sample), "--json")
+if g_imp.get("ok"):
+    rows = g_imp.get("rows") or []
+    out["ghidra"]["imports"] = [r[0] for r in rows if r][:20]
+
+# Malcat triage (optional commercial): analyse_file for metadata/anomalies/yara.
+# The MCP server binds localhost on THIS VM, so the default base is correct.
+try:
+    sys.path.insert(0, str(tools))
+    from malcat_win import MALCAT_BIN_DIR  # type: ignore
+    installed = MALCAT_BIN_DIR is not None
+except Exception:
+    installed = False
+if not installed:
+    out["malcat"] = {"skipped": "not installed (optional) — Ghidra-primary static path"}
+else:
+    from winre.mcp import MalcatClient  # noqa: E402 (repo root on sys.path via cwd)
+    mc = MalcatClient()
+    if mc.is_up():
+        r = mc.analyse_file(str(sample))
+        if r.get("ok"):
+            txt = ""
+            res = r.get("result") or {}
+            for part in (res.get("content") or []):
+                if isinstance(part, dict) and part.get("type") == "text":
+                    txt = part.get("text", "")
+                    break
+            try:
+                out["malcat"] = json.loads(txt)
+            except json.JSONDecodeError:
+                out["malcat"] = {"raw": txt[:2000]}
+        else:
+            out["malcat"] = {"error": (r.get("error") or "")[:120]}
+    else:
+        out["malcat"] = {"skipped": "server not running on :9009"}
 
 i64 = sample.with_suffix(sample.suffix + ".i64")
 if i64.is_file():
@@ -182,7 +222,7 @@ def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict) -> dict:
     cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} '
            f'{cfg["remote_pipeline"]}\\winre\\_remote_quick_helper.py '
            f'"{remote_sample}" --json 2>&1"')
-    r = ssh_run(cfg, cmd, timeout=900)
+    r = ssh_run(cfg, cmd, timeout=2100)
     evidence: dict = {}
     parsed = False
     if r.returncode == 0:
@@ -194,14 +234,17 @@ def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict) -> dict:
             pass
     if not evidence:
         evidence = {"ghidra": {"error": (r.stderr or r.stdout)[-200:]}}
-    # honesty: a quick stage where the helper failed or every source errored
-    # is a fallback, not a success
+    # honesty: ERRORS are tool failures; SKIPS are honest capability gaps
+    # (commercial tool absent / no .i64 yet) and must NOT penalize quality
     failed_sources = [k for k, v in evidence.items()
-                      if isinstance(v, dict) and (v.get("error") or v.get("skipped"))]
-    tool_failures = [f"{k}:{(v.get('error') or v.get('skipped'))[:80]}"
+                      if isinstance(v, dict) and v.get("error")]
+    tool_failures = [f"{k}:{v.get('error')[:80]}"
                      for k, v in evidence.items()
-                     if isinstance(v, dict) and (v.get("error") or v.get("skipped"))]
-    ok = parsed and len(failed_sources) < len(evidence)
+                     if isinstance(v, dict) and v.get("error")]
+    active_sources = [k for k, v in evidence.items()
+                      if isinstance(v, dict)
+                      and not v.get("error") and not v.get("skipped")]
+    ok = parsed and (len(failed_sources) < len(evidence)) and bool(active_sources)
 
     verdict = "unknown"
     pack.write("quick", "quick.json", {"evidence": evidence, "verdict": verdict,
@@ -210,6 +253,7 @@ def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict) -> dict:
         "quick", ok,
         error=None if ok else "quick helper failed or all sources errored",
         summary=f"ghidra={evidence.get('ghidra',{}).get('func_rows')} "
+                f"malcat={'yes' if evidence.get('malcat',{}).get('sha256') else 'skip'} "
                 f"ida={evidence.get('ida',{}).get('func_count')}",
         verdict=verdict, tool_failures=tool_failures,
         fallback=not ok, elapsed_s=round(time.time() - t0, 1)))

@@ -19,9 +19,23 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-if (-not $FlareHost) { $FlareHost = $env:FLARE_HOST }
-if (-not $User) { $User = "FLARE-VM" }
-if (-not $SshKey)  { $SshKey  = $env:FLARE_SSH_KEY }
+# Fallback: parse the repo .env (host vars live there, not in the process env)
+$Repo0 = Split-Path -Parent $PSScriptRoot
+$DotEnv = Join-Path $Repo0 ".env"
+$dotenvVars = @{}
+if (Test-Path $DotEnv) {
+    foreach ($ln in Get-Content $DotEnv) {
+        if ($ln -match '^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.+?)\s*$') {
+            $dotenvVars[$Matches[1]] = $Matches[2].Trim('"')
+        }
+    }
+}
+if (-not $FlareHost) { $FlareHost = $env:FLARE_HOST; if (-not $FlareHost) { $FlareHost = $dotenvVars["FLARE_HOST"] } }
+if (-not $User) { $User = $env:FLARE_USER; if (-not $User) { $User = $dotenvVars["FLARE_USER"] }; if (-not $User) { $User = "FLARE-VM" } }
+if (-not $SshKey) { $SshKey = $env:FLARE_SSH_KEY; if (-not $SshKey) { $SshKey = $dotenvVars["FLARE_SSH_KEY"] } }
+if (-not $FlareHost -or -not $SshKey) {
+    Die "FLARE_HOST / FLARE_SSH_KEY not set (neither env nor .env)"
+}
 if (-not $RemoteRoot) { $RemoteRoot = "C:\WinRE" }
 
 $Repo = Split-Path -Parent $PSScriptRoot
