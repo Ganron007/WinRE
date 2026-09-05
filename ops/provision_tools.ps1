@@ -69,6 +69,23 @@ $peOk = Get-File "https://github.com/hasherezade/pe-sieve/releases/latest/downlo
 $hhOk = Get-File "https://github.com/hasherezade/hollows_hunter/releases/latest/download/hollows_hunter64.exe" `
     (Join-Path $stage "hollows_hunter64.exe")
 
+# x64dbg-MCP source (users fetch upstream; we apply tools\x64dbg-mcp-winre.patch)
+$gitOk = $true
+try {
+    $mcpDir = Join-Path $stage "x64dbg-mcp-server"
+    if (-not (Test-Path $mcpDir)) {
+        git clone --depth 1 https://github.com/duty1g/x64dbg-mcp-server $mcpDir 2>$null
+    }
+    if (Test-Path "$mcpDir\src\mcp\tools.zig") {
+        # apply our patch (setHardwareBreakpoint failures must surface)
+        Select-String -Path "$mcpDir\src\mcp\tools.zig" -Pattern "WinRE" -Quiet |
+            ForEach-Object { if (-not $_) {
+                Write-Host "  [NOTE] apply tools\x64dbg-mcp-winre.patch (host tools dir) after clone"
+            } }
+        Write-Host "  [OK] x64dbg-mcp-server staged"
+    } else { Write-Host "  [WARN] x64dbg-mcp clone failed - fetch manually" -ForegroundColor Yellow }
+} catch { Write-Host "  [WARN] git not available - fetch x64dbg-mcp-server manually" -ForegroundColor Yellow }
+
 Write-Host ""
 Write-Host "--- Staging to VM (C:\Tools-staged) ---" -ForegroundColor Cyan
 if (-not $FlareHost) { Write-Host "[WARN] FLARE_HOST not set - staging locally only ($stage)" -ForegroundColor Yellow }
