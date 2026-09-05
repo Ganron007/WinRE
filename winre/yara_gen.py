@@ -53,12 +53,23 @@ def _is_url_or_host(s: str) -> bool:
 
 
 def _strings_from_evidence(quick: dict, dynamic: dict | None) -> list[str]:
-    """Collect candidate strings from quick (Malcat) + dynamic (frida/network)."""
+    """Collect candidate strings: quick (malcat + floss + strings64) +
+    dynamic (frida/network). Deterministic only."""
     seen: set[str] = set()
     out: list[str] = []
     # quick scan: malcat strings
     malcat = (quick or {}).get("malcat") or {}
     for s in (malcat.get("strings") or []):
+        if isinstance(s, str) and 8 <= len(s) <= 256 and s not in seen:
+            seen.add(s)
+            out.append(s)
+    # quick scan: floss decoded strings (deobfuscated — high signal)
+    for s in ((quick or {}).get("floss") or {}).get("decoded_strings") or []:
+        if isinstance(s, str) and 6 <= len(s) <= 256 and s not in seen:
+            seen.add(s)
+            out.append(s)
+    # quick scan: raw strings tool
+    for s in ((quick or {}).get("strings") or {}).get("strings") or []:
         if isinstance(s, str) and 8 <= len(s) <= 256 and s not in seen:
             seen.add(s)
             out.append(s)
@@ -78,13 +89,20 @@ def _strings_from_evidence(quick: dict, dynamic: dict | None) -> list[str]:
 
 
 def _imports_from_evidence(quick: dict) -> list[str]:
-    """Collect imports from quick (IDA/Ghidra SQL)."""
+    """Collect high-signal imports from quick (IDA/Ghidra SQL + pe)."""
     out: list[str] = []
     for src in ("ida", "ghidra"):
         imps = ((quick or {}).get(src) or {}).get("imports") or []
         for imp in imps:
             if isinstance(imp, str) and imp in SIGNAL_IMPORTS:
                 out.append(imp)
+    # pe (pefile) import surface: functions across all DLLs
+    for entry in ((quick or {}).get("pe") or {}).get("imports") or []:
+        if not isinstance(entry, dict):
+            continue
+        for fn in entry.get("functions") or []:
+            if isinstance(fn, str) and fn in SIGNAL_IMPORTS:
+                out.append(fn)
     return sorted(set(out))
 
 

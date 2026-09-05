@@ -131,9 +131,9 @@ out = {"ghidra": {}, "ida": {}, "malcat": {}}
 py = sys.executable
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-def run(script, *args):
+def run(script, *args, timeout=1800):
     p = subprocess.run([py, str(script), *args], capture_output=True, text=True,
-                       timeout=1800, encoding="utf-8", errors="replace")
+                       timeout=timeout, encoding="utf-8", errors="replace")
     try:
         return json.loads(p.stdout)
     except json.JSONDecodeError:
@@ -151,36 +151,61 @@ if g_imp.get("ok"):
     rows = g_imp.get("rows") or []
     out["ghidra"]["imports"] = [r[0] for r in rows if r][:20]
 
-# Malcat triage (optional commercial): analyse_file for metadata/anomalies/yara.
-# The MCP server binds localhost on THIS VM, so the default base is correct.
+# Malcat triage (optional commercial): HTTP MCP on VM-localhost :9009 with
+# dedicated view endpoints (the CLI --views path returns empty on this build).
 try:
-    sys.path.insert(0, str(tools))
-    from malcat_win import MALCAT_BIN_DIR  # type: ignore
+    from tools.malcat_win import MALCAT_BIN_DIR  # type: ignore
     installed = MALCAT_BIN_DIR is not None
 except Exception:
-    installed = False
+    try:
+        sys.path.insert(0, str(tools))
+        from malcat_win import MALCAT_BIN_DIR  # type: ignore
+        installed = MALCAT_BIN_DIR is not None
+    except Exception:
+        installed = False
 if not installed:
     out["malcat"] = {"skipped": "not installed (optional) — Ghidra-primary static path"}
 else:
-    from winre.mcp import MalcatClient  # noqa: E402 (repo root on sys.path via cwd)
-    mc = MalcatClient()
-    if mc.is_up():
-        r = mc.analyse_file(str(sample))
-        if r.get("ok"):
-            txt = ""
+    from winre.mcp import MalcatClient  # noqa: E402
+    mc = MalcatClient(default_timeout=180)
+    if not mc.is_up():
+        out["malcat"] = {"skipped": "server not running on :9009"}
+    else:
+        def _m(call):
+            r = call()
+            if not r.get("ok"):
+                return {"error": (r.get("error") or "")[:120]}
             res = r.get("result") or {}
+            txt = ""
             for part in (res.get("content") or []):
                 if isinstance(part, dict) and part.get("type") == "text":
                     txt = part.get("text", "")
                     break
             try:
-                out["malcat"] = json.loads(txt)
+                return json.loads(txt)
             except json.JSONDecodeError:
-                out["malcat"] = {"raw": txt[:2000]}
-        else:
-            out["malcat"] = {"error": (r.get("error") or "")[:120]}
-    else:
-        out["malcat"] = {"skipped": "server not running on :9009"}
+                return {"raw": txt[:1000]}
+        out["malcat"] = {
+            "file": _m(lambda: mc.analyse_file(str(sample))),
+            "anomalies": _m(lambda: mc.anomalies_list(str(sample))),
+            "yara_hits": _m(lambda: mc.yara_list(str(sample))),
+            "strings": (_m(lambda: mc.strings_top_list(str(sample), 60))
+                        .get("strings") if True else []),
+        }
+
+# RevAI-parity static evidence (all free, all tolerant of absence)
+try:
+    st = run(tools / "flare_static_tools.py", "all", str(sample), timeout=2700)
+    if isinstance(st, dict):
+        for k in ("capa", "floss", "diec", "yarascan", "strings"):
+            v = st.get(k)
+            if isinstance(v, dict):
+                out[k] = v
+        pe = st.get("lief")
+        if isinstance(pe, dict):
+            out["pe"] = pe
+except Exception as e:
+    out["static_tools_error"] = str(e)[:120]
 
 i64 = sample.with_suffix(sample.suffix + ".i64")
 if i64.is_file():
