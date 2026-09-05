@@ -1,7 +1,10 @@
 ﻿# x64dbg-MCP — Windows (FlareVM)
 
-> **Status:** VENDORED (MIT) — `integrations/x64dbg-mcp-server-main/` from `https://github.com/duty1g/x64dbg-mcp-server`.  
-> **Binary:** Zig single-file plugin `x64dbg-MCP-Server.dp64/.dp32` (`build.zig:5`).
+> **Source:** NOT vendored here — fetch upstream (MIT): `https://github.com/duty1g/x64dbg-mcp-server`
+> into `integrations/x64dbg-mcp-server-main/` (gitignored), then apply our
+> one-line fix from `tools/x64dbg-mcp-winre.patch` (surfacing hardware-BP
+> failures as errors instead of success text).
+> **Binary:** Zig single-file plugin `x64dbg-MCP-Server.dp64/.dp32` (`build.zig:5`); setup-flarevm.ps1 builds it when zig is on PATH.
 
 ## 1. What it is
 

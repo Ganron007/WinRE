@@ -42,6 +42,10 @@ zig-out/
 *.gpr
 *.rep
 
+# --- Vendored third-party trees (users fetch these upstream; our changes
+#     ship as .patch files in tools/) ---
+integrations/
+
 # --- OS / editor ---
 Thumbs.db
 Desktop.ini

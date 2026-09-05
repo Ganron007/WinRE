@@ -1,0 +1,22 @@
+From: WinRE (vendored patch for x64dbg-MCP-Server, upstream commit snapshot 2026-08)
+Subject: [PATCH] setHardwareBreakpoint: report cmdExec failure as an error
+
+Upstream returned fmtResult("Failed to set hardware breakpoint.") with
+is_error=false, so MCP callers saw ok:true while nothing was registered.
+Our OEP tracing depends on knowing the BP actually landed, so failures
+must surface as errors (fmtErr).
+
+Apply to: src/mcp/tools.zig  (fn setHardwareBreakpoint)
+
+--- a/src/mcp/tools.zig
++++ b/src/mcp/tools.zig
+@@ -1,3 +1,6 @@
+-    return fmtResult(out, "{s}", .{if (ok) "Hardware breakpoint set." else "Failed to set hardware breakpoint"});
++    // NOTE (WinRE): report cmdExec failure as an error, not success text.
++    // Previously fmtResult hid failures ("Failed to..." with is_error=false),
++    // so callers saw ok:true with nothing registered.
++    if (!ok) return fmtErr(out, "Failed to set hardware breakpoint.", .{});
++    return fmtResult(out, "{s}", .{"Hardware breakpoint set."});
+
+NOTE: the MCP plugin ships in the vendored x64dbg-MCP project (MIT), not in
+the WinRE repo - see docs/X64DBG-MCP.md for the source + build steps.
