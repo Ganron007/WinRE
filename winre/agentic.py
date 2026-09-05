@@ -177,6 +177,150 @@ class ToolRegistry:
         except Exception as e:
             return {"error": str(e)}
 
+    # --- RevAI-parity static evidence tools (free surface) -----------------
+
+    def _vm_tool(self, tool: str, timeout: int = 1200) -> dict:
+        """Run tools/flare_static_tools.py <tool> on the VM (scp-synced)."""
+        py = r"C:\Python313\python.exe"
+        cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} '
+               f'{self.cfg["remote_pipeline"]}\\tools\\flare_static_tools.py '
+               f'{tool} "{self.remote_sample}" 2>&1"')
+        r = remote_driver.ssh_run(self.cfg, cmd, timeout=timeout)
+        if r.returncode != 0:
+            return {"error": (r.stderr or r.stdout)[-250:]}
+        try:
+            out = json.loads(r.stdout)
+            return out.get(tool) or {"error": "no tool payload"}
+        except json.JSONDecodeError:
+            return {"error": f"non-JSON: {(r.stdout or '')[-200:]}"}
+
+    def capa(self) -> dict:
+        """capa capability detection (mandiant rules) — ATT&CK-mapped."""
+        return self._vm_tool("capa")
+
+    def floss(self) -> dict:
+        """floss decoded strings (stack/string deobfuscation)."""
+        return self._vm_tool("floss")
+
+    def pe_parse(self) -> dict:
+        """PE structure via pefile: imports, sections+entropy, signature."""
+        return self._vm_tool("lief")
+
+    def diec(self) -> dict:
+        """Detect It Easy: packer/compiler/protector identification."""
+        return self._vm_tool("diec")
+
+    def strings_tool(self) -> dict:
+        """ASCII/unicode strings from the sample."""
+        return self._vm_tool("strings")
+
+    def yarascan(self) -> dict:
+        """yara-x scan against the staged curated ruleset."""
+        return self._vm_tool("yarascan")
+
+    def pe_import_signals(self) -> dict:
+        """High-signal import→ATT&CK map (pefile; NOT capa)."""
+        return self._vm_tool("pe_import_signals")
+
+    def signature_match(self, func_name: str = "", imports: list | None = None,
+                        strings: list | None = None, constants: list | None = None,
+                        size: int = 0) -> dict:
+        """Match a function against crypto/stdlib/winapi signature DBs."""
+        payload = json.dumps({"func_name": func_name, "imports": imports or [],
+                              "strings": strings or [], "constants": constants or [],
+                              "size": size}, default=str)
+        import base64
+        b64 = base64.b64encode(payload.encode()).decode()
+        py = r"C:\Python313\python.exe"
+        cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} -c '
+               f'"import sys,json,base64; '
+               f'sys.path.insert(0, r\'C:\\WinRE\\tools\'); '
+               f'import flare_static_tools as fst; '
+               f'kw = json.loads(base64.b64decode(\'{b64}\').decode()); '
+               f'print(json.dumps({{\'signature_match\': fst.signature_match(**kw)}}))" 2>&1"')
+        r = remote_driver.ssh_run(self.cfg, cmd, timeout=300)
+        try:
+            return json.loads(r.stdout).get("signature_match") or {}
+        except Exception:
+            return {"error": (r.stderr or r.stdout)[-200:]}
+
+    def xor_string_search(self) -> dict:
+        """XOR/ROL/ADD/SHIFT encoded-string brute force (pure python)."""
+        return self._vm_tool("xor_string_search")
+
+    def olevba_analyze(self) -> dict:
+        """VBA macro extraction (Office docs)."""
+        return self._vm_tool("olevba")
+
+    def peepdf_analyze(self) -> dict:
+        """PDF analysis (JS/objects/embedded files)."""
+        return self._vm_tool("peepdf")
+
+    def speakeasy_emulate(self) -> dict:
+        """Windows-native PE emulation (Mandiant Speakeasy)."""
+        return self._vm_tool("speakeasy", timeout=1500)
+
+    def frida_static_probe(self) -> dict:
+        """Frida availability + PE hook candidates (no injection)."""
+        return self._vm_tool("frida_static_probe")
+
+    def r2_decompile(self, function_addrs: list | None = None) -> dict:
+        """radare2 disassembly (asm, 2nd engine)."""
+        import base64
+        if function_addrs:
+            b64 = base64.b64encode(json.dumps(function_addrs).encode()).decode()
+            py = r"C:\Python313\python.exe"
+            cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} -c '
+                   f'"import sys,json,base64; '
+                   f'sys.path.insert(0, r\'C:\\WinRE\\tools\'); '
+                   f'import flare_static_tools as fst; '
+                   f'fa = json.loads(base64.b64decode(\'{b64}\').decode()); '
+                   f'print(json.dumps({{\'r2_decompile\': fst.r2_decompile(r\'{self.remote_sample}\', fa)}}))" 2>&1"')
+            r = remote_driver.ssh_run(self.cfg, cmd, timeout=900)
+            try:
+                return json.loads(r.stdout).get("r2_decompile") or {}
+            except Exception:
+                return {"error": (r.stderr or r.stdout)[-200:]}
+        return self._vm_tool("r2_decompile")
+
+    def upx_unpack(self) -> dict:
+        """Detect + unpack UPX (writes .unpacked beside the sample)."""
+        return self._vm_tool("upx")
+
+    def shellcode_extract(self) -> dict:
+        """High-entropy exec-section extraction + scdbg emulation."""
+        return self._vm_tool("shellcode_extract")
+
+    def dotnet_analyze(self) -> dict:
+        """.NET analysis: dnfile metadata + ilspycmd IL + C# decompile."""
+        return self._vm_tool("dotnet_analyze")
+
+    def z3_solve(self) -> dict:
+        """MBA identity solving (z3 via deobfuscation extension)."""
+        return self._vm_tool("z3_solve")
+
+    def angr_analyze(self) -> dict:
+        """CFF dispatcher analysis (angr via deobfuscation extension)."""
+        return self._vm_tool("angr_analyze")
+
+    def ghidra_decompile(self, function_addr: str = "") -> dict:
+        """Ghidra decompile one function (headless post-script; address,
+        FUN_ name, or 'entry')."""
+        import base64
+        b64 = base64.b64encode((function_addr or "entry").encode()).decode()
+        py = r"C:\Python313\python.exe"
+        cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} -c '
+               f'"import sys,json,base64; '
+               f'sys.path.insert(0, r\'C:\\WinRE\\tools\'); '
+               f'import flare_static_tools as fst; '
+               f'fa = base64.b64decode(\'{b64}\').decode(); '
+               f'print(json.dumps({{\'ghidra_decompile\': fst.ghidra_decompile(r\'{self.remote_sample}\', fa)}}))" 2>&1"')
+        r = remote_driver.ssh_run(self.cfg, cmd, timeout=2400)
+        try:
+            return json.loads(r.stdout).get("ghidra_decompile") or {}
+        except Exception:
+            return {"error": (r.stderr or r.stdout)[-200:]}
+
     def _malcat(self, tool: str, args: dict) -> dict:
         """Malcat MCP via SSH-exec bridge (port is localhost-bound on VM)."""
         from winre.remote_driver import malcat_remote_call
@@ -285,7 +429,12 @@ class ToolRegistry:
 # LangGraph ReAct (static phase)
 # ---------------------------------------------------------------------------
 TOOL_NAMES = ("ghidra_query", "ida_query", "malcat_analyze",
-              "malcat_functions", "malcat_decompile")
+              "malcat_functions", "malcat_decompile",
+              "capa", "floss", "pe_parse", "diec", "strings_tool", "yarascan",
+              "pe_import_signals", "xor_string_search", "olevba_analyze",
+              "peepdf_analyze", "speakeasy_emulate", "frida_static_probe",
+              "r2_decompile", "upx_unpack", "shellcode_extract",
+              "dotnet_analyze", "z3_solve", "angr_analyze", "ghidra_decompile")
 # Opt-in dynamic tools: x64dbg debug loops over MCP. Bounded, deterministic
 # primitives — the LLM composes them, never free-forms debugger commands.
 DYNAMIC_TOOL_NAMES = ("x64dbg_oep", "x64dbg_wpm_dump",
@@ -323,6 +472,25 @@ _ARG_MODELS: dict[str, type[BaseModel]] = {
     "malcat_analyze": EmptyArgs,
     "malcat_functions": MalcatFnArgs,
     "malcat_decompile": MalcatDecompileArgs,
+    "capa": EmptyArgs,
+    "floss": EmptyArgs,
+    "pe_parse": EmptyArgs,
+    "diec": EmptyArgs,
+    "strings_tool": EmptyArgs,
+    "yarascan": EmptyArgs,
+    "pe_import_signals": EmptyArgs,
+    "xor_string_search": EmptyArgs,
+    "olevba_analyze": EmptyArgs,
+    "peepdf_analyze": EmptyArgs,
+    "speakeasy_emulate": EmptyArgs,
+    "frida_static_probe": EmptyArgs,
+    "r2_decompile": EmptyArgs,
+    "upx_unpack": EmptyArgs,
+    "shellcode_extract": EmptyArgs,
+    "dotnet_analyze": EmptyArgs,
+    "z3_solve": EmptyArgs,
+    "angr_analyze": EmptyArgs,
+    "ghidra_decompile": EmptyArgs,
     "x64dbg_oep": EmptyArgs,
     "x64dbg_wpm_dump": X64DbgHitsArgs,
     "x64dbg_crypt_dump": X64DbgHitsArgs,
@@ -445,9 +613,39 @@ IDA: tables funcs(name,address,size,prototype,arg_count,calling_conv),
   Use LIMIT 20. IDs are strings in most rows.
 Malcat (only if reachable): analyse_file / fns_top_list / fn_decompile.
 
+Static evidence tools (no args — call and read the JSON):
+capa: ATT&CK-mapped capabilities (e.g. "encode data using XOR") — cite the
+  capability name + attack technique. STRONG signal for verdicts.
+pe_import_signals: import→ATT&CK high-signal map (pefile). NOT capa.
+floss: deobfuscated/stack strings — decoded strings often reveal config,
+  URLs, mutexes the raw strings hide.
+pe_parse: imports (per-DLL function lists), sections + entropy, digital
+  signature (signed true/false) — packing = few imports + high entropy.
+diec: packer/protector/compiler identification.
+strings_tool: raw ASCII strings (may be garbage if packed).
+yarascan: curated-ruleset scan — any hit is a strong family indicator.
+xor_string_search: XOR/ROL/ADD encoded-string brute force — finds hidden
+  config/URLs when plain strings are garbage.
+speakeasy_emulate: Windows-native emulation — API calls/events WITHOUT
+  executing the sample (static-adjacent behavioral evidence).
+dotnet_analyze: .NET metadata + IL + C# decompile (for .NET samples).
+ghidra_decompile: decompile one function (addr/FUN_ name/'entry') — use
+  after finding a suspicious function via SQL.
+r2_decompile / upx_unpack / shellcode_extract / frida_static_probe:
+  second-engine disasm, UPX -d unpack, shellcode+scdbg, hook candidates.
+olevba_analyze / peepdf_analyze: Office/PDF triage (not for PE).
+signature_match: crypto/stdlib/winapi function signature DBs (pass the
+  function's imports/strings/constants from other tool output).
+z3_solve / angr_analyze: deobfuscation solvers — only for confirmed
+  obfuscation (MBA/CFF), never first-line.
+
 Your job:
-1. Run a FEW high-value queries (imports, suspicious funcs by size, strings).
-   Do not repeat identical queries — reuse earlier outputs.
+1. Ground the verdict first: pe_parse + capa + malcat_analyze
+   (+ pe_import_signals). Then 1-3 targeted calls: ghidra/ida SQL for
+   functions/strings, floss/xor_string_search if strings are garbage,
+   ghidra_decompile on the most suspicious function, speakeasy_emulate
+   for behavioral confirmation.
+   Do not repeat identical calls — reuse earlier outputs.
 2. When done, reply with a FINAL flat JSON object ONLY (no markdown, no extra
    prose) with keys: verdict (malicious/unknown/benign), confidence
    (high/medium/low), summary, key_evidence (list of strings).

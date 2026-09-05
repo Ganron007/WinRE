@@ -1,0 +1,413 @@
+{
+  "description": "C standard library function signatures for CADRE agentic recovery. Matches are based on string references, called API names, size/complexity heuristics, and known behavioral patterns. All scores are additive; a function matching strongly enough bypasses LLM inference.",
+  "version": "1.0.0",
+  "signatures": [
+    {
+      "name": "memcpy",
+      "score": 0.92,
+      "indicators": {
+        "string_refs": ["memcpy"],
+        "external_symbol_contains": ["memcpy"],
+        "min_size": 20,
+        "max_size": 500,
+        "notes": "Byte-copy loop with length counter and source/destination pointers."
+      }
+    },
+    {
+      "name": "memmove",
+      "score": 0.90,
+      "indicators": {
+        "string_refs": ["memmove"],
+        "external_symbol_contains": ["memmove"],
+        "min_size": 30,
+        "max_size": 600,
+        "notes": "Overlapping-safe byte copy; often branches on src/dst ordering."
+      }
+    },
+    {
+      "name": "memset",
+      "score": 0.93,
+      "indicators": {
+        "string_refs": ["memset"],
+        "external_symbol_contains": ["memset"],
+        "min_size": 15,
+        "max_size": 400,
+        "notes": "Fill memory with byte value over count."
+      }
+    },
+    {
+      "name": "memcmp",
+      "score": 0.90,
+      "indicators": {
+        "string_refs": ["memcmp"],
+        "external_symbol_contains": ["memcmp"],
+        "min_size": 20,
+        "max_size": 400,
+        "notes": "Byte-by-byte comparison loop returning signed difference."
+      }
+    },
+    {
+      "name": "strlen",
+      "score": 0.92,
+      "indicators": {
+        "string_refs": ["strlen"],
+        "external_symbol_contains": ["strlen"],
+        "min_size": 10,
+        "max_size": 200,
+        "notes": "Scan for null terminator."
+      }
+    },
+    {
+      "name": "strcpy",
+      "score": 0.88,
+      "indicators": {
+        "string_refs": ["strcpy"],
+        "external_symbol_contains": ["strcpy"],
+        "min_size": 10,
+        "max_size": 200,
+        "notes": "Copy string until null byte."
+      }
+    },
+    {
+      "name": "strncpy",
+      "score": 0.88,
+      "indicators": {
+        "string_refs": ["strncpy"],
+        "external_symbol_contains": ["strncpy"],
+        "min_size": 15,
+        "max_size": 300,
+        "notes": "Length-bounded string copy."
+      }
+    },
+    {
+      "name": "strcmp",
+      "score": 0.90,
+      "indicators": {
+        "string_refs": ["strcmp"],
+        "external_symbol_contains": ["strcmp"],
+        "min_size": 15,
+        "max_size": 250,
+        "notes": "String comparison loop."
+      }
+    },
+    {
+      "name": "strncmp",
+      "score": 0.90,
+      "indicators": {
+        "string_refs": ["strncmp"],
+        "external_symbol_contains": ["strncmp"],
+        "min_size": 20,
+        "max_size": 300,
+        "notes": "Length-bounded string comparison."
+      }
+    },
+    {
+      "name": "strchr",
+      "score": 0.85,
+      "indicators": {
+        "string_refs": ["strchr"],
+        "external_symbol_contains": ["strchr"],
+        "min_size": 15,
+        "max_size": 250,
+        "notes": "Find first occurrence of a byte in string."
+      }
+    },
+    {
+      "name": "strstr",
+      "score": 0.85,
+      "indicators": {
+        "string_refs": ["strstr"],
+        "external_symbol_contains": ["strstr"],
+        "min_size": 30,
+        "max_size": 500,
+        "notes": "Find substring in string."
+      }
+    },
+    {
+      "name": "sprintf",
+      "score": 0.88,
+      "indicators": {
+        "string_refs": ["sprintf"],
+        "external_symbol_contains": ["sprintf"],
+        "min_size": 50,
+        "max_size": 800,
+        "notes": "Format string builder."
+      }
+    },
+    {
+      "name": "snprintf",
+      "score": 0.88,
+      "indicators": {
+        "string_refs": ["snprintf"],
+        "external_symbol_contains": ["snprintf"],
+        "min_size": 60,
+        "max_size": 900,
+        "notes": "Bounded format string builder."
+      }
+    },
+    {
+      "name": "malloc",
+      "score": 0.85,
+      "indicators": {
+        "string_refs": ["malloc"],
+        "external_symbol_contains": ["malloc", "HeapAlloc"],
+        "min_size": 15,
+        "max_size": 300,
+        "notes": "Heap allocation wrapper."
+      }
+    },
+    {
+      "name": "free",
+      "score": 0.85,
+      "indicators": {
+        "string_refs": ["free"],
+        "external_symbol_contains": ["free", "HeapFree"],
+        "min_size": 10,
+        "max_size": 200,
+        "notes": "Heap free wrapper."
+      }
+    },
+    {
+      "name": "realloc",
+      "score": 0.85,
+      "indicators": {
+        "string_refs": ["realloc"],
+        "external_symbol_contains": ["realloc", "HeapReAlloc"],
+        "min_size": 30,
+        "max_size": 500,
+        "notes": "Resize heap allocation."
+      }
+    },
+    {
+      "name": "calloc",
+      "score": 0.85,
+      "indicators": {
+        "string_refs": ["calloc"],
+        "external_symbol_contains": ["calloc"],
+        "min_size": 20,
+        "max_size": 300,
+        "notes": "Zero-initialized allocation."
+      }
+    },
+    {
+      "name": "atoi",
+      "score": 0.82,
+      "indicators": {
+        "string_refs": ["atoi"],
+        "external_symbol_contains": ["atoi"],
+        "min_size": 15,
+        "max_size": 250,
+        "notes": "Convert ASCII decimal string to integer."
+      }
+    },
+    {
+      "name": "strtol",
+      "score": 0.82,
+      "indicators": {
+        "string_refs": ["strtol"],
+        "external_symbol_contains": ["strtol"],
+        "min_size": 50,
+        "max_size": 500,
+        "notes": "Convert string to long with base."
+      }
+    },
+    {
+      "name": "strtoul",
+      "score": 0.82,
+      "indicators": {
+        "string_refs": ["strtoul"],
+        "external_symbol_contains": ["strtoul"],
+        "min_size": 50,
+        "max_size": 500,
+        "notes": "Convert string to unsigned long with base."
+      }
+    },
+    {
+      "name": "qsort",
+      "score": 0.80,
+      "indicators": {
+        "string_refs": ["qsort"],
+        "external_symbol_contains": ["qsort"],
+        "min_size": 100,
+        "max_size": 1000,
+        "notes": "Quick-sort implementation."
+      }
+    },
+    {
+      "name": "bsearch",
+      "score": 0.80,
+      "indicators": {
+        "string_refs": ["bsearch"],
+        "external_symbol_contains": ["bsearch"],
+        "min_size": 80,
+        "max_size": 800,
+        "notes": "Binary search in sorted array."
+      }
+    },
+    {
+      "name": "localtime",
+      "score": 0.82,
+      "indicators": {
+        "string_refs": ["localtime"],
+        "external_symbol_contains": ["localtime"],
+        "min_size": 30,
+        "max_size": 500,
+        "notes": "Convert time_t to local tm struct."
+      }
+    },
+    {
+      "name": "gmtime",
+      "score": 0.82,
+      "indicators": {
+        "string_refs": ["gmtime"],
+        "external_symbol_contains": ["gmtime"],
+        "min_size": 30,
+        "max_size": 500,
+        "notes": "Convert time_t to UTC tm struct."
+      }
+    },
+    {
+      "name": "strftime",
+      "score": 0.82,
+      "indicators": {
+        "string_refs": ["strftime"],
+        "external_symbol_contains": ["strftime"],
+        "min_size": 60,
+        "max_size": 700,
+        "notes": "Format calendar time to string."
+      }
+    },
+    {
+      "name": "time",
+      "score": 0.80,
+      "indicators": {
+        "string_refs": ["time"],
+        "external_symbol_contains": ["time"],
+        "min_size": 10,
+        "max_size": 200,
+        "notes": "Return calendar time."
+      }
+    },
+    {
+      "name": "rand",
+      "score": 0.80,
+      "indicators": {
+        "string_refs": ["rand"],
+        "external_symbol_contains": ["rand"],
+        "min_size": 20,
+        "max_size": 400,
+        "notes": "Pseudo-random number generator."
+      }
+    },
+    {
+      "name": "srand",
+      "score": 0.80,
+      "indicators": {
+        "string_refs": ["srand"],
+        "external_symbol_contains": ["srand"],
+        "min_size": 15,
+        "max_size": 200,
+        "notes": "Seed PRNG."
+      }
+    },
+    {
+      "name": "fread",
+      "score": 0.82,
+      "indicators": {
+        "string_refs": ["fread"],
+        "external_symbol_contains": ["fread"],
+        "min_size": 30,
+        "max_size": 400,
+        "notes": "Read bytes from FILE stream."
+      }
+    },
+    {
+      "name": "fwrite",
+      "score": 0.82,
+      "indicators": {
+        "string_refs": ["fwrite"],
+        "external_symbol_contains": ["fwrite"],
+        "min_size": 30,
+        "max_size": 400,
+        "notes": "Write bytes to FILE stream."
+      }
+    },
+    {
+      "name": "fopen",
+      "score": 0.82,
+      "indicators": {
+        "string_refs": ["fopen"],
+        "external_symbol_contains": ["fopen"],
+        "min_size": 20,
+        "max_size": 300,
+        "notes": "Open FILE stream."
+      }
+    },
+    {
+      "name": "fclose",
+      "score": 0.82,
+      "indicators": {
+        "string_refs": ["fclose"],
+        "external_symbol_contains": ["fclose"],
+        "min_size": 15,
+        "max_size": 250,
+        "notes": "Close FILE stream."
+      }
+    },
+    {
+      "name": "fseek",
+      "score": 0.80,
+      "indicators": {
+        "string_refs": ["fseek"],
+        "external_symbol_contains": ["fseek"],
+        "min_size": 20,
+        "max_size": 300,
+        "notes": "Seek in FILE stream."
+      }
+    },
+    {
+      "name": "ftell",
+      "score": 0.80,
+      "indicators": {
+        "string_refs": ["ftell"],
+        "external_symbol_contains": ["ftell"],
+        "min_size": 15,
+        "max_size": 250,
+        "notes": "Return current FILE position."
+      }
+    },
+    {
+      "name": "getenv",
+      "score": 0.80,
+      "indicators": {
+        "string_refs": ["getenv"],
+        "external_symbol_contains": ["getenv"],
+        "min_size": 20,
+        "max_size": 300,
+        "notes": "Read environment variable."
+      }
+    },
+    {
+      "name": "setenv",
+      "score": 0.80,
+      "indicators": {
+        "string_refs": ["setenv"],
+        "external_symbol_contains": ["setenv"],
+        "min_size": 25,
+        "max_size": 350,
+        "notes": "Set environment variable."
+      }
+    },
+    {
+      "name": "exit",
+      "score": 0.85,
+      "indicators": {
+        "string_refs": ["exit"],
+        "external_symbol_contains": ["exit", "ExitProcess"],
+        "min_size": 10,
+        "max_size": 200,
+        "notes": "Terminate process."
+      }
+    }
+  ]
+}

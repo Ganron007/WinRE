@@ -1,0 +1,342 @@
+{
+  "description": "Common Windows API wrapper signatures for CADRE agentic recovery. These are often thin wrappers or helper functions around kernel32/ntdll/user32/advapi32 APIs.",
+  "version": "1.0.0",
+  "signatures": [
+    {
+      "name": "VirtualAlloc_wrapper",
+      "score": 0.85,
+      "indicators": {
+        "external_symbol_contains": ["VirtualAlloc", "VirtualAllocEx", "NtAllocateVirtualMemory"],
+        "notes": "Allocate RWX/RW memory region."
+      }
+    },
+    {
+      "name": "VirtualProtect_wrapper",
+      "score": 0.85,
+      "indicators": {
+        "external_symbol_contains": ["VirtualProtect", "VirtualProtectEx", "NtProtectVirtualMemory"],
+        "notes": "Change memory protection (often to RX/RWX)."
+      }
+    },
+    {
+      "name": "CreateThread_wrapper",
+      "score": 0.85,
+      "indicators": {
+        "external_symbol_contains": ["CreateThread", "CreateRemoteThread", "NtCreateThreadEx"],
+        "notes": "Start a new thread."
+      }
+    },
+    {
+      "name": "CreateProcess_wrapper",
+      "score": 0.85,
+      "indicators": {
+        "external_symbol_contains": ["CreateProcess", "CreateProcessW", "CreateProcessA", "NtCreateUserProcess"],
+        "notes": "Launch a child process."
+      }
+    },
+    {
+      "name": "WriteProcessMemory_wrapper",
+      "score": 0.85,
+      "indicators": {
+        "external_symbol_contains": ["WriteProcessMemory", "NtWriteVirtualMemory"],
+        "notes": "Write bytes into another process."
+      }
+    },
+    {
+      "name": "ReadProcessMemory_wrapper",
+      "score": 0.85,
+      "indicators": {
+        "external_symbol_contains": ["ReadProcessMemory", "NtReadVirtualMemory"],
+        "notes": "Read bytes from another process."
+      }
+    },
+    {
+      "name": "WSAStartup_wrapper",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["WSAStartup"],
+        "notes": "Initialize Winsock."
+      }
+    },
+    {
+      "name": "socket_create",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["socket", "WSASocket"],
+        "notes": "Create network socket."
+      }
+    },
+    {
+      "name": "socket_connect",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["connect", "WSAConnect"],
+        "notes": "Connect socket to remote address."
+      }
+    },
+    {
+      "name": "socket_send",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["send", "WSASend"],
+        "notes": "Send data over socket."
+      }
+    },
+    {
+      "name": "socket_recv",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["recv", "WSARecv"],
+        "notes": "Receive data from socket."
+      }
+    },
+    {
+      "name": "InternetOpen_url",
+      "score": 0.85,
+      "indicators": {
+        "external_symbol_contains": ["InternetOpen", "InternetOpenUrl", "InternetReadFile", "WinHttpOpen", "WinHttpConnect"],
+        "notes": "WinINet/WinHTTP request helper."
+      }
+    },
+    {
+      "name": "URLDownloadToFile_wrapper",
+      "score": 0.85,
+      "indicators": {
+        "external_symbol_contains": ["URLDownloadToFile", "URLDownloadToCacheFile"],
+        "notes": "Download file from URL to disk."
+      }
+    },
+    {
+      "name": "RegOpenKey_wrapper",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["RegOpenKey", "RegOpenKeyEx", "RegCreateKeyEx"],
+        "notes": "Open or create registry key."
+      }
+    },
+    {
+      "name": "RegQueryValue_wrapper",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["RegQueryValue", "RegQueryValueEx"],
+        "notes": "Read registry value."
+      }
+    },
+    {
+      "name": "RegSetValue_wrapper",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["RegSetValue", "RegSetValueEx"],
+        "notes": "Write registry value."
+      }
+    },
+    {
+      "name": "CreateFile_wrapper",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["CreateFile", "CreateFileW", "CreateFileA", "NtCreateFile"],
+        "notes": "Open or create file."
+      }
+    },
+    {
+      "name": "ReadFile_wrapper",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["ReadFile", "NtReadFile"],
+        "notes": "Read bytes from file."
+      }
+    },
+    {
+      "name": "WriteFile_wrapper",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["WriteFile", "NtWriteFile"],
+        "notes": "Write bytes to file."
+      }
+    },
+    {
+      "name": "FindFirstFile_wrapper",
+      "score": 0.80,
+      "indicators": {
+        "external_symbol_contains": ["FindFirstFile", "FindNextFile"],
+        "notes": "Directory/file enumeration helper."
+      }
+    },
+    {
+      "name": "GetProcAddress_wrapper",
+      "score": 0.85,
+      "indicators": {
+        "external_symbol_contains": ["GetProcAddress", "LdrGetProcedureAddress"],
+        "notes": "Resolve API by name/ordinal at runtime."
+      }
+    },
+    {
+      "name": "LoadLibrary_wrapper",
+      "score": 0.85,
+      "indicators": {
+        "external_symbol_contains": ["LoadLibrary", "LdrLoadDll"],
+        "notes": "Load DLL at runtime."
+      }
+    },
+    {
+      "name": "GetModuleHandle_wrapper",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["GetModuleHandle"],
+        "notes": "Get module base without incrementing refcount."
+      }
+    },
+    {
+      "name": "OpenProcess_wrapper",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["OpenProcess", "NtOpenProcess"],
+        "notes": "Open handle to another process."
+      }
+    },
+    {
+      "name": "OpenThread_wrapper",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["OpenThread", "NtOpenThread"],
+        "notes": "Open handle to another thread."
+      }
+    },
+    {
+      "name": "Sleep_wrapper",
+      "score": 0.80,
+      "indicators": {
+        "external_symbol_contains": ["Sleep", "SleepEx", "NtDelayExecution"],
+        "notes": "Delay execution."
+      }
+    },
+    {
+      "name": "ExitProcess_wrapper",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["ExitProcess", "NtTerminateProcess"],
+        "notes": "Terminate current process."
+      }
+    },
+    {
+      "name": "MessageBox_wrapper",
+      "score": 0.80,
+      "indicators": {
+        "external_symbol_contains": ["MessageBox", "MessageBoxEx"],
+        "notes": "Display modal dialog."
+      }
+    },
+    {
+      "name": "ShellExecute_wrapper",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["ShellExecute", "ShellExecuteEx"],
+        "notes": "Execute program or open document."
+      }
+    },
+    {
+      "name": "CreateService_wrapper",
+      "score": 0.85,
+      "indicators": {
+        "external_symbol_contains": ["CreateService", "OpenSCManager"],
+        "notes": "Install or manage Windows service."
+      }
+    },
+    {
+      "name": "StartService_wrapper",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["StartService", "ControlService"],
+        "notes": "Start or control Windows service."
+      }
+    },
+    {
+      "name": "AdjustTokenPrivileges_wrapper",
+      "score": 0.85,
+      "indicators": {
+        "external_symbol_contains": ["AdjustTokenPrivileges", "OpenProcessToken"],
+        "notes": "Enable privileges such as SeDebugPrivilege."
+      }
+    },
+    {
+      "name": "LookupPrivilegeValue_wrapper",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["LookupPrivilegeValue"],
+        "notes": "Resolve privilege LUID."
+      }
+    },
+    {
+      "name": "CreateMutex_wrapper",
+      "score": 0.80,
+      "indicators": {
+        "external_symbol_contains": ["CreateMutex"],
+        "notes": "Create or open named mutex."
+      }
+    },
+    {
+      "name": "OpenEventLog_wrapper",
+      "score": 0.80,
+      "indicators": {
+        "external_symbol_contains": ["OpenEventLog", "ClearEventLog"],
+        "notes": "Windows event log access."
+      }
+    },
+    {
+      "name": "GetAdaptersInfo_wrapper",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["GetAdaptersInfo", "GetAdaptersAddresses"],
+        "notes": "Network adapter enumeration."
+      }
+    },
+    {
+      "name": "GetComputerName_wrapper",
+      "score": 0.80,
+      "indicators": {
+        "external_symbol_contains": ["GetComputerName", "GetComputerNameEx"],
+        "notes": "Read hostname."
+      }
+    },
+    {
+      "name": "GetUserName_wrapper",
+      "score": 0.80,
+      "indicators": {
+        "external_symbol_contains": ["GetUserName", "GetUserNameEx"],
+        "notes": "Read current username."
+      }
+    },
+    {
+      "name": "GetVersionEx_wrapper",
+      "score": 0.80,
+      "indicators": {
+        "external_symbol_contains": ["GetVersionEx", "RtlGetVersion"],
+        "notes": "OS version fingerprinting."
+      }
+    },
+    {
+      "name": "IsDebuggerPresent_wrapper",
+      "score": 0.82,
+      "indicators": {
+        "external_symbol_contains": ["IsDebuggerPresent", "CheckRemoteDebuggerPresent"],
+        "notes": "Debugger detection."
+      }
+    },
+    {
+      "name": "SetWindowsHookEx_wrapper",
+      "score": 0.85,
+      "indicators": {
+        "external_symbol_contains": ["SetWindowsHookEx"],
+        "notes": "Install global/local hook (keylogger/injection)."
+      }
+    },
+    {
+      "name": "BitBlt_wrapper",
+      "score": 0.80,
+      "indicators": {
+        "external_symbol_contains": ["BitBlt"],
+        "notes": "Screen capture via GDI."
+      }
+    }
+  ]
+}

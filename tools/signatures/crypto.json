@@ -1,0 +1,194 @@
+{
+  "description": "Cryptographic primitive signatures for CADRE agentic recovery. Matches are based on API names, constant values, string references, and structural heuristics.",
+  "version": "1.0.0",
+  "signatures": [
+    {
+      "name": "AES_encrypt",
+      "score": 0.90,
+      "indicators": {
+        "string_refs": ["AES", "aes"],
+        "external_symbol_contains": ["AES_encrypt", "AES_cbc_encrypt", "CryptEncrypt"],
+        "constants_hex": ["63", "7c", "77", "7b", "f2", "6b", "6f", "c5"],
+        "notes": "AES forward S-box constants or AES-NI/WinCrypt paths."
+      }
+    },
+    {
+      "name": "AES_decrypt",
+      "score": 0.90,
+      "indicators": {
+        "string_refs": ["AES", "aes"],
+        "external_symbol_contains": ["AES_decrypt", "AES_cbc_decrypt"],
+        "notes": "AES inverse S-box or decryption key schedule."
+      }
+    },
+    {
+      "name": "AES_set_key",
+      "score": 0.88,
+      "indicators": {
+        "string_refs": ["AES_set_encrypt_key", "AES_set_decrypt_key"],
+        "external_symbol_contains": ["AES_set_encrypt_key", "AES_set_decrypt_key"],
+        "notes": "AES key schedule expansion."
+      }
+    },
+    {
+      "name": "SHA256_init",
+      "score": 0.90,
+      "indicators": {
+        "external_symbol_contains": ["SHA256_Init", "SHA256_init"],
+        "constants_hex": ["6a09e667", "bb67ae85", "3c6ef372", "a54ff53a"],
+        "notes": "SHA-256 initial state constants."
+      }
+    },
+    {
+      "name": "SHA256_update",
+      "score": 0.88,
+      "indicators": {
+        "external_symbol_contains": ["SHA256_Update", "SHA256_update"],
+        "notes": "SHA-256 block compression."
+      }
+    },
+    {
+      "name": "SHA256_final",
+      "score": 0.88,
+      "indicators": {
+        "external_symbol_contains": ["SHA256_Final", "SHA256_final"],
+        "notes": "SHA-256 padding and output."
+      }
+    },
+    {
+      "name": "MD5_init",
+      "score": 0.88,
+      "indicators": {
+        "external_symbol_contains": ["MD5_Init", "MD5init"],
+        "constants_hex": ["67452301", "efcdab89", "98badcfe", "10325476"],
+        "notes": "MD5 initial state constants."
+      }
+    },
+    {
+      "name": "MD5_update",
+      "score": 0.86,
+      "indicators": {
+        "external_symbol_contains": ["MD5_Update", "MD5update"],
+        "notes": "MD5 block compression."
+      }
+    },
+    {
+      "name": "MD5_final",
+      "score": 0.86,
+      "indicators": {
+        "external_symbol_contains": ["MD5_Final", "MD5final"],
+        "notes": "MD5 padding and output."
+      }
+    },
+    {
+      "name": "RC4_init",
+      "score": 0.88,
+      "indicators": {
+        "external_symbol_contains": ["RC4_set_key", "RC4_init"],
+        "notes": "RC4 key-scheduling algorithm (KSA) with 256-byte S-box."
+      }
+    },
+    {
+      "name": "RC4_crypt",
+      "score": 0.88,
+      "indicators": {
+        "external_symbol_contains": ["RC4", "rc4"],
+        "notes": "RC4 pseudo-random generation algorithm (PRGA) xor loop."
+      }
+    },
+    {
+      "name": "ChaCha20",
+      "score": 0.88,
+      "indicators": {
+        "external_symbol_contains": ["ChaCha20"],
+        "constants_hex": ["61707865", "3320646e", "79622d32", "6b206574"],
+        "notes": "ChaCha20 sigma constants."
+      }
+    },
+    {
+      "name": " salsa20",
+      "score": 0.88,
+      "indicators": {
+        "external_symbol_contains": ["salsa20"],
+        "constants_hex": ["61707865", "3320646e"],
+        "notes": "Salsa20 constants (same sigma words as ChaCha20)."
+      }
+    },
+    {
+      "name": "RSA_public_encrypt",
+      "score": 0.88,
+      "indicators": {
+        "external_symbol_contains": ["RSA_public_encrypt", "CryptEncrypt"],
+        "notes": "RSA public-key encryption wrapper."
+      }
+    },
+    {
+      "name": "RSA_private_decrypt",
+      "score": 0.88,
+      "indicators": {
+        "external_symbol_contains": ["RSA_private_decrypt", "CryptDecrypt"],
+        "notes": "RSA private-key decryption wrapper."
+      }
+    },
+    {
+      "name": "Base64_encode",
+      "score": 0.82,
+      "indicators": {
+        "string_refs": ["ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"],
+        "notes": "Standard Base64 alphabet lookup."
+      }
+    },
+    {
+      "name": "Base64_decode",
+      "score": 0.82,
+      "indicators": {
+        "string_refs": ["ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"],
+        "notes": "Base64 decode table."
+      }
+    },
+    {
+      "name": "XOR_cipher_loop",
+      "score": 0.75,
+      "indicators": {
+        "notes": "Byte/xor loop without standard algorithm constants; generic symmetric stream."
+      },
+      "heuristics": {
+        "cyclomatic_max": 8,
+        "call_out_max": 4,
+        "string_hints": ["key", "xor", "enc", "dec"]
+      }
+    },
+    {
+      "name": "WinCrypt_acquire_context",
+      "score": 0.85,
+      "indicators": {
+        "external_symbol_contains": ["CryptAcquireContext", "CryptAcquireContextW"],
+        "notes": "Windows crypto service provider context acquisition."
+      }
+    },
+    {
+      "name": "WinCrypt_hash",
+      "score": 0.85,
+      "indicators": {
+        "external_symbol_contains": ["CryptCreateHash", "CryptHashData", "CryptGetHashParam"],
+        "notes": "Windows CryptoAPI hashing wrapper."
+      }
+    },
+    {
+      "name": "BCrypt_hash",
+      "score": 0.85,
+      "indicators": {
+        "external_symbol_contains": ["BCryptCreateHash", "BCryptHashData", "BCryptFinishHash"],
+        "notes": "Windows CNG hashing wrapper."
+      }
+    },
+    {
+      "name": "BCrypt_encrypt",
+      "score": 0.85,
+      "indicators": {
+        "external_symbol_contains": ["BCryptEncrypt", "BCryptDecrypt", "BCryptGenerateSymmetricKey"],
+        "notes": "Windows CNG symmetric encryption wrapper."
+      }
+    }
+  ]
+}

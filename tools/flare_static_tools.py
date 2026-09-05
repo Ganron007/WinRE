@@ -17,8 +17,10 @@ Tools (all FREE):
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 PY = sys.executable or r"C:\Python313\python.exe"
@@ -235,19 +237,547 @@ def strings(sample: str, timeout: int = 300) -> dict:
             "strings": interesting}
 
 
+# ── Tier A: RevAI-method ports (Windows-native implementations) ────────────
+
+_PE_IMPORT_SIGNALS = (
+    ("VirtualAllocEx", "allocate_memory", ["T1055"]),
+    ("WriteProcessMemory", "write_process_memory", ["T1055"]),
+    ("CreateRemoteThread", "create_remote_thread", ["T1055"]),
+    ("NtUnmapViewOfSection", "unmap_section_view", ["T1055"]),
+    ("QueueUserAPC", "queue_apc", ["T1055"]),
+    ("SetThreadContext", "set_thread_context", ["T1055"]),
+    ("IsDebuggerPresent", "check_debugger", ["T1622"]),
+    ("CheckRemoteDebuggerPresent", "check_remote_debugger", ["T1622"]),
+    ("CryptEncrypt", "crypto_encrypt", ["T1573"]),
+    ("BCryptEncrypt", "bcrypt_encrypt", ["T1573"]),
+    ("InternetOpen", "http_client", ["T1071.001"]),
+    ("WinHttpOpen", "winhttp_client", ["T1071.001"]),
+    ("URLDownloadToFile", "download_file", ["T1105"]),
+    ("CreateService", "create_service", ["T1543.003"]),
+    ("RegSetValue", "set_registry_value", ["T1112"]),
+    ("CreateProcess", "create_process", ["T1106"]),
+    ("ShellExecute", "shell_execute", ["T1106"]),
+    ("LoadLibrary", "load_library", ["T1129"]),
+    ("GetProcAddress", "get_proc_address", ["T1129"]),
+    ("VirtualProtect", "change_memory_protection", ["T1055"]),
+    ("VirtualAlloc", "allocate_memory", ["T1055"]),
+)
+
+
+def pe_import_signals(sample: str, timeout: int = 300) -> dict:
+    """PE import table high-signal API map (pefile). NOT capa — never label
+    as capa. Verbatim port of RevAI v2_lib.pe_import_signals."""
+    t0 = time.time()
+    imports_seen: list[str] = []
+    try:
+        import pefile
+        pe = pefile.PE(sample, fast_load=True)
+        pe.parse_data_directories(
+            directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
+        for entry in getattr(pe, "DIRECTORY_ENTRY_IMPORT", []) or []:
+            for imp in getattr(entry, "imports", []) or []:
+                name = (imp.name.decode("utf-8", "ignore") if imp.name else "") or ""
+                if name:
+                    imports_seen.append(name)
+        pe.close()
+    except Exception as e:
+        return {"ok": False, "error": f"pe_import_signals failed: {e}",
+                "engine": "pe_imports", "signal_count": 0, "signals": []}
+    lower_keys = [n.lower() for n in imports_seen]
+    signals: list[dict] = []
+    seen_labels: set[str] = set()
+    for api, label, tactics in _PE_IMPORT_SIGNALS:
+        if any(api.lower() in k for k in lower_keys):
+            if label in seen_labels:
+                continue
+            seen_labels.add(label)
+            signals.append({"label": label, "api_match": api, "attack": tactics})
+    return {"ok": True, "tool": "pe_import_signals", "engine": "pe_imports",
+            "duration_s": round(time.time() - t0, 2),
+            "import_count": len(imports_seen), "signal_count": len(signals),
+            "signals": signals,
+            "hint": "PE import high-signal map (pefile). Not capa."}
+
+
+def signature_match(func_name: str = "", imports: list | None = None,
+                    strings: list | None = None, constants: list | None = None,
+                    size: int = 0) -> dict:
+    """Match a function against signature DBs (crypto/stdlib/winapi).
+    Port of RevAI v2_lib.signature_match; DBs from tools/signatures."""
+    from pathlib import Path as _P
+    sig_dirs = [_P(__file__).resolve().parent / "signatures",
+                _P(r"C:\WinRE\internal\signatures")]
+    entries = []
+    for d in sig_dirs:
+        if not d.exists():
+            continue
+        for path in sorted(d.glob("*.json")):
+            try:
+                data = json.loads(path.read_text())
+                entries.extend(data.get("signatures", []))
+            except Exception:
+                continue
+    if not entries:
+        return {"matched": False, "error": "no signature DBs found"}
+    imports_set = set(imports or [])
+    strings_set = {s.lower() for s in (strings or [])}
+    constants_set = set(constants or [])
+    threshold = 0.80
+    best = None
+    best_src = "unknown"
+    for entry in entries:
+        path = entry.get("_src_db", "")
+        ind = entry.get("indicators", {})
+        heur = entry.get("heuristics", {})
+        score = 0.0
+        hits = []
+        min_size, max_size = ind.get("min_size"), ind.get("max_size")
+        if min_size is not None and size < min_size:
+            continue
+        if max_size is not None and size > max_size:
+            continue
+        ext = ind.get("external_symbol_contains", [])
+        if ext and any(any(p.lower() in imp.lower() for p in ext)
+                       for imp in imports_set):
+            score += 0.45
+            hits.append("external_symbol")
+        want_strings = {s.lower() for s in ind.get("string_refs", [])}
+        if want_strings and strings_set & want_strings:
+            score += 0.35
+            hits.append("string_ref")
+        # constants_hex: AES S-box style constants, compared as ints
+        want_hex = ind.get("constants_hex", [])
+        for h in want_hex:
+            try:
+                val = int(h, 16)
+                if val in constants_set:
+                    score += 0.20
+                    hits.append(f"constant_{h}")
+                    break
+            except ValueError:
+                continue
+        # Heuristic adjustments (RevAI semantics)
+        if heur.get("cyclomatic_max") is not None:
+            score += 0.10
+        if heur.get("call_out_max") is not None:
+            score += 0.10
+        h_str = {s.lower() for s in heur.get("string_hints", [])}
+        if h_str and strings_set & h_str:
+            score += 0.10
+        score = min(score, entry.get("score", 0.85))
+        if score >= threshold and (best is None or score > best["score"]):
+            import re as _re
+            canonical = _re.sub(r"[^A-Za-z0-9_]", "_", entry["name"])
+            best = {"matched": True, "name": canonical,
+                    "score": round(score, 3), "matched_rules": hits,
+                    "notes": ind.get("notes", ""), "source_db": best_src}
+    return best or {"matched": False}
+
+
+def xor_string_search(sample: str, max_results: int = 30,
+                      timeout: int = 120) -> dict:
+    """Find XOR/ROL/ADD/SHIFT encoded printable strings — pure-python
+    brute force (same candidates contract as RevAI's xorsearch binary)."""
+    import math
+    try:
+        data = Path(sample).read_bytes()
+    except OSError as e:
+        return {"ok": False, "error": f"file not found: {e}", "candidates": []}
+    if len(data) > 8 * 1024 * 1024:
+        data = data[:8 * 1024 * 1024]  # cap scan window
+    candidates: list[dict] = []
+    printable = set(range(0x20, 0x7F))
+
+    def _scan_keyed(key: int, mode: str):
+        hits = []
+        cur = []
+        start = 0
+        for i, b in enumerate(data):
+            if mode == "xor":
+                d = b ^ key
+            elif mode == "add":
+                d = (b - key) & 0xFF
+            elif mode == "sub":
+                d = (b + key) & 0xFF
+            elif mode == "rol5":
+                d = ((b << 5) | (b >> 3)) & 0xFF
+            else:
+                d = b
+            if d in printable:
+                if not cur:
+                    start = i
+                cur.append(d)
+            else:
+                if len(cur) >= 8:
+                    s = bytes(cur).decode("ascii")
+                    if sum(c.isalpha() or c.isspace() for c in s) / len(s) >= 0.7:
+                        hits.append({"offset": start, "mode": mode,
+                                     "key": key, "string": s[:120]})
+                        if len(hits) >= max_results:
+                            return hits
+                cur = []
+        return hits
+
+    for mode in ("xor", "add", "sub", "rol5"):
+        keys = range(1, 256) if mode == "xor" else range(1, 64)
+        for key in keys:
+            for h in _scan_keyed(key, mode):
+                candidates.append(h)
+                if len(candidates) >= max_results:
+                    break
+            if len(candidates) >= max_results:
+                break
+        if len(candidates) >= max_results:
+            break
+    return {"ok": True, "tool": "xor_string_search",
+            "candidates": candidates, "total": len(candidates)}
+
+
+def olevba_analyze(sample: str, timeout: int = 120) -> dict:
+    """VBA macro extraction (oletools/olevba)."""
+    try:
+        magic = Path(sample).read_bytes()[:8]
+    except OSError as e:
+        return {"ok": False, "error": str(e)[:100]}
+    is_ole2 = magic[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+    is_zip = magic[:4] == b"PK\x03\x04"
+    if not (is_ole2 or is_zip):
+        return {"ok": True, "tool": "olevba", "is_office_doc": False, "macros": []}
+    import importlib.util
+    if importlib.util.find_spec("oletools") is None:
+        return _skipped("olevba", "oletools not installed")
+    exe = Path(PY).parent / "Scripts" / "olevba.exe"
+    cmd = ([str(exe), "--decode", "-c", sample] if exe.is_file()
+           else [PY, "-m", "oletools.olevba", "--decode", "-c", sample])
+    rc, out, err = _run(cmd, timeout)
+    macros = []
+    for line in (out or "").splitlines()[:200]:
+        low = line.lower()
+        if any(k in low for k in ("autoexec", "document_open", "auto_open",
+                                  "shell", "createobject", "wscript",
+                                  "powershell", "auto_")):
+            if line.strip() and not line.startswith("+"):
+                macros.append(line.strip()[:200])
+    return {"ok": rc == 0, "tool": "olevba", "is_office_doc": True,
+            "macros": macros, "returncode": rc}
+
+
+def peepdf_analyze(sample: str, timeout: int = 120) -> dict:
+    """PDF analysis (peepdf): JS, objects, embedded files."""
+    magic = Path(sample).read_bytes()[:5] if Path(sample).is_file() else b""
+    if magic != b"%PDF-":
+        return {"ok": True, "tool": "peepdf", "is_pdf": False}
+    import importlib.util
+    if importlib.util.find_spec("peepdf") is None:
+        return _skipped("peepdf", "peepdf not installed")
+    exe = Path(PY).parent / "Scripts" / "peepdf.exe"
+    cmd = ([str(exe), "-f", "-l", "all", sample] if exe.is_file()
+           else [PY, "-m", "peepdf.peepdf", "-f", "-l", "all", sample])
+    rc, out, err = _run(cmd, timeout)
+    text = (out or "")[:8000]
+    js = [l.strip()[:200] for l in text.splitlines()
+          if "javascript" in l.lower() or "eval" in l.lower()][:20]
+    return {"ok": rc == 0, "tool": "peepdf", "is_pdf": True,
+            "analysis_head": text[:3000], "js_markers": js}
+
+
+def speakeasy_emulate(sample: str, timeout: int = 900) -> dict:
+    """Windows-native PE emulation (Mandiant Speakeasy). Refuses non-PE
+    without loading the emulator."""
+    import importlib.util
+    if importlib.util.find_spec("speakeasy") is None:
+        return _skipped("speakeasy", "speakeasy-emulator not installed")
+    try:
+        head = Path(sample).read_bytes()[:2]
+    except OSError as e:
+        return {"ok": False, "error": str(e)[:100]}
+    if head != b"MZ":
+        return {"ok": False, "skipped": True,
+                "reason": "not_applicable:only PE emulated"}
+    script = (
+        "import json\n"
+        "from pathlib import Path\n"
+        "from speakeasy import Speakeasy\n"
+        "p = Path(sys.argv[1])\n"
+        "se = Speakeasy()\n"
+        "module = se.load_module(str(p))\n"
+        "se.run_module(module)\n"
+        "report = se.get_json_report()\n"
+        "summary = {'speakeasy_ok': True,\n"
+        "  'module_base': report.get('module_base'),\n"
+        "  'entry_point': report.get('entry_point'),\n"
+        "  'key_events': (report.get('key_events') or [])[:20],\n"
+        "  'api_calls': (report.get('api_calls') or [])[:20],\n"
+        "  'strings': (report.get('strings') or [])[:20]}\n"
+        "print(json.dumps(summary, default=str)[:8000])\n")
+    rc, out, err = _run([PY, "-c", script, sample], timeout)
+    if rc != 0:
+        return {"ok": False, "error": (err or out)[-400:], "tool": "speakeasy"}
+    try:
+        d = json.loads(out.strip().splitlines()[-1])
+        return {"ok": True, "tool": "speakeasy", **d}
+    except Exception as e:
+        return {"ok": False, "error": f"parse: {e}: {(out or '')[:200]}",
+                "tool": "speakeasy"}
+
+
+def frida_static_probe(sample: str, timeout: int = 120) -> dict:
+    """Frida availability + PE hook-candidate probe (no live injection)."""
+    out: dict = {"frida_available": False}
+    import importlib.util
+    if importlib.util.find_spec("frida") is None:
+        out["error"] = "frida not installed"
+        return out
+    out["frida_available"] = True
+    try:
+        import frida
+        out["frida_version"] = frida.__version__
+    except Exception:
+        pass
+    try:
+        import pefile
+        pe = pefile.PE(sample, fast_load=True)
+        pe.parse_data_directories()
+        hook_candidates = []
+        for entry in (getattr(pe, "DIRECTORY_ENTRY_IMPORT", None) or [])[:12]:
+            dll = entry.dll.decode(errors="replace")
+            for imp in (entry.imports or [])[:5]:
+                if imp.name:
+                    hook_candidates.append(
+                        f"{dll}!{imp.name.decode(errors='replace')}")
+        out["hook_candidates"] = hook_candidates[:30]
+    except Exception as e:
+        out["pe_error"] = str(e)[:200]
+    return {"ok": True, "tool": "frida_static_probe", **out}
+
+
+def r2_decompile(sample: str, function_addrs: list | None = None,
+                 timeout: int = 600) -> dict:
+    """radare2 disassembly per function (asm — 2nd engine alongside Ghidra).
+    Port of RevAI v2_lib.r2_decompile (pdf, not pseudo-C)."""
+    exe = Path(r"C:\Tools\radare2\radare2.exe")
+    if not exe.is_file():
+        return _skipped("r2", "C:\\Tools\\radare2\\radare2.exe missing")
+    out: dict = {"r2_ok": False, "disassembly": {}, "engine": "pdf (disasm)"}
+    size = Path(sample).stat().st_size if Path(sample).is_file() else 0
+    out["size_bytes"] = size
+    if size >= 30 * 1024 * 1024:
+        return {**out, "skipped": True,
+                "reason": "r2 aaa discovery skipped for large sample"}
+    if not function_addrs:
+        rc, disc, err = _run([str(exe), "-q", "-c", "aa; afl~[0,3]", sample], 120)
+        function_addrs = []
+        for line in (disc or "").splitlines():
+            parts = line.strip().split()
+            if parts and parts[0].startswith("0x"):
+                function_addrs.append(parts[0])
+            if len(function_addrs) >= 5:
+                break
+        if not function_addrs:
+            return {**out, "error": "could not auto-discover function addresses"}
+    for addr in function_addrs[:5]:
+        rc, pdf_out, err = _run([str(exe), "-q", "-c", f"pdf @ {addr}", sample],
+                                timeout)
+        if pdf_out:
+            out["disassembly"][addr] = pdf_out[:4000]
+    out["r2_ok"] = bool(out["disassembly"])
+    return {**out, "ok": out["r2_ok"], "tool": "r2_decompile"}
+
+
+def upx_unpack(sample: str, timeout: int = 120) -> dict:
+    """Detect + unpack UPX-packed binaries (writes <sample>.unpacked)."""
+    exe = Path(r"C:\Tools\upx\upx.exe")
+    if not exe.is_file():
+        return _skipped("upx", "C:\\Tools\\upx\\upx.exe missing")
+    rc, probe, err = _run([str(exe), "-t", sample], timeout)
+    is_packed = rc == 0
+    out = {"is_packed": is_packed, "probe": (probe or "")[:200]}
+    if not is_packed:
+        return {"ok": True, "tool": "upx_unpack", **out}
+    unpacked = sample + ".unpacked"
+    rc, uout, uerr = _run([str(exe), "-d", sample, "-o", unpacked], timeout)
+    out["returncode"] = rc
+    if rc == 0 and Path(unpacked).is_file() and Path(unpacked).stat().st_size > 0:
+        out["unpacked_path"] = unpacked
+        out["upx_ok"] = True
+    return {"ok": out.get("upx_ok", False), "tool": "upx_unpack", **out}
+
+
+def shellcode_extract(sample: str, timeout: int = 300) -> dict:
+    """Extract high-entropy executable sections + scdbg emulation.
+    Uses pefile (crash-proof) instead of lief."""
+    import importlib.util
+    import math
+    if importlib.util.find_spec("pefile") is None:
+        return _skipped("pefile")
+    scdbg = Path(r"C:\Tools\scdbg\scdbg.exe")
+    try:
+        import pefile
+        pe = pefile.PE(sample, fast_load=True)
+        candidates = []
+        for s in pe.sections:
+            data = s.get_data()
+            if len(data) < 16:
+                continue
+            counts: dict[int, int] = {}
+            for b in data:
+                counts[b] = counts.get(b, 0) + 1
+            total = len(data)
+            entropy = -sum((c / total) * math.log2(c / total)
+                           for c in counts.values())
+            if entropy >= 6.5 and (s.Characteristics & 0x20000000):
+                candidates.append((s.Name.rstrip(b"\x00").decode("ascii", "replace"),
+                                   entropy, data))
+        out_sections = []
+        emulated = []
+        tmp = Path(sample + ".shellcode.bin")
+        for name, ent, data in candidates[:3]:
+            out_sections.append({"section": name, "entropy": round(ent, 2),
+                                 "size": len(data)})
+            if scdbg.is_file() and len(data) <= 512 * 1024:
+                tmp.write_bytes(data)
+                rc, s_out, s_err = _run([str(scdbg), "-f", str(tmp), "-s", "-120"],
+                                        timeout)
+                emulated.append({"section": name, "scdbg_head": (s_out or "")[:1500]})
+        tmp.unlink(missing_ok=True)
+        return {"ok": True, "tool": "shellcode_extract",
+                "sections_analyzed": out_sections, "scdbg": emulated,
+                "candidates_found": len(candidates)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200], "tool": "shellcode_extract"}
+
+
+def dotnet_analyze(sample: str, timeout: int = 600) -> dict:
+    """.NET assembly analysis: dnfile metadata + ilspycmd IL/C# decompile.
+    Port of RevAI v2_lib.dotnet_analyze (monodis -> ilspycmd on Windows)."""
+    import importlib.util
+    if importlib.util.find_spec("dnfile") is None:
+        return _skipped("dnfile")
+    out: dict = {"is_dotnet": False}
+    try:
+        import dnfile
+        pe = dnfile.dnPE(sample)
+    except Exception as e:
+        return {**out, "error": f"dnfile open failed: {e}", "tool": "dotnet_analyze"}
+    out["is_dotnet"] = True
+    try:
+        out["runtime_version"] = f"v{pe.net.Flags.version}" if pe.net else None
+        asm = pe.net.mdtables.Assembly if pe.net and pe.net.mdtables else None
+        if asm and asm.rows:
+            out["assembly_name"] = asm.rows[0].Name
+        mod = pe.net.mdtables.Module if pe.net and pe.net.mdtables else None
+        if mod and mod.rows:
+            out["module_name"] = mod.rows[0].Name
+    except Exception:
+        pass
+    ilspy = Path.home() / ".dotnet" / "tools" / "ilspycmd.exe"
+    if ilspy.is_file():
+        rc, il_out, err = _run([str(ilspy), sample, "-ilcode", "true"], timeout)
+        il = (il_out or "").splitlines()
+        out["il_total_lines"] = len(il)
+        out["il_excerpt"] = "\n".join(il[:120])
+        rc2, cs_out, _ = _run([str(ilspy), sample, "-lc", "10"], timeout)
+        out["csharp_head"] = (cs_out or "")[:3000]
+    return {"ok": True, "tool": "dotnet_analyze", **out}
+
+
+def z3_solve(sample: str, timeout: int = 120) -> dict:
+    """MBA identity solving via the deobfuscation extension (RevAI port)."""
+    ext = Path(__file__).resolve().parents[1] / "tools" / "deobfuscation"
+    if not (ext / "invoke_z3_or_angr.py").is_file():
+        return _skipped("z3_solve", "deobfuscation extension missing")
+    sys.path.insert(0, str(ext))
+    try:
+        import invoke_z3_or_angr as iza  # type: ignore
+        iza.ENABLE_DEOBFUSCATION_PASS_DEFAULT = True
+        r = iza.invoke_z3_or_angr("mba_identity", sample, timeout=timeout)
+        return {"ok": True, "tool": "z3_solve", "result": r}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:250], "tool": "z3_solve"}
+
+
+def angr_analyze(sample: str, timeout: int = 300) -> dict:
+    """CFF dispatcher analysis via the deobfuscation extension (RevAI port).
+    Windows angr is functional but heavier — honest degradation applies."""
+    ext = Path(__file__).resolve().parents[1] / "tools" / "deobfuscation"
+    if not (ext / "invoke_z3_or_angr.py").is_file():
+        return _skipped("angr_analyze", "deobfuscation extension missing")
+    sys.path.insert(0, str(ext))
+    try:
+        import invoke_z3_or_angr as iza  # type: ignore
+        iza.ENABLE_DEOBFUSCATION_PASS_DEFAULT = True
+        r = iza.invoke_z3_or_angr("cff_dispatcher", sample, timeout=timeout)
+        return {"ok": True, "tool": "angr_analyze", "result": r}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:250], "tool": "angr_analyze"}
+
+
+def ghidra_decompile(sample: str, function_addr: str = "",
+                     timeout: int = 1800) -> dict:
+    """Ghidra decompile via headless + decompile post-script (v1: slower
+    than RevAI's RPC but same method; ghidra-rpc/PyGhidra is the upgrade
+    path, tested separately)."""
+    import tempfile
+    ghidra = None
+    for g in Path(r"C:\Tools").glob("ghidra_*_PUBLIC"):
+        if (g / "support" / "analyzeHeadless.bat").is_file():
+            ghidra = g
+            break
+    java = Path(__file__).resolve().parent / "ghidra_scripts" / "DecompileFunc.java"
+    if not ghidra or not java.is_file():
+        return _skipped("ghidra_decompile", "ghidra or DecompileFunc.java missing")
+    proj = tempfile.mkdtemp(prefix="winre-gh-dec-")
+    cmd = [str(ghidra / "support" / "analyzeHeadless.bat"), proj, "dec",
+           "-import", sample,
+           "-scriptPath", str(java.parent),
+           "-postScript", "DecompileFunc.java", "GHIDRA_DECOMP_FUNC",
+           "-deleteProject"]
+    env = os.environ.copy()
+    env["GHIDRA_DECOMP_FUNC"] = function_addr or "entry"
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, env=env,
+                           timeout=timeout, encoding="utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"headless decompile timeout {timeout}s",
+                "tool": "ghidra_decompile"}
+    blob = (p.stdout or "")
+    start = blob.find("{")
+    if start < 0:
+        return {"ok": False, "error": "no JSON from post-script",
+                "tail": blob[-300:], "tool": "ghidra_decompile"}
+    try:
+        d = json.loads(blob[start:])
+        return {"ok": True, "tool": "ghidra_decompile", **d}
+    except json.JSONDecodeError as e:
+        return {"ok": False, "error": f"parse: {e}", "tail": blob[start:start + 300],
+                "tool": "ghidra_decompile"}
+
+
 def main() -> int:
     import argparse
     TOOL_FUNCS = {"capa": capa, "floss": floss, "lief": lief_parse,
                   "diec": diec, "ilspy": ilspy, "yarascan": yarascan,
-                  "strings": strings}
+                  "strings": strings,
+                  "pe_import_signals": pe_import_signals,
+                  "signature_match": signature_match,
+                  "xor_string_search": xor_string_search,
+                  "olevba": olevba_analyze, "peepdf": peepdf_analyze,
+                  "speakeasy": speakeasy_emulate,
+                  "frida_static_probe": frida_static_probe,
+                  "r2_decompile": r2_decompile, "upx": upx_unpack,
+                  "shellcode_extract": shellcode_extract,
+                  "dotnet_analyze": dotnet_analyze,
+                  "z3_solve": z3_solve, "angr_analyze": angr_analyze,
+                  "ghidra_decompile": ghidra_decompile}
     ap = argparse.ArgumentParser(description="RevAI-parity static evidence wrappers")
-    ap.add_argument("tool", choices=["capa", "floss", "lief", "diec", "ilspy",
-                                     "yarascan", "strings", "all"])
+    ap.add_argument("tool", choices=list(TOOL_FUNCS.keys()) + ["all"])
     ap.add_argument("sample")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
     if a.tool == "all":
-        out = {t: fn(a.sample) for t, fn in TOOL_FUNCS.items()}
+        core = ("capa", "floss", "lief", "diec", "yarascan", "strings",
+                "pe_import_signals", "xor_string_search")
+        out = {t: TOOL_FUNCS[t](a.sample) for t in core}
     else:
         out = {a.tool: TOOL_FUNCS[a.tool](a.sample)}
     print(json.dumps(out, indent=2, default=str))
