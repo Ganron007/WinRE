@@ -1,10 +1,10 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """llm_client.py — OpenAI-compatible LLM client for the WinRE pipeline.
 
 Reads configuration from the environment, which is loaded from <repo>/.env
 (gitignored) by winre/envfile.py on import. Keys (WINRE_LLM_*):
 
-    WINRE_LLM_BASE_URL   base URL (e.g. https://api.stepfun.com/v1)
+    WINRE_LLM_BASE_URL   base URL (e.g. https://api.openai.com/v1 or your provider)
     WINRE_LLM_API_KEY    API key (leave blank for a local unauthed server)
     WINRE_LLM_MODEL      model name (e.g. step-3.7-flash)
     WINRE_LLM_REASONING  reasoning effort: low|medium|high|max (optional)

@@ -42,11 +42,13 @@ LOCAL_LOGS = Path(os.environ.get("WINRE_PIPELINE_LOGS", str(REPO / "logs")))
 
 
 def flare_cfg() -> dict:
+    """Execution-plane connection config. All values from env/.env —
+    no lab defaults in code (see .env.template for the full block)."""
     return {
-        "host": os.environ.get("FLARE_HOST", "192.168.77.42"),
+        "host": os.environ.get("FLARE_HOST", ""),
         "user": os.environ.get("FLARE_USER", "FLARE-VM"),
         "key": os.environ.get("FLARE_SSH_KEY",
-                              str(Path.home() / ".ssh" / "cadre-77.42-key")),
+                              str(Path.home() / ".ssh" / "id_ed25519")),
         "port": int(os.environ.get("FLARE_SSH_PORT", "22")),
         "remote_pipeline": os.environ.get("WINRE_REMOTE_PIPELINE", r"C:\WinRE"),
     }

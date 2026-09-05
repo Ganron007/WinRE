@@ -4,6 +4,15 @@
   <img src="assets/winre-logo.svg" alt="WinRE Logo" width="620">
 </p>
 
+> [!IMPORTANT]
+> **⚠️ WORK IN PROGRESS — PUBLIC BETA (pre-v1.0).** This repository is
+> published early as a project in progress. The pipeline is actively being
+> hardened and evaluated against real malware samples; expect breaking
+> changes, rough edges, and incomplete documentation until the v1.0 tag.
+> The malware-analysis **campaign** (RevAI-comparison, real-sample reports)
+> is the next milestone. Use it, break it, tell us — but pin a commit if you
+> depend on anything.
+
 <p align="center">
   <a href="https://github.com/Ganron007/WinRE"><img src="https://img.shields.io/badge/Status-LLM--assisted-blue.svg" alt="Status"></a>
   <a href="https://github.com/Ganron007/WinRE"><img src="https://img.shields.io/badge/Platform-Windows%2010%20(FlareVM)-green.svg" alt="Platform"></a>

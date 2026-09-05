@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 WinRE dynamic detonation orchestrator (Flare-VM).
 
@@ -18,9 +18,9 @@ Mode:
   --mode ssh     Remnux->Flare via SSH (legacy; requires FLARE_* env)
 
 Env:
-  FLARE_HOST       default 192.168.77.42
+  FLARE_HOST       from env/.env (no default - see .env.template)
   FLARE_USER       default FLARE-VM
-  FLARE_SSH_KEY    default ~/.ssh/cadre-77.42-key
+  FLARE_SSH_KEY    from env/.env (no default)
   FLARE_SSH_PORT   default 22
   REVENG_DYNAMIC_SKIP=1     → write META skip and exit 0
   REVENG_DYNAMIC_PESIEVE=1  → Flare job runs pe-sieve (+ hollows_hunter) mid-detonation
@@ -182,12 +182,14 @@ def _run_elf_dynamic(sha: str, sample: str, dyn_dir: Path, max_seconds: int, met
 
 
 def _flare_cfg() -> dict:
+    # All values from env/.env - no lab defaults in code (.env.template has
+    # the full block).
     return {
-        "host": os.environ.get("FLARE_HOST", "192.168.77.42"),
+        "host": os.environ.get("FLARE_HOST", ""),
         "user": os.environ.get("FLARE_USER", "FLARE-VM"),
         "key": os.environ.get(
             "FLARE_SSH_KEY",
-            str(Path.home() / ".ssh" / "cadre-77.42-key"),
+            str(Path.home() / ".ssh" / "id_ed25519"),
         ),
         "port": int(os.environ.get("FLARE_SSH_PORT", "22")),
         "remote_root": os.environ.get("FLARE_SAMPLES_ROOT", r"C:\samples"),

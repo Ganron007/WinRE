@@ -1,4 +1,4 @@
-# x64dbg-MCP — Windows (FlareVM)
+﻿# x64dbg-MCP — Windows (FlareVM)
 
 > **Status:** VENDORED (MIT) — `integrations/x64dbg-mcp-server-main/` from `https://github.com/duty1g/x64dbg-mcp-server`.  
 > **Binary:** Zig single-file plugin `x64dbg-MCP-Server.dp64/.dp32` (`build.zig:5`).
@@ -41,7 +41,7 @@ curl http://127.0.0.1:9094/ -H "Content-Type: application/json" -d '{"jsonrpc":"
 # expect 71 tools
 
 # MCP client (Claude/.mcp.json)
-# {"mcpServers":{"x64dbg":{"type":"http","url":"http://192.168.77.42:9094/"}}}
+# {"mcpServers":{"x64dbg":{"type":"http","url":"http://<FLARE_HOST>:9094/"}}}
 ```
 
 ## 4. Usage pattern (agentic)

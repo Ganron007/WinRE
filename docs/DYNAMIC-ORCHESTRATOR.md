@@ -1,4 +1,4 @@
-# Dynamic Orchestrator — FlareVM
+﻿# Dynamic Orchestrator — FlareVM
 
 > **Status:** PORT — `winre/orchestrator.py` is `Tools/v6_deploy/V6.2/scripts/dynamic_run_v2.py` (668 lines, local-first now). `winre/flare_dynamic_job.ps1` stages Frida+Procmon+FakeNet+PE-sieve.
 
@@ -17,7 +17,7 @@ host: scp sample → C:\samples\foo.exe + C:\WinRE\orchestrator.py --file C:\sam
      ├─ optional x64dbg-MCP DumpModule → x64dbg/dump/
      ├─ Mallcat triage → malcat-triage.json (if Malcat installed)
      └─ emit ANALYST-NEXT.md (emit_analyst_next.py) + META.json
-  → SMB copy → \\192.168.77.41\opt\samples\corpus\<sha>\logs\<sha>\dynamic\
+  → SMB copy → \\<remnux-host>\opt\samples\corpus\<sha>\logs\<sha>\dynamic\
 ```
 
 ELF on Flare is rare — `elf_dynamic_job.sh` handles `readelf/objdump` + local strace; Windows path is default.

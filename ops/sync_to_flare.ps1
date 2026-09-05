@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Sync WinRE repo to FlareVM C:\WinRE over SSH (scp). Internal tool - gitignored tree.
@@ -19,9 +19,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-if (-not $FlareHost) { $FlareHost = "192.168.77.42" }
+if (-not $FlareHost) { $FlareHost = $env:FLARE_HOST }
 if (-not $User) { $User = "FLARE-VM" }
-if (-not $SshKey)  { $SshKey  = "$HOME\.ssh\cadre-77.42-key" }
+if (-not $SshKey)  { $SshKey  = $env:FLARE_SSH_KEY }
 if (-not $RemoteRoot) { $RemoteRoot = "C:\WinRE" }
 
 $Repo = Split-Path -Parent $PSScriptRoot
