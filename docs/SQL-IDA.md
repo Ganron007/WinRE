@@ -30,7 +30,7 @@ Supported SQL (`SURVEY.md:110`): full `SELECT * FROM funcs|imports|strings|segme
 
 ## 3. HTTP wrapper spec (NEW — to build)
 
-Mirror Linux `idasql` HTTP and `ghidrasql` pattern so `deep_dive_agentic ToolRegistry` can call remotely:
+Mirror the Linux `idasql` HTTP pattern so the deep-dive agent's ToolRegistry can call it remotely:
 
 ```python
 # C:\WinRE\winre\idasql_server.py — tiny FastAPI / Flask wrapper

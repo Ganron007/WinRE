@@ -161,7 +161,7 @@ python winre\ui\app.py --port 5001
 #    open http://127.0.0.1:5001  → Dashboard / Run Pipeline / Evidence / MCP
 ```
 
-Per-feature docs: `docs/PIPELINE.md` · `docs/SQL-GHIDRA.md` · `docs/SQL-IDA.md` · `docs/MALCAT.md` · `docs/X64DBG-MCP.md` · `docs/WINDBG-MCP.md` · `docs/DYNAMIC-ORCHESTRATOR.md`.
+Per-feature docs: `docs/PIPELINE.md` · `docs/SQL-GHIDRA.md` · `docs/SQL-IDA.md` · `docs/X64DBG-MCP.md` · `docs/WINDBG-MCP.md` · `docs/DYNAMIC-ORCHESTRATOR.md`. Malcat-specific notes live in [`docs/PREREQUISITES.md`](docs/PREREQUISITES.md) (optional-commercial section).
 
 ---
 

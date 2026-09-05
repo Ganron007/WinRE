@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """malcat_win.py — Windows Malcat MCP wrapper for FlareVM.
 
-Thin port of Remnux mcp-malcat (Tools/v2-deploy/mcp-malcat/mcp_malcat.py:41)
+Thin port of the Remnux-lineage mcp-malcat wrapper
 to the Windows path. Malcat is commercial per-user — binary never
 redistributed; this script reads the license key from C:\\WinRE\\.env
 (MALCAT_KEY) and shells out to malcat.mcp.py.

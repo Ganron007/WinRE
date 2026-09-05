@@ -1,7 +1,7 @@
 """windbg_bridge.py — MVP HTTP bridge for WinDbg (FlareVM).
 
 12-tool JSON-RPC facade (POST / on port 9096) that matches the
-x64dbg-MCP shape so `deep_dive_agentic` on Remnux can use the same
+x64dbg-MCP shape so the Linux-side deep-dive agent can use the same
 HTTP client. Mirrors docs/WINDBG-MCP.md.
 
 Two execution paths, chosen at startup:

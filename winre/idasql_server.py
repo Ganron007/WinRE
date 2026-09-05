@@ -1,8 +1,8 @@
 ﻿#!/usr/bin/env python3
 """idasql_server.py — tiny Flask HTTP server around idasql.exe (FlareVM).
 
-Mirrors the Linux ghidrasql HTTP pattern so `deep_dive_agentic
-ToolRegistry` on Remnux can `POST http://<flare-host>:19300/query`
+Mirrors the Linux ghidrasql HTTP pattern so the deep-dive agent's
+ToolRegistry on the Linux side can `POST http://<flare-host>:19300/query`
 without spawning idasql per call (cold-start ~30s on a big PE).
 
 Endpoints:

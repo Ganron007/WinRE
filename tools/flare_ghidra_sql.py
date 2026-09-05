@@ -1,15 +1,15 @@
-#!/usr/bin/env python3
-"""flare_ghidra_sql.py — Windows Ghidra SQL wrapper for FlareVM.
+﻿#!/usr/bin/env python3
+"""flare_ghidra_sql.py — Windows Ghidra SQL wrapper.
 
-Ports the Remnux ghidra_sql_client.py (Tools/v2-deploy/) to Windows so
-FlareVM can answer the same SQL queries the LLM agent uses against
-ghidrasql on Remnux.
+Ports the Remnux ghidra_sql_client.py lineage to Windows so the
+deep-dive agent can ask the same SQL queries against Ghidra on the
+FlareVM execution plane.
 
 Two execution paths, chosen at health-check time:
 
-  A. analyzeHeadless + Java post-script (GhidraSql.java) — matches Remnux
-     contract exactly, no extra server process. Slower per query (~30s
-     JVM cold start for big PEs) but stateless.
+  A. analyzeHeadless + Java post-script (GhidraSql.java) — matches the
+     Remnux-lineage contract exactly, no extra server process. Slower per
+     query (~30s JVM cold start for big PEs) but stateless.
 
   B. LibGhidraHost HTTP server (`java -jar GhidraSql.jar --port 19301`)
      — fast multi-query, requires the extension to be built for Windows.
@@ -171,7 +171,7 @@ def run_query_headless(sql: str, sample: Path, timeout: int = 180,
     if not GHIDRA_SQL_JAVA.is_file():
         return {"ok": False,
                 "error": f"GhidraSql.java missing: {GHIDRA_SQL_JAVA} "
-                         f"(copy from RevEng Tools/v2-deploy/ghidra_sql_client.py or rebuild LibGhidraHost)",
+                         f"(rebuild LibGhidraHost or restore the post-script from upstream)",
                 "mode": "headless"}
 
     CACHE_DIR.mkdir(parents=True, exist_ok=True)

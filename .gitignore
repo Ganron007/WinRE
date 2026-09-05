@@ -11,6 +11,13 @@ venv/
 # Public release keeps docs/ free of lab IPs, hostnames and keys.
 internal/
 docs/internal/
+docs/MALCAT.md
+
+# --- Agent-tool personal config ---
+.commandcode/
+
+# --- Runtime-generated (source of truth lives in ops/smoke_flare.py) ---
+ops/_smoke_pycompile.py
 
 # --- Runtime state (never commit) ---
 # Secrets / license keys (MALCAT_KEY etc.)

@@ -1,18 +1,19 @@
-# SQL-Ghidra — Windows (FlareVM)
+﻿# SQL-Ghidra — Windows (FlareVM)
 
 > **Status:** EXISTS — `tools/flare_ghidra_sql.py` (Phase 1, 2026-08-31). Two paths: `headless` (analyzeHeadless + `GhidraSql.java` post-script) and `libhost` (LibGhidraHost HTTP).  
-> **Goal:** Windows port of Remnux `ghidra_sql_client.py` + `LibGhidraHost` so Flare can answer the same SQL as `quick_scan_v2.py:GHIDRA_EVIDENCE`.
+> **Goal:** the Windows SQL surface for Ghidra — analyzeHeadless + a Java
+> post-script, with the LibGhidraHost RPC extension as the server-mode option.
 
 ## 1. What exists to copy
 
-| Source (RevEng) | What to reuse |
-|-----------------|---------------|
-| `Tools/v2-deploy/ghidra_sql_client.py` | 300-line wrapper: `ensure_ghidra`, `run_ghidra_query(sql, timeout)`, `health` |
-| `Tools/v7_deploy/scripts/v2_lib.py` quick_scan GHIDRA_EVIDENCE | 5 canonical queries (see §3) |
-| `Tools/v9_deploy/ghidra-extensions/cadre-pe-loader/` | CADRE PE Loader (Apache 2.0) — installed `/opt/ghidra/Ghidra/Extensions/CADRE` on `.41`, same jar on Windows |
-| `ops/schema_parity.py` | Parity runner `OK=4 FAIL=0` on `ghidrasql 0.0.4` — reuse for Windows |
+| Provenance | What it provides |
+|------------|------------------|
+| `ghidra_sql_client.py` (Remnux lineage) | wrapper pattern: `ensure_ghidra`, `run_ghidra_query(sql, timeout)`, `health` |
+| `quick_scan` GHIDRA_EVIDENCE (Remnux lineage) | 5 canonical queries (see §3) |
+| CADRE PE Loader (Apache 2.0) | installed under Ghidra `Ghidra\Extensions\CADRE` (Windows) and `Ghidra/Extensions/CADRE` (Linux) |
 
-Remnux versions: `ghidrasql v0.0.4` CLI (`--program` not `--initial-program`, `V9.20`), `LibGhidraHost v0.0.5` (`/opt/ghidra/Ghidra/Extensions/LibGhidraHost`).
+LibGhidraHost extension: fetched upstream; the wrapper auto-detects the
+extension jar under `Ghidra\Extensions\LibGhidraHost`.
 
 ## 2. Windows layout
 
@@ -40,7 +41,7 @@ xcopy /E /I C:\WinRE\deps\CADRE C:\tools\ghidra_12.2_PUBLIC\Ghidra\Extensions\CA
 
 ## 3. Canonical queries (must match Remnux)
 
-From `quick_scan_v2.py:GHIDRA_EVIDENCE` (+ `V9.20` `address→addr AS address` fix):
+Canonical query set (with the `address` → `addr` compatibility fix):
 
 ```sql
 -- 1. funcs
@@ -126,9 +127,9 @@ python C:\WinRE\ops\schema_parity.py --host flare  # reuse RevEng ops/schema_par
 
 ## 7. What this doc is NOT
 
-- Not Linux Ghidra — that stays `Tools/v2-deploy/ghidra_sql_client.py`.
+- Not the Linux (Remnux-side) Ghidra SQL client — that remains separate.
 - Not replacing `speakeasy` emulation — Ghidra SQL is static, not dynamic.
 
 ## References
 
-- RevEng `Tools/v2-deploy/ghidra_sql_client.py:1`, `Tools/v9_deploy/PLAN.md:V9.20`, `CHECKLIST.md:V2.36`, `V2.37`.
+- Remnux-lineage `ghidra_sql_client.py` + LibGhidraHost upstream project.

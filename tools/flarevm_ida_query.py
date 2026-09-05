@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """flarevm_ida_query.py - Run SQL queries against IDA Pro databases on Flare-VM.
 
-Uses idasql.exe (same as Remnux, v0.0.17). Supports two modes:
+Uses idasql.exe (v0.0.17, same wrapper contract as the Linux lineage).
+Supports two modes:
   - One-shot: idasql -s <file> -q "<SQL>"
   - HTTP: idasql -s <file> --http <port> (then POST to /query)
 
