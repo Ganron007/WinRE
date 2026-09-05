@@ -105,7 +105,7 @@ ELF samples are rare on Windows; the orchestrator dispatches them to the Linux-s
 | Capability | What makes it distinctive |
 | :--- | :--- |
 | **Frida path/registry decode** | Hooks decode WCHAR/ANSI string args and `sockaddr` (incl. `sendto`/`recvfrom`) so traces contain readable paths, keys, and IP:port instead of pointers |
-| **SQL-first parity** | `ops/schema_parity.py` runs the same canonical queries on both hosts — the Windows instance must answer the same questions Remnux does (5% count tolerance) |
+| **SQL-first parity** | the same canonical queries run on both hosts — the Windows instance must answer the same questions the Linux side does (5% count tolerance) |
 | **Honest `static_yara_wins`** | Dynamic packs can never clear high-signal YARA from the static stage — the verdict policy is written into every `META.json` |
 | **Fail-open debugger passes** | x64dbg MCP OEP/dump and Malcat triage are best-effort: MCP down or license missing degrades the pack, never fails the run |
 | **Analyst-only markers** | `ANALYST-NEXT.md` explicitly tags human work (PCAP deep-dive, snapshot restore, HITL unpacking) so an agent cannot claim it done |
@@ -149,8 +149,8 @@ python C:\WinRE\winre\orchestrator.py <sha256> --mode local --max-seconds 45
 #    then in x64dbg: Plugins > Configure MCP Server > 0.0.0.0:9094
 curl http://127.0.0.1:9094/ -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 
-# 6. Cross-host SQL parity
-python C:\WinRE\ops\schema_parity.py --sample C:\samples\foo.exe --engine both
+# 6. Smoke + lab status
+python C:\WinRE\ops\smoke_flare.py
 
 # 7. Full pipeline (static + dynamic + report + audit)
 python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --max-seconds 45

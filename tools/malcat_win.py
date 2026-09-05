@@ -12,7 +12,7 @@ Subcommands:
     serve --port 9009                       — HTTP shim around malcat.mcp.py
     canary <path>                           — emit canary dict for orchestrator
 
-Output schema mirrors Remnux v2_lib.malcat_analyze (docs/MALCAT.md:53):
+Output schema mirrors Remnux v2_lib.malcat_analyze (malcat output schema):
     {analysis_id, file_summary, views{...}, functions[], constants[],
      anomalies[], carved_files[], virtual_files[], structures[],
      decompilations{}, script_decompile, unpack_result, errors[]}
@@ -212,7 +212,7 @@ def malcat_analyze(path: Path, views: list[str] | None = None,
     payload.setdefault("analysis_id", analysis_id)
     payload.setdefault("profile", profile)
     payload.setdefault("elapsed_s", round(time.time() - t0, 1))
-    # annotate entropy per docs/MALCAT.md:53
+    # annotate entropy per the malcat output schema
     if "file_summary" in payload and "entropy" not in payload.get("views", {}):
         try:
             payload["entropy_annotated"] = True

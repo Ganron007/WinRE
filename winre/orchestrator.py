@@ -819,7 +819,7 @@ def run_dynamic(
                   flush=True)
             return meta
         try:
-            # Malcat triage first (per docs/MALCAT.md:5 stage order)
+            # Malcat triage first (static pre-scan before the detonation)
             try:
                 _static_pre_scan(Path(sample), dyn_dir, meta)
             except Exception as e:

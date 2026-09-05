@@ -106,7 +106,7 @@ Notes:
 
 ## 5. Windows quirks to document while building
 
-- `addr` vs `address` — `ghidrasql 0.0.4` uses `addr` column (aliased `AS address` for parity). Test with `ops/schema_parity.py` Windows port.
+- `addr` vs `address` — the Linux CLI uses the `addr` column (aliased `AS address` for parity).
 - Timeout `120s` for `cff_detect` parity (`V2.37` fix: `cfg_edges` per-func).
 - Project `deleteProject` after each query to avoid `C:\WinRE\cache\ghidra` bloat.
 - Long paths: `C:\samples\` not `C:\Users\FLARE-VM\Downloads\` (spaces).
@@ -121,7 +121,7 @@ python C:\WinRE\tools\flare_ghidra_sql.py "SELECT count(*) as funcs FROM funcs" 
 # expect: {"ok": true, "rows": [{"funcs": 607}]}
 
 # parity
-python C:\WinRE\ops\schema_parity.py --host flare  # reuse RevEng ops/schema_parity.py logic
+# parity runner lives in the internal tree (ops, not shipped)
 # expect: OK=4 FAIL=0
 ```
 
