@@ -31,6 +31,36 @@ class MalcatClient:
         self.base = (base or self.DEFAULT_BASE).rstrip("/")
         self.default_timeout = default_timeout
         self._id = 0
+        self._aids: dict[str, int] = {}  # path -> analysis_id cache
+
+    def _resolve_aid(self, path: str) -> tuple[int | None, dict | None]:
+        """analyse_file once per path, cache the analysis_id.
+
+        malcat.mcp.py view tools (fns_top_list, fn_decompile, anomalies_list,
+        yara_list, strings_*) expect {"analysis_id"}, NOT {"path"}.
+        Returns (analysis_id, error_dict).
+        """
+        if path in self._aids:
+            return self._aids[path], None
+        r = self.analyse_file(path)
+        if not r.get("ok"):
+            return None, r
+        aid = ((r.get("result") or {}).get("structuredContent") or {}).get("analysis_id")
+        if aid is None:
+            # fall back to content-text JSON shape
+            try:
+                res = r.get("result") or {}
+                for part in (res.get("content") or []):
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        aid = (json.loads(part.get("text", "")) or {}).get("analysis_id")
+                        break
+            except Exception:
+                aid = None
+        if aid is None:
+            return None, {"ok": False, "error": "no analysis_id from analyse_file",
+                          "result": r.get("result")}
+        self._aids[path] = aid
+        return aid, None
 
     # --- low-level wire ----------------------------------------------------
 
@@ -120,17 +150,31 @@ class MalcatClient:
         return self.call("file_list_virtual_files", {"path": path})
 
     def fn_decompile(self, path: str, address: int) -> dict:
-        return self.call("fn_decompile", {"path": path, "address": address})
+        # NOTE: malcat.mcp.py fn_decompile expects {"analysis_id", "ea"}.
+        aid, err = self._resolve_aid(path)
+        if err is not None:
+            return err
+        return self.call("fn_decompile", {"analysis_id": aid, "ea": int(address)})
 
     def fn_disassemble(self, path: str, address: int, count: int = 32) -> dict:
+        aid, err = self._resolve_aid(path)
+        if err is not None:
+            return err
         return self.call("fn_disassemble",
-                         {"path": path, "address": address, "count": count})
+                         {"analysis_id": aid, "ea": int(address), "count": count})
 
     def fn_infos(self, path: str, address: int) -> dict:
-        return self.call("fn_infos", {"path": path, "address": address})
+        aid, err = self._resolve_aid(path)
+        if err is not None:
+            return err
+        return self.call("fn_infos", {"analysis_id": aid, "ea": int(address)})
 
     def fns_top_list(self, path: str, count: int = 50) -> dict:
-        return self.call("fns_top_list", {"path": path, "count": count})
+        # NOTE: malcat.mcp.py fns_top_list expects {"analysis_id"} only.
+        aid, err = self._resolve_aid(path)
+        if err is not None:
+            return err
+        return self.call("fns_top_list", {"analysis_id": aid})
 
     def fns_search(self, path: str, query: str) -> dict:
         return self.call("fns_search", {"path": path, "query": query})
@@ -139,16 +183,28 @@ class MalcatClient:
         return self.call("script_decompile", {"path": path})
 
     def anomalies_list(self, path: str) -> dict:
-        return self.call("anomalies_list", {"path": path})
+        aid, err = self._resolve_aid(path)
+        if err is not None:
+            return err
+        return self.call("anomalies_list", {"analysis_id": aid})
 
     def yara_list(self, path: str) -> dict:
-        return self.call("yara_list", {"path": path})
+        aid, err = self._resolve_aid(path)
+        if err is not None:
+            return err
+        return self.call("yara_list", {"analysis_id": aid})
 
     def constants_list(self, path: str) -> dict:
-        return self.call("constants_list", {"path": path})
+        aid, err = self._resolve_aid(path)
+        if err is not None:
+            return err
+        return self.call("constants_list", {"analysis_id": aid})
 
     def strings_top_list(self, path: str, count: int = 50) -> dict:
-        return self.call("strings_top_list", {"path": path, "count": count})
+        aid, err = self._resolve_aid(path)
+        if err is not None:
+            return err
+        return self.call("strings_top_list", {"analysis_id": aid})
 
     def strings_search(self, path: str, pattern: str) -> dict:
         return self.call("strings_search", {"path": path, "pattern": pattern})

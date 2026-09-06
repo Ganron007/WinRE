@@ -402,9 +402,29 @@ class ToolRegistry:
 
 
     def _malcat(self, tool: str, args: dict) -> dict:
-        """Malcat MCP via SSH-exec bridge (port is localhost-bound on VM)."""
-        from winre.remote_driver import malcat_remote_call
-        r = malcat_remote_call(tool, args)
+        """Malcat MCP via SSH-exec bridge (port is localhost-bound on VM).
+
+        View tools (fns_top_list, fn_decompile, anomalies_list, yara_list,
+        strings_*) expect {"analysis_id"} — resolved once per sample and
+        cached on the registry.
+        """
+        from winre.remote_driver import malcat_remote_call, malcat_remote_aid
+        if tool in ("fns_top_list", "fn_decompile", "anomalies_list",
+                    "yara_list", "strings_top_list", "strings_search",
+                    "fn_disassemble", "fn_infos", "constants_list"):
+            path = args.get("path") or self.remote_sample
+            if not hasattr(self, "_malcat_aids"):
+                self._malcat_aids = {}
+            aid, err = malcat_remote_aid(path, self._malcat_aids)
+            if err is not None:
+                return err
+            params = {"analysis_id": aid}
+            for k in ("ea", "address", "count", "pattern", "index", "subfile"):
+                if k in args:
+                    params["ea" if k == "address" else k] = args[k]
+            r = malcat_remote_call(tool, params)
+        else:
+            r = malcat_remote_call(tool, args)
         return r.get("result") or {"error": r.get("error")}
 
     def malcat_functions(self, count: int = 10) -> dict:

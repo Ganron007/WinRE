@@ -176,6 +176,10 @@ else:
             if not r.get("ok"):
                 return {"error": (r.get("error") or "")[:120]}
             res = r.get("result") or {}
+            # structuredContent first (view endpoints), then content[].text JSON
+            sc = res.get("structuredContent")
+            if sc:
+                return sc
             txt = ""
             for part in (res.get("content") or []):
                 if isinstance(part, dict) and part.get("type") == "text":
@@ -498,6 +502,36 @@ def malcat_remote_is_up(timeout: int = 20) -> bool:
         return False
     tools = ((r.get("result") or {}).get("tools")) or []
     return len(tools) > 0
+
+
+def malcat_remote_aid(path: str, _cache: dict | None = None) -> tuple[int | None, dict | None]:
+    """Resolve path -> analysis_id via the SSH-exec bridge (cached).
+
+    malcat.mcp.py view tools expect {"analysis_id"}, NOT {"path"}.
+    Returns (analysis_id, error_dict).
+    """
+    cache = _cache if _cache is not None else {}
+    if path in cache:
+        return cache[path], None
+    r = malcat_remote_call("analyse_file", {"path": path})
+    if not r.get("ok"):
+        return None, r
+    res = r.get("result") or {}
+    aid = (res.get("structuredContent") or {}).get("analysis_id")
+    if aid is None:
+        try:
+            for part in (res.get("content") or []):
+                if isinstance(part, dict) and part.get("type") == "text":
+                    import json as _json
+                    aid = (_json.loads(part.get("text", "")) or {}).get("analysis_id")
+                    break
+        except Exception:
+            aid = None
+    if aid is None:
+        return None, {"ok": False, "error": "no analysis_id from analyse_file",
+                      "result": res}
+    cache[path] = aid
+    return aid, None
 
 
 def malcat_installed(cfg: dict | None = None, timeout: int = 30) -> bool:
