@@ -107,30 +107,40 @@ def _quick(sample: Path, pack: EvidencePack) -> dict:
     # Malcat MCP (best-effort; commercial-optional)
     #   not installed  -> skipped, NO failure (free-tools path, Ghidra-primary)
     #   installed down -> failure (real malfunction)
+    # Full triage views (file + anomalies + yara + strings) — same evidence
+    # shape as the remote quick helper. Both paths must match.
     try:
         if not _malcat_installed():
             evidence["malcat"] = {"skipped": "not installed (optional) — "
                                              "Ghidra-primary static path"}
         else:
             from winre.mcp import MalcatClient
-            mc = MalcatClient()
+            mc = MalcatClient(default_timeout=180)
             if mc.is_up():
-                r = mc.analyse_file(str(sample))
-                if r.get("ok"):
-                    # MCP envelope: {"content":[{"type":"text","text":"<json>"}]}
-                    txt = ""
+                def _m(call):
+                    r = call()
+                    if not r.get("ok"):
+                        return {"error": (r.get("error") or "")[:120]}
                     res = r.get("result") or {}
-                    content = res.get("content") or []
-                    for part in content:
+                    sc = res.get("structuredContent")
+                    if sc:
+                        return sc
+                    txt = ""
+                    for part in (res.get("content") or []):
                         if isinstance(part, dict) and part.get("type") == "text":
                             txt = part.get("text", "")
                             break
                     try:
-                        evidence["malcat"] = json.loads(txt)
+                        return json.loads(txt)
                     except json.JSONDecodeError:
-                        evidence["malcat"] = {"raw": txt[:2000]}
-                else:
-                    failures.append(f"malcat:{r.get('error','')}")
+                        return {"raw": txt[:1000]}
+                evidence["malcat"] = {
+                    "file": _m(lambda: mc.analyse_file(str(sample))),
+                    "anomalies": _m(lambda: mc.anomalies_list(str(sample))),
+                    "yara_hits": _m(lambda: mc.yara_list(str(sample))),
+                    "strings": (_m(lambda: mc.strings_top_list(str(sample), 60))
+                                .get("strings") if True else []),
+                }
             else:
                 evidence["malcat"] = {"skipped": "server not running on :9009"}
                 failures.append("malcat:server-down")
@@ -142,20 +152,20 @@ def _quick(sample: Path, pack: EvidencePack) -> dict:
     # quickly (the -q one-shot path can hang on this idasql build; the
     # reliable path is the HTTP server in the deep dive). Ghidra is the
     # deterministic quick-count source; IDA adds cross-check when healthy.
+    # IDA runs EQUALLY: flarevm_ida_query.py auto-creates the .i64 via
+    # idat auto-analysis on first use (1500s budget for packed samples).
     i64 = sample.with_suffix(sample.suffix + ".i64")
-    if i64.is_file():
-        try:
-            ida = _run_sql("ida", sample, "SELECT count(*) FROM funcs", timeout=120)
-            if ida.get("ok"):
-                evidence["ida"] = {"func_count": _first_cell(ida)}
-            else:
-                evidence["ida"] = {"error": ida.get("error", "")[:80],
-                                   "note": "idasql one-shot flaky; use HTTP/deep"}
-        except Exception as e:
-            evidence["ida"] = {"error": str(e)[:80],
-                               "note": "idasql one-shot flaky; use HTTP/deep"}
-    else:
-        evidence["ida"] = {"skipped": "no .i64 yet (create in deep dive)"}
+    try:
+        ida = _run_sql("ida", sample, "SELECT count(*) FROM funcs", timeout=1500)
+        if ida.get("ok"):
+            evidence["ida"] = {"func_count": _first_cell(ida)}
+            if not i64.is_file():
+                # re-check: creation may have landed during the query
+                evidence["ida"]["i64_created"] = True
+        else:
+            evidence["ida"] = {"error": ida.get("error", "")[:200]}
+    except Exception as e:
+        evidence["ida"] = {"error": str(e)[:200]}
 
     # Ghidra SQL (canonical funcs + high-signal imports for YARA)
     ghidra = _run_sql("ghidra", sample, "@funcs")
@@ -168,6 +178,31 @@ def _quick(sample: Path, pack: EvidencePack) -> dict:
     if ghidra_imp.get("ok"):
         rows = ghidra_imp.get("rows") or []
         evidence["ghidra"]["imports"] = [r[0] for r in rows if r][:20]
+
+    # RevAI-parity static tools (VM-side subprocess — same surface as the
+    # remote quick helper). All tolerate absence.
+    try:
+        import subprocess as _sp
+        tools = Path(__file__).resolve().parents[1] / "tools"
+        _sp_out = _sp.run(
+            [__import__("sys").executable,
+             str(tools / "flare_static_tools.py"), "all", str(sample)],
+            capture_output=True, text=True, timeout=2700,
+            encoding="utf-8", errors="replace")
+        try:
+            _st = json.loads(_sp_out.stdout)
+        except json.JSONDecodeError:
+            _st = {}
+        for _k in ("capa", "floss", "diec", "yarascan", "strings",
+                   "pe_import_signals", "xor_string_search"):
+            _v = _st.get(_k)
+            if isinstance(_v, dict):
+                evidence[_k] = _v
+        _pe = _st.get("lief")
+        if isinstance(_pe, dict):
+            evidence["pe"] = _pe
+    except Exception as e:
+        evidence["static_tools_error"] = str(e)[:120]
 
     verdict = "malicious" if evidence.get("malcat", {}).get("yara_hits") else "unknown"
     pack.write("quick", "quick.json", {

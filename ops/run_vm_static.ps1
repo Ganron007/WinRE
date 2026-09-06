@@ -57,46 +57,32 @@ $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($vmCmd))
 
 Write-Host "[run_vm_static] SSH -> $sshTarget : pipeline.py $vmSample"
 Write-Host "[run_vm_static] pipeline is running on the VM (may take several minutes)..."
-$scpArgs = @("-i", $flareKey, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15")
-ssh -i $flareKey -o StrictHostKeyChecking=no -o ConnectTimeout=15 $sshTarget "powershell -NoProfile -EncodedCommand $enc"
+$vmOut = ssh -i $flareKey -o StrictHostKeyChecking=no -o ConnectTimeout=15 $sshTarget "powershell -NoProfile -EncodedCommand $enc" 2>&1 | Out-String
 $rc = $LASTEXITCODE
 Write-Host "[run_vm_static] VM pipeline exit=$rc"
+# The pipeline prints: [winre-pipeline] <sha>... - parse the SHA from output
+$sha = ""
+$m2 = [regex]::Match($vmOut, "winre-pipeline\]\s+([0-9a-f]{64})")
+if ($m2.Success) { $sha = $m2.Groups[1].Value }
 
-if ($PullReports -and $rc -eq 0) {
-    # Get SHA via a simple python one-liner on the VM
-    $shaPy = "import hashlib; print(hashlib.sha256(open(r'$vmSample','rb').read()).hexdigest())"
-    $shaEnc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(
-        "& `"$py`" -c `"$shaPy`""))
-    Write-Host "[run_vm_static] getting SHA..."
-    $shaRaw = ssh -i $flareKey -o StrictHostKeyChecking=no $sshTarget "powershell -NoProfile -EncodedCommand $shaEnc"
-    # Find the 64-hex line
-    $sha = ""
-    foreach ($line in $shaRaw) {
-        $m = [regex]::Match($line, "([0-9a-f]{64})")
-        if ($m.Success) {
-            $sha = $m.Groups[1].Value
-            break
-        }
+if ($PullReports -and $rc -eq 0 -and $sha -and $sha.Length -eq 64) {
+    Write-Host "[run_vm_static] SHA=$sha - pulling report files"
+    $dest = Join-Path $repo "logs" $sha
+    New-Item -ItemType Directory -Force -Path (Join-Path $dest "report") | Out-Null
+    foreach ($f in @("REPORT-TECHNICAL-v3.md", "AUDIT-REPORT.md",
+                     "EVIDENCE-BUNDLE.md", "iocs.json", "META.json")) {
+        scp -i $flareKey -o StrictHostKeyChecking=no `
+            "${sshTarget}:C:/WinRE/logs/$sha/report/$f" `
+            (Join-Path $dest "report\$f") 2>$null | Out-Null
     }
-    if ($sha -and $sha.Length -eq 64) {
-        Write-Host "[run_vm_static] SHA=$sha - pulling report files"
-        $dest = Join-Path $repo "logs" $sha
-        New-Item -ItemType Directory -Force -Path (Join-Path $dest "report") | Out-Null
-        foreach ($f in @("REPORT-TECHNICAL-v3.md", "AUDIT-REPORT.md",
-                         "EVIDENCE-BUNDLE.md", "iocs.json", "META.json")) {
-            scp -i $flareKey -o StrictHostKeyChecking=no `
-                "${sshTarget}:C:/WinRE/logs/$sha/report/$f" `
-                (Join-Path $dest "report\$f") 2>$null | Out-Null
-        }
-        foreach ($f in @("audit.json", "stage_trace.json")) {
-            scp -i $flareKey -o StrictHostKeyChecking=no `
-                "${sshTarget}:C:/WinRE/logs/$sha/$f" `
-                (Join-Path $dest $f) 2>$null | Out-Null
-        }
-        Write-Host "[run_vm_static] report files pulled to $dest (no binary artifacts)"
-    } else {
-        Write-Host "[run_vm_static] WARN could not get SHA - report pull skipped"
+    foreach ($f in @("audit.json", "stage_trace.json")) {
+        scp -i $flareKey -o StrictHostKeyChecking=no `
+            "${sshTarget}:C:/WinRE/logs/$sha/$f" `
+            (Join-Path $dest $f) 2>$null | Out-Null
     }
+    Write-Host "[run_vm_static] report files pulled to $dest (no binary artifacts)"
+} elseif ($PullReports) {
+    Write-Host "[run_vm_static] WARN report pull skipped (rc=$rc sha set=$($sha.Length -eq 64))"
 }
 
 if ($rc -ne 0) { exit 1 } else { exit 0 }
