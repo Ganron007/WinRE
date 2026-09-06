@@ -216,13 +216,33 @@ def yarascan(sample: str, timeout: int = 600) -> dict:
     if not yr:
         return _skipped("yara-x")
     rules_dir = Path(YARA_RULES_DIR)
-    if not rules_dir.is_dir() or not any(rules_dir.rglob("*.yar")):
+    yar_files = sorted(f for f in (rules_dir.glob("*.yar") if rules_dir.is_dir() else [])
+                       if not f.name.startswith("_bundle"))
+    if not yar_files:
         return {"ok": True, "tool": "yarascan", "hits": [],
                 "skipped": "no rules staged in C:\\Tools\\yara-rules (operator adds curated sets)"}
-    rc, out, err = _run([yr, "scan", "-f", "text-only", str(rules_dir), sample], timeout)
-    hits = [l for l in (out or "").splitlines() if l.strip()]
+    # Scan per-file: one bad rule must never kill the whole batch.
+    # Self-matches (rule generated from this sample) are reported as-is;
+    # the campaign report notes the circularity.
+    hits: list[str] = []
+    bad = 0
+    for rf in yar_files:
+        rc, out, err = _run([yr, "scan", str(rf), sample],
+                            min(120, timeout))
+        if rc != 0:
+            bad += 1
+            continue
+        for line in (out or "").splitlines():
+            line = line.strip()
+            if line and line not in hits:
+                hits.append(line)
+                if len(hits) >= 40:
+                    break
+        if len(hits) >= 40:
+            break
     return {"ok": True, "tool": "yarascan", "hits": hits[:40],
-            "total": len(hits)}
+            "total": len(hits), "rules_scanned": len(yar_files),
+            "rules_failed": bad}
 
 
 def strings(sample: str, timeout: int = 300) -> dict:
@@ -463,22 +483,63 @@ def olevba_analyze(sample: str, timeout: int = 120) -> dict:
 
 
 def peepdf_analyze(sample: str, timeout: int = 120) -> dict:
-    """PDF analysis (peepdf): JS, objects, embedded files."""
+    """PDF analysis: pdfid element counts/flags + pypdf JS/object extraction.
+    (jesparza peepdf.py is Python-2-only; this gives the same evidence —
+    JS markers, suspicious objects, embedded files — via maintained tools.)"""
     magic = Path(sample).read_bytes()[:5] if Path(sample).is_file() else b""
     if magic != b"%PDF-":
         return {"ok": True, "tool": "peepdf", "is_pdf": False}
-    import importlib.util
-    if importlib.util.find_spec("peepdf") is None:
-        return _skipped("peepdf", "peepdf not installed")
-    exe = Path(PY).parent / "Scripts" / "peepdf.exe"
-    cmd = ([str(exe), "-f", "-l", "all", sample] if exe.is_file()
-           else [PY, "-m", "peepdf.peepdf", "-f", "-l", "all", sample])
-    rc, out, err = _run(cmd, timeout)
-    text = (out or "")[:8000]
-    js = [l.strip()[:200] for l in text.splitlines()
-          if "javascript" in l.lower() or "eval" in l.lower()][:20]
-    return {"ok": rc == 0, "tool": "peepdf", "is_pdf": True,
-            "analysis_head": text[:3000], "js_markers": js}
+    flags: list[str] = []
+    elements: dict = {}
+    # 1. pdfid.py (DidierStevens, Py3) — element counts
+    pdfid = Path(r"C:\Tools\peepdf\pdfid.py")
+    if pdfid.is_file():
+        rc, out, err = _run([PY, str(pdfid), sample], timeout)
+        # pdfid format: " /Name              <count>" (whitespace, no colon)
+        for line in (out or "").splitlines():
+            s = line.strip()
+            if s.startswith("/") and " " in s:
+                parts = s.split()
+                if len(parts) >= 2:
+                    try:
+                        elements[parts[0]] = int(parts[-1])
+                    except ValueError:
+                        pass
+        for name, flag in (("/JS", "JavaScript"), ("/JavaScript", "JavaScript"),
+                           ("/OpenAction", "OpenAction"), ("/Launch", "Launch"),
+                           ("/EmbeddedFile", "EmbeddedFile"),
+                           ("/AcroForm", "AcroForm"), ("/RichMedia", "RichMedia"),
+                           ("/ObjStm", "ObjStm"), ("/XFA", "XFA")):
+            if elements.get(name, 0) > 0:
+                flags.append(flag)
+    # 2. pypdf — JS + embedded files (best-effort)
+    js_markers: list[str] = []
+    embedded: list[str] = []
+    try:
+        import importlib.util
+        if importlib.util.find_spec("pypdf") is not None:
+            from pypdf import PdfReader
+            reader = PdfReader(sample)
+            for i, page in enumerate(reader.pages[:10]):
+                try:
+                    for annot in (page.get("/Annots") or [])[:10]:
+                        o = annot.get_object()
+                        js = o.get("/JS")
+                        if js:
+                            js_markers.append(str(js)[:200])
+                except Exception:
+                    continue
+            try:
+                for name in (reader.attachments or {})[:10]:
+                    embedded.append(str(name)[:120])
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return {"ok": True, "tool": "peepdf", "is_pdf": True,
+            "elements": elements, "flags": flags,
+            "is_suspicious": bool(flags or js_markers),
+            "js_markers": js_markers[:10], "embedded": embedded[:10]}
 
 
 def speakeasy_emulate(sample: str, timeout: int = 900) -> dict:
@@ -672,12 +733,12 @@ def dotnet_analyze(sample: str, timeout: int = 600) -> dict:
         pass
     ilspy = Path.home() / ".dotnet" / "tools" / "ilspycmd.exe"
     if ilspy.is_file():
-        rc, il_out, err = _run([str(ilspy), sample, "-ilcode", "true"], timeout)
-        il = (il_out or "").splitlines()
-        out["il_total_lines"] = len(il)
-        out["il_excerpt"] = "\n".join(il[:120])
-        rc2, cs_out, _ = _run([str(ilspy), sample, "-lc", "10"], timeout)
-        out["csharp_head"] = (cs_out or "")[:3000]
+        # v11 System.CommandLine: bare assembly decompiles to stdout
+        rc, il_out, err = _run([str(ilspy), sample], timeout)
+        lines = (il_out or "").splitlines()
+        out["il_total_lines"] = len(lines)
+        out["il_excerpt"] = "\n".join(lines[:120])
+        out["csharp_head"] = "\n".join(lines[:80])[:3000]
     return {"ok": True, "tool": "dotnet_analyze", **out}
 
 
@@ -697,11 +758,24 @@ def z3_solve(sample: str, timeout: int = 120) -> dict:
 
 
 def angr_analyze(sample: str, timeout: int = 300) -> dict:
-    """CFF dispatcher analysis via the deobfuscation extension (RevAI port).
-    Windows angr is functional but heavier — honest degradation applies."""
+    """CFF dispatcher analysis (angr via deobfuscation extension, RevAI port).
+    Windows angr is functional but heavier — honest degradation applies.
+    Env-overrides point the vendored extension at Windows paths (the
+    extension itself is untouched platform code)."""
+    import os as _os
     ext = Path(__file__).resolve().parents[1] / "tools" / "deobfuscation"
     if not (ext / "invoke_z3_or_angr.py").is_file():
         return _skipped("angr_analyze", "deobfuscation extension missing")
+    _os.environ["CFF_DEFLATTEN_PY"] = str(
+        Path(__file__).resolve().parent / "deobfuscation" / "cff_deflatten.py")
+    _os.environ["ANGR_PYTHON"] = sys.executable
+    gh = None
+    for g in Path(r"C:\Tools").glob("ghidra_*_PUBLIC"):
+        if (g / "support" / "analyzeHeadless.bat").is_file():
+            gh = g
+            break
+    if gh:
+        _os.environ["GHIDRA_ANALYZE_HEADLESS"] = str(gh / "support" / "analyzeHeadless.bat")
     sys.path.insert(0, str(ext))
     try:
         import invoke_z3_or_angr as iza  # type: ignore
@@ -741,12 +815,17 @@ def ghidra_decompile(sample: str, function_addr: str = "",
         return {"ok": False, "error": f"headless decompile timeout {timeout}s",
                 "tool": "ghidra_decompile"}
     blob = (p.stdout or "")
-    start = blob.find("{")
+    # DecompileFunc.java emits {"function": ...} — Ghidra INFO lines may
+    # appear before AND after it. raw_decode parses the first complete
+    # object and ignores trailing noise (json.loads would choke on it).
+    start = blob.find('{"function"')
+    if start < 0:
+        start = blob.rfind("{")
     if start < 0:
         return {"ok": False, "error": "no JSON from post-script",
                 "tail": blob[-300:], "tool": "ghidra_decompile"}
     try:
-        d = json.loads(blob[start:])
+        d, _ = json.JSONDecoder().raw_decode(blob[start:])
         return {"ok": True, "tool": "ghidra_decompile", **d}
     except json.JSONDecodeError as e:
         return {"ok": False, "error": f"parse: {e}", "tail": blob[start:start + 300],

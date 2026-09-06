@@ -97,6 +97,31 @@ except json.JSONDecodeError:
 '''
 
 
+_REMOTE_GHDEC_HELPER = r'''
+"""Remote Ghidra-decompile helper — runs on FlareVM via scp.
+
+Usage: python _remote_ghdec_helper.py <b64_sample> <b64_func>
+Prints JSON: {"ghidra_decompile": {...}}. Args are base64 (no quoting
+issues through SSH/powershell) — same pattern as _remote_sql_helper.
+"""
+import base64
+import json
+import sys
+from pathlib import Path
+
+sample = base64.b64decode(sys.argv[1]).decode()
+func = base64.b64decode(sys.argv[2]).decode()
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+import flare_static_tools as fst
+try:
+    out = fst.ghidra_decompile(sample, func)
+except Exception as e:
+    out = {"ok": False, "error": str(e)[:250]}
+print(json.dumps({"ghidra_decompile": out}, default=str))
+'''
+
+
+
 class ToolRegistry:
     """Deterministic tool calls the agent may make (static phase).
 
@@ -129,7 +154,8 @@ class ToolRegistry:
 
     # --- static tools ------------------------------------------------------
 
-    def _run_remote_py(self, helper_name: str, *args: str, timeout: int = 900) -> dict:
+    def _run_remote_py(self, helper_name: str, *args: str, timeout: int = 900,
+                       helper_src: str | None = None) -> dict:
         """Run a scp'd helper .py on the VM and parse its JSON stdout.
 
         Args are base64-encoded (single safe tokens) so spaces/quotes/parens
@@ -137,9 +163,9 @@ class ToolRegistry:
         decodes them back.
         """
         import base64
-        helper_src = _REMOTE_SQL_HELPER
+        src = helper_src if helper_src is not None else _REMOTE_SQL_HELPER
         local = REPO / "winre" / f"_{helper_name}.py"
-        local.write_text(helper_src, encoding="utf-8")
+        local.write_text(src, encoding="utf-8")
         remote = rf'{self.cfg["remote_pipeline"]}\winre\_{helper_name}.py'
         try:
             remote_driver.scp_to(self.cfg, local, remote.replace("\\", "/"))
@@ -344,30 +370,35 @@ class ToolRegistry:
 
     def ghidra_decompile(self, function_addr: str = "") -> dict:
         """Ghidra decompile one function (headless post-script; address,
-        FUN_ name, or 'entry')."""
-        import base64
-        b64a = base64.b64encode((function_addr or "entry").encode()).decode()
-        b64s = base64.b64encode(self.remote_sample.encode()).decode()
-        code = (
-            "import sys, json, base64\n"
-            "sys.path.insert(0, r'C:\\WinRE\\tools')\n"
-            "import flare_static_tools as fst\n"
-            f"sample = base64.b64decode('{b64s}').decode()\n"
-            f"fa = base64.b64decode('{b64a}').decode()\n"
-            "print(json.dumps({'ghidra_decompile': fst.ghidra_decompile(sample, fa)}))\n"
-        )
-        b64c = base64.b64encode(code.encode()).decode()
-        py = r"C:\Python313\python.exe"
-        cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} '
-               f'-c "import base64; exec(base64.b64decode(\'{b64c}\').decode())" 2>&1"')
-        r = remote_driver.ssh_run(self.cfg, cmd, timeout=2400)
-        if r.returncode != 0:
-            return {"error": (r.stderr or r.stdout)[-250:]}
-        try:
-            out = json.loads(r.stdout)
-            return out.get("ghidra_decompile") or out
-        except json.JSONDecodeError:
-            return {"error": f"non-JSON: {(r.stdout or '')[-200:]}"}
+        FUN_ name, or 'entry'). Uses the scp'd helper pattern (same as
+        _remote_sql_helper) — no inline code over SSH."""
+        if self.mode == "local":
+            import subprocess as _sp
+            tools = Path(r"C:\WinRE\tools")
+            code = (
+                "import sys, json\n"
+                "sys.path.insert(0, r'C:\\WinRE\\tools')\n"
+                "import flare_static_tools as fst\n"
+                f"print(json.dumps({{'ghidra_decompile': fst.ghidra_decompile(r'{self.remote_sample}', "
+                f"'{(function_addr or 'entry').replace(chr(39), '')}')}}))\n"
+            )
+            helper = REPO / "winre" / "_local_ghdec_helper.py"
+            helper.write_text(code, encoding="utf-8")
+            p = _sp.run([sys.executable, str(helper)], capture_output=True,
+                        text=True, timeout=2400,
+                        encoding="utf-8", errors="replace")
+            if p.returncode != 0:
+                return {"error": (p.stderr or p.stdout)[-250:]}
+            try:
+                return json.loads(p.stdout).get("ghidra_decompile") or {}
+            except json.JSONDecodeError:
+                return {"error": f"non-JSON: {(p.stdout or '')[-200:]}"}
+        out = self._run_remote_py("_remote_ghdec_helper", self.remote_sample,
+                                  function_addr or "entry", timeout=2400,
+                                  helper_src=_REMOTE_GHDEC_HELPER)
+        if "error" in out:
+            return out
+        return out.get("ghidra_decompile") or out
 
     def ida_query(self, sql: str) -> dict:
         """SQL against the IDA database on the VM (funcs/imports/strings).
