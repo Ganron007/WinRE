@@ -265,18 +265,23 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
 
 
 def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False) -> dict:
-    """Agentic deep dive via MCP — driven by the local LLM.
+    """LangGraph agentic deep dive — same engine as the control plane.
 
-    Best-effort and fail-open: if the LLM or MCP servers are down, we record
-    what we could (x64dbg OEP/dump if up) and mark the stage with a fallback
-    flag so the audit gate is honest about it.
+    When running on the FlareVM, the agent calls tools via subprocess
+    (local mode — no SSH hop). Same 24-tool registry, same LLM, same
+    output contract as remote_deep.
+
+    Best-effort fail-open: if the LLM is unavailable, falls back to
+    deterministic_fallback (honest, not green).
     """
     t0 = time.time()
-    out: dict = {}
     fallback = False
     failures: list[str] = []
 
-    # 1. MCP health probe
+    # build the pack dict for the reporting chain (same shape as remote_deep)
+    out: dict = {}
+
+    # MCP health probe (local — Malcat on :9009, x64dbg on :9094)
     mcp: dict = {}
     try:
         from winre.mcp import MalcatClient, X64DbgClient, WinDbgMCPClient
@@ -287,50 +292,41 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False) 
         failures.append(f"mcp-probe:{e}")
     out["mcp"] = mcp
 
-    # 2. x64dbg OEP/dump (best-effort, same as orchestrator does post-detonation)
+    # LangGraph agent — local mode (subprocess tools, no SSH)
+    agent_result = None
     try:
-        from winre.mcp import X64DbgClient
-        xc = X64DbgClient()
-        if xc.is_up():
-            lb = xc.load_binary(str(sample))
-            mod = sample.stem
-            detect = xc.detect_oep(mod)
-            oep = None
-            r = detect.get("result") or {}
-            if isinstance(r, dict):
-                oep = r.get("oep") or r.get("OEP")
-            out["x64dbg"] = {"loaded": lb.get("ok"), "oep": oep,
-                             "detect_ok": detect.get("ok")}
-    except Exception as e:
-        failures.append(f"x64dbg:{e}")
-        out["x64dbg"] = {"error": str(e)}
-
-    # 3. Malcat deep (decompile top function if available)
-    try:
-        from winre.mcp import MalcatClient
-        mc = MalcatClient()
-        if mc.is_up():
-            fns = mc.fns_top_list(str(sample), count=5)
-            out["malcat_top_fns"] = fns.get("result")
-    except Exception as e:
-        failures.append(f"malcat:{e}")
-
-    # 4. LLM interpretation (source-tagged). Local endpoint only.
-    llm_ok = False
-    try:
-        if not dry_llm and llm_client.available():
-            prompt = _deep_prompt(sample, quick, out)
-            text = llm_client.complete(prompt)
-            out["llm_analysis"] = {"source": "llm_judge", "text": text[:8000]}
-            llm_ok = True
-    except Exception as e:
-        failures.append(f"llm:{e}")
-    if not llm_ok:
-        fallback = True
-        out["llm_analysis"] = {
-            "source": "deterministic_fallback",
-            "text": "LLM unavailable; deep dive is evidence-only",
+        from .agentic import run_langgraph_deep_dive, TOOL_NAMES
+        agent_result = run_langgraph_deep_dive(
+            sample.name, pack.root.name,
+            max_steps=10, dry=dry_llm,
+            mode="local")
+        history = []
+        for h in (agent_result.get("history") or [])[:80]:
+            entry = {"step": h.get("step"), "tool": h.get("tool"),
+                     "args": h.get("args"), "error": h.get("error"),
+                     "reason": h.get("reason")}
+            res = h.get("result")
+            if isinstance(res, dict):
+                entry["result"] = res
+            history.append(entry)
+        out["agent"] = {
+            "source": agent_result.get("source"),
+            "verdict": agent_result.get("verdict"),
+            "llm_analysis": agent_result.get("llm_analysis"),
+            "tool_calls": len(agent_result.get("history") or []),
+            "history": history,
         }
+    except Exception as e:
+        failures.append(f"agent:{e}")
+        agent_result = None
+
+    if agent_result and agent_result.get("source") == "llm_judge":
+        fallback = False
+    else:
+        fallback = True
+        if not out.get("agent"):
+            out["agent"] = {"source": "deterministic_fallback",
+                            "text": "agent unavailable on this host"}
 
     pack.write("deep", "deep.json", out)
     pack.write("deep", "META.json", stage_result(
@@ -338,10 +334,8 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False) 
         summary=f"mcp={mcp} fallback={fallback}",
         fallback=fallback, tool_failures=failures,
         elapsed_s=round(time.time() - t0, 1)))
-    # surface the agent block so _report can source-tag correctly
     return {"ok": True, "fallback": fallback, "failures": failures, "mcp": mcp,
-            "agent": out.get("agent"), "llm_analysis": out.get("llm_analysis"),
-            "x64dbg": out.get("x64dbg")}
+            "agent": out.get("agent"), "llm_analysis": out.get("llm_analysis")}
 
 
 def _deep_prompt(sample: Path, quick: dict, deep_evidence: dict) -> str:

@@ -52,7 +52,7 @@ $vmSample = "C:\samples\$SampleName"
 # Build the VM command
 $dryFlag = ""
 if ($DryLlm) { $dryFlag = " --dry-llm" }
-$vmCmd = "`$ErrorActionPreference = 'Continue'; & `"$py`" C:\WinRE\winre\pipeline.py `"$vmSample`" --max-seconds $MaxSeconds$dryFlag 2>&1"
+$vmCmd = "`$ErrorActionPreference = 'Continue'; Set-Location C:\WinRE; & `"$py`" -m winre.pipeline `"$vmSample`" --max-seconds $MaxSeconds$dryFlag 2>&1"
 $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($vmCmd))
 
 Write-Host "[run_vm_static] SSH -> $sshTarget : pipeline.py $vmSample"
@@ -79,7 +79,7 @@ if ($PullReports -and $rc -eq 0) {
         }
     }
     if ($sha -and $sha.Length -eq 64) {
-        Write-Host "[run_vm_static] SHA=$sha — pulling report files"
+        Write-Host "[run_vm_static] SHA=$sha - pulling report files"
         $dest = Join-Path $repo "logs" $sha
         New-Item -ItemType Directory -Force -Path (Join-Path $dest "report") | Out-Null
         foreach ($f in @("REPORT-TECHNICAL-v3.md", "AUDIT-REPORT.md",
@@ -95,7 +95,7 @@ if ($PullReports -and $rc -eq 0) {
         }
         Write-Host "[run_vm_static] report files pulled to $dest (no binary artifacts)"
     } else {
-        Write-Host "[run_vm_static] WARN could not get SHA — report pull skipped"
+        Write-Host "[run_vm_static] WARN could not get SHA - report pull skipped"
     }
 }
 

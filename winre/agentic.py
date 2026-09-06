@@ -100,15 +100,20 @@ except json.JSONDecodeError:
 class ToolRegistry:
     """Deterministic tool calls the agent may make (static phase).
 
-    ghidra_query  — SQL over SSH to the VM's flare_ghidra_sql.py
-    ida_query     — SQL over SSH to the VM's flarevm_ida_query.py (if .i64)
-    malcat_analyze— Malcat MCP over HTTP (:9009) — analyse/decompile/etc
+    mode="local"  — running ON the FlareVM; tools execute via subprocess
+                    (no SSH hop). Malcat MCP at 127.0.0.1:9009.
+    mode="remote" — running on the control plane; tools execute via
+                    SSH-exec / scp'd helpers (default).
+
+    Both modes produce the SAME evidence — the transport differs only.
     """
 
-    def __init__(self, sample_name: str, sha: str, cfg: dict | None = None):
+    def __init__(self, sample_name: str, sha: str, cfg: dict | None = None,
+                 mode: str = "remote"):
         self.sample_name = sample_name
         self.sha = sha
         self.cfg = cfg or remote_driver.flare_cfg()
+        self.mode = mode  # "local" = VM-side subprocess; "remote" = SSH
         self.remote_sample = rf"C:\samples\{sample_name}"
 
     def call(self, name: str, args: dict) -> dict:
@@ -155,8 +160,20 @@ class ToolRegistry:
 
     def ghidra_query(self, sql: str, max_rows: int = 25) -> dict:
         """SQL against the Ghidra tables on the VM (funcs/strings/imports)."""
-        out = self._run_remote_py("_remote_sql_helper", "ghidra",
-                                  self.remote_sample, sql)
+        if self.mode == "local":
+            import subprocess as _sp
+            tools = Path(r"C:\WinRE\tools")
+            p = _sp.run([sys.executable, str(tools / "flare_ghidra_sql.py"),
+                         "query", sql, "--file", self.remote_sample, "--json"],
+                        capture_output=True, text=True, timeout=900,
+                        encoding="utf-8", errors="replace")
+            try:
+                out = json.loads(p.stdout)
+            except json.JSONDecodeError:
+                out = {"ok": False, "error": (p.stderr or p.stdout)[-300:]}
+        else:
+            out = self._run_remote_py("_remote_sql_helper", "ghidra",
+                                      self.remote_sample, sql)
         if isinstance(out, dict) and out.get("ok") is not None:
             rows = out.get("rows") or []
             if max_rows and len(rows) > max_rows:
@@ -165,7 +182,14 @@ class ToolRegistry:
         return out
 
     def malcat_analyze(self, path: str | None = None) -> dict:
-        """Malcat analysis (:9009, localhost-bound on VM — SSH-exec bridge)."""
+        """Malcat analysis (:9009, localhost-bound on VM)."""
+        if self.mode == "local":
+            from winre.mcp import MalcatClient
+            mc = MalcatClient()
+            r = mc.analyse_file(path or self.remote_sample)
+            if not r.get("ok"):
+                return {"error": r.get("error")}
+            return r.get("result") or {}
         try:
             return self._malcat("analyse_file",
                                 {"path": path or self.remote_sample})
@@ -175,10 +199,30 @@ class ToolRegistry:
     # --- RevAI-parity static evidence tools (free surface) -----------------
 
     def _vm_tool(self, tool: str, timeout: int = 1200) -> dict:
-        """Run tools/flare_static_tools.py <tool> on the VM (scp-synced)."""
+        """Run tools/flare_static_tools.py <tool> on the sample.
+
+        mode="local": subprocess directly (we ARE on the FlareVM — no SSH).
+        mode="remote": SSH-exec to the VM.
+        Both produce the same JSON — transport differs only.
+        """
+        import subprocess as _sp
+        tools_dir = r"C:\WinRE\tools"
+        if self.mode == "local":
+            try:
+                p = _sp.run([sys.executable, tools_dir + r"\flare_static_tools.py",
+                             tool, self.remote_sample],
+                            capture_output=True, text=True, timeout=timeout,
+                            encoding="utf-8", errors="replace")
+                if p.returncode != 0:
+                    return {"error": (p.stderr or p.stdout)[-250:]}
+                out = json.loads(p.stdout)
+                return out.get(tool) or {"error": "no tool payload"}
+            except Exception as e:
+                return {"error": str(e)[:250]}
+        # remote mode: SSH-exec
         py = r"C:\Python313\python.exe"
         cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} '
-               f'{self.cfg["remote_pipeline"]}\\tools\\flare_static_tools.py '
+               f'{tools_dir}\\flare_static_tools.py '
                f'{tool} "{self.remote_sample}" 2>&1"')
         r = remote_driver.ssh_run(self.cfg, cmd, timeout=timeout)
         if r.returncode != 0:
@@ -329,6 +373,24 @@ class ToolRegistry:
         """SQL against the IDA database on the VM (funcs/imports/strings).
         Skips honestly when no .i64 exists yet (idat analysis is a deep-stage
         pre-step; running it here burns the agent's budget)."""
+        if self.mode == "local":
+            import subprocess as _sp
+            import os as _os
+            i64 = Path(self.remote_sample).with_suffix(
+                Path(self.remote_sample).suffix + ".i64")
+            if not i64.is_file():
+                return {"skipped": "no .i64 on VM yet",
+                        "hint": "use ghidra_query / ghidra_decompile instead"}
+            tools = Path(r"C:\WinRE\tools")
+            p = _sp.run([sys.executable, str(tools / "flarevm_ida_query.py"),
+                         self.remote_sample, sql, "--json"],
+                        capture_output=True, text=True, timeout=600,
+                        encoding="utf-8", errors="replace")
+            try:
+                return json.loads(p.stdout)
+            except json.JSONDecodeError:
+                return {"error": (p.stderr or p.stdout)[-300:]}
+        # remote mode: SSH existence check + scp'd helper
         r = remote_driver.ssh_run(self.cfg, f'powershell -NoProfile -Command "Test-Path '
                                   f"'C:\\samples\\{Path(self.remote_sample).name}.i64'\"",
                                   timeout=30)
@@ -347,6 +409,13 @@ class ToolRegistry:
 
     def malcat_functions(self, count: int = 10) -> dict:
         """Top-N most interesting functions (Malcat heuristics)."""
+        if self.mode == "local":
+            from winre.mcp import MalcatClient
+            mc = MalcatClient()
+            r = mc.fns_top_list(self.remote_sample, count=count)
+            if not r.get("ok"):
+                return {"error": r.get("error")}
+            return r.get("result") or {}
         try:
             return self._malcat("fns_top_list",
                                 {"path": self.remote_sample, "count": count})
@@ -355,6 +424,13 @@ class ToolRegistry:
 
     def malcat_decompile(self, address: int) -> dict:
         """Decompile one function by address (Malcat MCP)."""
+        if self.mode == "local":
+            from winre.mcp import MalcatClient
+            mc = MalcatClient()
+            r = mc.fn_decompile(self.remote_sample, address=address)
+            if not r.get("ok"):
+                return {"error": r.get("error")}
+            return r.get("result") or {}
         try:
             return self._malcat("fn_decompile",
                                 {"path": self.remote_sample,
@@ -525,7 +601,8 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
                             log_dir: Path | None = None,
                             dry: bool = False,
                             dynamic: bool = False,
-                            available_tools: "list[str] | None" = None) -> dict:
+                            available_tools: "list[str] | None" = None,
+                            mode: str = "remote") -> dict:
     """Run the LangGraph ReAct agent over the static toolset.
 
     available_tools: optional subset filter (commercial-optional tools are
@@ -544,7 +621,7 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
     from langchain_core.messages import HumanMessage
 
     cfg = remote_driver.flare_cfg()
-    registry = ToolRegistry(sample_name, sha, cfg)
+    registry = ToolRegistry(sample_name, sha, cfg, mode=mode)
     history: list[dict] = []
     findings: dict[str, Any] = {}
     state = {"calls": 0, "redundant": 0, "seen": set()}
