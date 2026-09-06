@@ -868,23 +868,51 @@ to your final answer immediately.
         return {"verdict": "unknown", "source": "deterministic_fallback",
                 "history": history, "llm_analysis": f"agent error: {e}"}
 
-    # parse final flat JSON from last AI message
+    # parse final flat JSON from AI messages (newest first). Models wrap
+    # verdicts in prose/fences, so try every {...} candidate, not just the
+    # first-to-last span.
+    import re as _re
     verdict = None
     llm_text = ""
     for msg in reversed(result.get("messages") or []):
         content = getattr(msg, "content", None)
-        if isinstance(content, str) and content.strip():
-            llm_text = content.strip()
+        if isinstance(content, list):
+            # tool-call content blocks — join text parts
+            content = " ".join(
+                str(p.get("text", "")) for p in content
+                if isinstance(p, dict) and p.get("type") == "text")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        if not llm_text and getattr(msg, "type", "") != "human":
+            llm_text = content.strip()[:8000]
+        # strip code fences, then try each balanced {...} span
+        text = _re.sub(r"```(?:json)?", "", content)
+        for m in _re.finditer(r"\{[^{}]*\"verdict\"[^{}]*\}", text,
+                              _re.IGNORECASE | _re.DOTALL):
             try:
-                start = content.find("{")
-                end = content.rfind("}")
-                if start >= 0 and end > start:
-                    data = json.loads(content[start:end + 1])
-                    if isinstance(data, dict) and data.get("verdict"):
-                        verdict = data
-                        break
+                data = json.loads(m.group(0))
             except Exception:
                 continue
+            if isinstance(data, dict):
+                v = data.get("verdict") or data.get("Verdict")
+                if isinstance(v, str) and v.strip():
+                    verdict = data
+                    llm_text = content.strip()[:8000]
+                    break
+        if verdict is not None:
+            break
+        # fallback: first-to-last span (original behavior)
+        try:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                data = json.loads(text[start:end + 1])
+                if isinstance(data, dict) and data.get("verdict"):
+                    verdict = data
+                    llm_text = content.strip()[:8000]
+                    break
+        except Exception:
+            continue
     if verdict is None:
         return {"verdict": "unknown", "source": "deterministic_fallback",
                 "history": history, "llm_analysis": llm_text[:4000]}
