@@ -334,7 +334,7 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False) 
         agent_result = run_langgraph_deep_dive(
             sample.name, pack.root.name,
             max_steps=10, dry=dry_llm,
-            mode="local")
+            mode="local", quick=quick)
         history = []
         for h in (agent_result.get("history") or [])[:80]:
             entry = {"step": h.get("step"), "tool": h.get("tool"),

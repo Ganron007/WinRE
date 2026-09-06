@@ -617,10 +617,12 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
         names = list(TOOL_NAMES)
         if not malcat_present:
             names = [n for n in names if not n.startswith("malcat_")]
+        quick_ev = pack.read("quick", "quick.json")
         agent_result = run_langgraph_deep_dive(sample_name, sha or sample_name,
                                                max_steps=10, dry=dry_llm,
                                                dynamic=dynamic,
-                                               available_tools=names)
+                                               available_tools=names,
+                                               quick=quick_ev)
         history = []
         for h in (agent_result.get("history") or [])[:80]:
             entry = {"step": h.get("step"), "tool": h.get("tool"),

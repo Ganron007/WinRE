@@ -647,17 +647,68 @@ def _truncate(s: str, n: int) -> str:
     return s if len(s) <= n else s[:n] + f"... (truncated {len(s) - n} chars)"
 
 
+def _quick_brief(quick: dict | None) -> str:
+    """Compact quick-evidence summary for the agent's opening message.
+
+    The agent still verifies everything via tools (nothing is trusted
+    blindly) — this just saves ~3 turns of re-discovery. Mirrors RevAI's
+    session-context injection (source_decisions from intake).
+    """
+    if not isinstance(quick, dict):
+        return ""
+    ev = quick.get("evidence") or {}
+    parts = []
+    gh = ev.get("ghidra") or {}
+    if gh.get("func_rows") is not None:
+        parts.append(f"Ghidra funcs={gh.get('func_rows')}")
+    ida = ev.get("ida") or {}
+    if ida.get("func_count") is not None:
+        parts.append(f"IDA funcs={ida.get('func_count')}")
+    mc = ev.get("malcat") or {}
+    f = mc.get("file") or {}
+    if f.get("entropy") is not None:
+        parts.append(f"Malcat entropy={f.get('entropy')}")
+    if mc.get("anomalies"):
+        an = mc["anomalies"]
+        names = [a.get("name", "?") for a in an[:4]] if isinstance(an, list) else []
+        parts.append(f"Malcat anomalies={len(an) if isinstance(an, list) else '?'}"
+                     + (f" ({', '.join(names)})" if names else ""))
+    if mc.get("yara_hits"):
+        yh = mc["yara_hits"]
+        parts.append(f"Malcat yara_hits={len(yh) if isinstance(yh, list) else yh}")
+    capa = ev.get("capa") or {}
+    caps = [c.get("name") for c in (capa.get("capabilities") or [])][:5]
+    if caps:
+        parts.append("capa: " + ", ".join(caps))
+    pe = ev.get("pe") or {}
+    if pe.get("signed") is not None:
+        parts.append(f"signed={pe.get('signed')}")
+    fl = ev.get("floss") or {}
+    if fl.get("total_decoded") is not None:
+        parts.append(f"floss decoded={fl.get('total_decoded')}")
+    dc = ev.get("diec") or {}
+    if dc.get("detects"):
+        parts.append("diec: " + ", ".join(str(d) for d in dc["detects"][:3]))
+    if not parts:
+        return ""
+    return "Quick triage already found: " + "; ".join(parts) + ". "
+
+
 def run_langgraph_deep_dive(sample_name: str, sha: str, *,
                             max_steps: int = 10,
                             log_dir: Path | None = None,
                             dry: bool = False,
                             dynamic: bool = False,
                             available_tools: "list[str] | None" = None,
-                            mode: str = "remote") -> dict:
+                            mode: str = "remote",
+                            quick: dict | None = None) -> dict:
     """Run the LangGraph ReAct agent over the static toolset.
 
     available_tools: optional subset filter (commercial-optional tools are
     stripped by the caller when absent on the VM, e.g. Malcat).
+
+    quick: optional quick-stage dict — a compact brief is injected into the
+    opening message so the agent verifies rather than re-discovers.
 
     Set dynamic=True to also expose the bounded x64dbg debug-loop tools
     (oep/wpm_dump/crypt_dump/unpack). They run inside the VM snapshot and
@@ -806,10 +857,11 @@ to your final answer immediately.
     agent = create_react_agent(llm, tools=tools, prompt=system_prompt)
     recursion_limit = max(16, int(max_steps) * 2 + 6)
     try:
+        brief = _quick_brief(quick)
         result = agent.invoke(
             {"messages": [HumanMessage(content=(
-                f"Analyze sample {sha}. Use SQL + Malcat to deepen, then produce "
-                "the final flat JSON verdict."))]},
+                f"Analyze sample {sha}. {brief}Use SQL + Malcat to deepen, "
+                "then produce the final flat JSON verdict."))]},
             config={"recursion_limit": recursion_limit},
         )
     except Exception as e:
