@@ -87,6 +87,15 @@ if ($PullReports -and $rc -eq 0 -and $sha -and $sha.Length -eq 64) {
             "${sshTarget}:C:/WinRE/logs/$sha/$Mode/$f" `
             (Join-Path $sect $f) 2>$null | Out-Null
     }
+    # dynamic summaries when a --dynamic run landed (bulk pcap/csv stay on VM)
+    New-Item -ItemType Directory -Force -Path (Join-Path $sect "dynamic") | Out-Null
+    foreach ($f in @("META.json", "STAGE.json", "frida_summary.json",
+                     "procmon_summary.json", "network.json",
+                     "network_intel.json", "ANALYST-NEXT.md")) {
+        scp -i $flareKey -o StrictHostKeyChecking=no `
+            "${sshTarget}:C:/WinRE/logs/$sha/$Mode/dynamic/$f" `
+            (Join-Path $sect "dynamic\$f") 2>$null | Out-Null
+    }
     Write-Host "[run_vm_static] report files pulled to $sect (no binary artifacts)"
 } elseif ($PullReports) {
     Write-Host "[run_vm_static] WARN report pull skipped (rc=$rc sha set=$($sha.Length -eq 64))"

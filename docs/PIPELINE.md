@@ -1,6 +1,8 @@
 # Pipeline — WinRE static + dynamic RE workflow
 
-> **Status:** LIVE (2026-09-02) — `winre/pipeline.py` with SEGREGATED static/dynamic phases.
+> **Status:** LIVE (2026-09-07) — `winre/pipeline.py` with SEGREGATED static/dynamic phases,
+> `--mode static|agentic` deep-dive engines, and RevAI-style mode sections
+> (`logs/<sha>/<static|agentic>/`).
 > WinRE is the Windows FlareVM pipeline: static AND dynamic AND interactive
 > debugger on one host, all local, LLM interprets evidence only.
 
@@ -12,15 +14,21 @@ the middle of static (detonation would contaminate the VM the deep static
 agent runs on). `static_yara_wins`: dynamic corroborates, never clears.
 
 ```
-DEFAULT (no env):   pipeline.py <sample>                  → STATIC ONLY
-                    intake → quick → deep(agent) → yara → report → audit
+DEFAULT (no env):   pipeline.py <sample> [--mode agentic|static]  → STATIC ONLY
+                    intake → quick → deep → yara → report → audit
+                    (deep engine: agentic = LangGraph ReAct, llm_judge;
+                     static = deterministic checklist, zero LLM calls)
                     Never detonates. Clean on any host.
+                    Pack lands in logs/<sha>/<agentic|static>/
+                    (mode sections — RevAI scripted/agentic style; same-mode
+                    reruns overwrite their section, cross-mode coexists).
 
 OPT-IN DYNAMIC:     WINRE_ENABLE_DYNAMIC=1 pipeline.py <sample> --dynamic
                     (or RevEng triggers the legacy SSH orchestrator)
                     static completes FIRST → detonation on restored VM →
-                    FakeNet+Procmon+Frida+pe-sieve → dynamic pack pulled →
-                    static_yara_wins → snapshot revert (mandatory)
+                    FakeNet+Procmon+Frida+pe-sieve → dynamic pack pulled into
+                    the run's mode section → static_yara_wins →
+                    snapshot revert (mandatory)
 ```
 
 Why: a detonation dirties the VM (Run keys, dropped files, hooks). Running
@@ -38,18 +46,27 @@ debugger control — then applies the same honest gates.
 ## Spine
 
 ```
-winre/pipeline.py <sample> [--dynamic] [--max-seconds 45] [--pesieve] [--dry-llm] [--driver remote]
+winre/pipeline.py <sample> [--mode agentic|static] [--dynamic] [--max-seconds 45]
+                   [--pesieve] [--dry-llm] [--agentic-dbg] [--driver remote] [--publish]
    │
-   ├─ 1. intake   hash, format, magic            → logs/<sha>/intake/
-   ├─ 2. quick    Malcat MCP + IDA/Ghidra SQL    → logs/<sha>/quick/   (deterministic triage + verdict)
-   ├─ 3. deep     LangGraph agent (static tools) → logs/<sha>/deep/    (ghidra/ida SQL + malcat MCP)
-   │             LLM interprets evidence (local endpoint, source-tagged)
-   ├─ 4. yara     YARA + Sigma from evidence      → logs/<sha>/yara/    (deterministic, no LLM in rules)
-   ├─ 5. report   source-tagged report + next     → logs/<sha>/report/
-   └─ audit       truly_green gate (dynamic optional) → logs/<sha>/audit.json
+   ├─ 1. intake   hash, format, magic            → logs/<sha>/<mode>/intake/
+   ├─ 2. quick    deterministic triage           → logs/<sha>/<mode>/quick/
+   │             Malcat MCP views + IDA/Ghidra SQL + static-tools layer
+   │             (capa/floss/lief/diec/yarascan/strings/import-signals/xor)
+   ├─ 3. deep     engine selected by --mode      → logs/<sha>/<mode>/deep/
+   │             agentic: LangGraph ReAct over the 24-tool set (llm_judge)
+   │             static:  fixed 24-tool checklist + rules verdict, zero LLM
+   │                      (static_deterministic — RevAI scripted)
+   ├─ 4. yara     YARA + Sigma from evidence      → logs/<sha>/<mode>/yara/    (deterministic, no LLM in rules)
+   ├─ 5. report   source-tagged report + next     → logs/<sha>/<mode>/report/
+   │             source ∈ {llm_judge, static_deterministic, deterministic_fallback}
+   └─ audit       truly_green gate (dynamic optional) → logs/<sha>/<mode>/audit.json
           │
           └─ [--dynamic] detonation runs here, LAST, segregated:
-             orchestrator --mode local → logs/<sha>/dynamic/ (pulled via scp)
+             orchestrator --mode local → logs/<sha>/<mode>/dynamic/ (pulled via scp)
+             (WINRE_DYNAMIC_DIR pins the orchestrator output into the section)
+
+   [--publish] sanitized case → docs/case-studies/<mode>/<sha>/ (no binaries)
 ```
 
 - **Deterministic-first**: tools produce evidence; the LLM only interprets.
@@ -64,9 +81,9 @@ winre/pipeline.py <sample> [--dynamic] [--max-seconds 45] [--pesieve] [--dry-llm
 | Stage | Tools | Key artifacts |
 |-------|-------|---------------|
 | intake | file magic, sha256 | `intake.json` |
-| quick | Malcat MCP (:9009) anomalies/yara/strings, IDA SQL funcs (if .i64), Ghidra SQL funcs | `quick.json` + `verdict` |
-| dynamic | FakeNet-NG, Procmon→CSV, Frida trace, pe-sieve (opt), x64dbg OEP/dump | `META.json` (ok, frida_events), `frida_trace.jsonl`, `procmon.csv`, `network_intel.json` |
-| deep | x64dbg-MCP (:9094) LoadBinary/DetectOEP/DumpModule, Malcat-MCP (:9009) fns/decompile, WinDbg-MCP (:9097) dump analysis | `deep.json` + `llm_analysis` (source-tagged) |
+| quick | Malcat MCP (:9009) anomalies/yara/strings, IDA SQL funcs (if .i64), Ghidra SQL funcs, static-tools layer (capa/floss/lief/diec/yarascan/strings/import-signals/xor) | `quick.json` + `verdict` |
+| dynamic | FakeNet-NG, Procmon→CSV, Frida trace, pe-sieve (opt), x64dbg OEP/dump | `META.json` (ok, frida_events), `STAGE.json` (audit wrapper + gate evidence), `frida_trace.jsonl`, `procmon.csv`, `network_intel.json` |
+| deep | engine by `--mode`: `agentic` = LangGraph ReAct (x64dbg-MCP LoadBinary/DetectOEP/DumpModule, Malcat-MCP fns/decompile, WinDbg-MCP dump analysis, 24 static tools); `static` = fixed 24-tool checklist, no LLM | `deep.json` + verdict (`llm_judge` / `static_deterministic`), full history, `llm_analysis` (null in static mode) |
 | yara | deterministic YARA (`CADRE_<sha8>.yar`) + Sigma (`CADRE_<sha8>.yml`) | `rule_report.json` |
 | report | source-tagged `report.json` + `ANALYST-NEXT.md` | — |
 
@@ -87,15 +104,23 @@ MCP servers run on the VM console (`winre/mcp/start_servers.ps1`) — Malcat
 ## Run
 
 ```powershell
-# STATIC (default — never detonates) — fastest smoke
-python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --dry-llm
+# STATIC — deterministic engine, zero LLM calls (RevAI scripted)
+python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --mode static
+
+# STATIC — agentic engine (default; needs the LLM endpoint for llm_judge)
+python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --mode agentic
+# ... --dry-llm forces the honest deterministic_fallback (no LLM)
 
 # STATIC + SEGREGATED DYNAMIC (opt-in; needs restored VM, then snapshot revert)
-python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --dynamic --max-seconds 45
+python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --mode static --dynamic --max-seconds 45
 # or env: $env:WINRE_ENABLE_DYNAMIC = "1"
 
 # control-plane driver (run from operator host, SSH to FlareVM)
-python winre\pipeline.py C:\samples\foo.exe --driver remote
+python winre\pipeline.py C:\samples\foo.exe --driver remote --mode static
+
+# publish a sanitized, mode-keyed case (report-level artifacts only, no binaries)
+python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --mode static --publish
+#    → docs/case-studies/static/<sha>/
 
 # env
 $env:GHIDRA_HEADLESS_MAXMEM = "8G"     # 16GB host
@@ -108,7 +133,7 @@ required for green — it is optional corroboration.
 
 ## Evidence contract with RevAI
 
-`logs/<sha>/dynamic/` keeps the exact schema RevAI reads
+`logs/<sha>/<mode>/dynamic/` keeps the exact schema RevAI reads
 (`load_dynamic_pack()`) — WinRE is now also the writer for the full pack;
 RevAI can read any stage. The pipeline layout mirrors RevAI's
 `{intake,quick,deep,publish}` naming so reports are portable.

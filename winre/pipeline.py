@@ -267,8 +267,10 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
     env = os.environ.copy()
     env["WINRE_ORCHESTRATOR_MODE"] = "local"
     env.setdefault("WINRE_ORCH_LOCK", r"C:\WinRE\lock\orchestrator.lock")
-    # point orchestrator at our logs so it writes straight into the pack
-    env["REVENG_LOGS_DIR"] = str(pack.root.parent)
+    # logs root (NOT the section): the ledger lives VM-wide at
+    # logs/_vm_state.json; the dynamic dir is pinned into our mode section
+    env["REVENG_LOGS_DIR"] = str(pack.root.parent.parent)
+    env["WINRE_DYNAMIC_DIR"] = str(pack.stages["dynamic"])
     env["REVENG_SESSIONS_DIR"] = str(SESSIONS_DIR)
     # write a session so orchestrator finds the sample
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)

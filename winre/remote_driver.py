@@ -309,8 +309,10 @@ def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict) -> dict:
 REMOTE_DYNAMIC_HELPER = r'''
 """Remote dynamic helper — runs orchestrator --mode local on the VM.
 
-Usage: python _remote_dynamic_helper.py <sha> <sample_path> <max_seconds> [--pesieve]
+Usage: python _remote_dynamic_helper.py <sha> <sample_path> <max_seconds> [--pesieve] [--section=agentic|static]
 Writes the session file, sets env, runs orchestrator, prints META.json tail.
+--section pins detonation into logs/<sha>/<section>/dynamic (mode-sectioned
+packs); default agentic for legacy callers.
 """
 import json
 import os
@@ -322,6 +324,10 @@ sha = sys.argv[1]
 sample = sys.argv[2]
 max_seconds = int(sys.argv[3])
 pesieve = "--pesieve" in sys.argv[4:]
+section = "agentic"
+for _a in sys.argv[4:]:
+    if _a.startswith("--section=") and _a.split("=", 1)[1] in ("agentic", "static"):
+        section = _a.split("=", 1)[1]
 
 pipeline = Path(__file__).resolve().parents[1]
 sessions = pipeline / "sessions"
@@ -336,6 +342,7 @@ env = os.environ.copy()
 env["WINRE_ORCHESTRATOR_MODE"] = "local"
 env.setdefault("WINRE_ORCH_LOCK", str(pipeline / "lock" / "orchestrator.lock"))
 env["REVENG_LOGS_DIR"] = str(pipeline / "logs")
+env["WINRE_DYNAMIC_DIR"] = str(pipeline / "logs" / sha / section / "dynamic")
 env["REVENG_SESSIONS_DIR"] = str(sessions)
 
 cmd = [sys.executable, str(pipeline / "winre" / "orchestrator.py"), sha,
@@ -381,7 +388,8 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} '
            f'{cfg["remote_pipeline"]}\\winre\\_remote_dynamic_helper.py '
            f'{sha} "{remote_sample}" {int(max_seconds)}'
-           f'{" --pesieve" if enable_pesieve else ""} 2>&1"')
+           f'{" --pesieve" if enable_pesieve else ""}'
+           f' --section={pack.mode or "agentic"} 2>&1"')
     r = ssh_run(cfg, cmd, timeout=int(max_seconds) + 700)
     # honest RC check: the helper prints RC=<code> as its last line
     helper_rc = None
@@ -404,12 +412,13 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
         except Exception:
             pass
 
-    # pull dynamic dir back
+    # pull dynamic dir back (from the run's mode section on the VM)
     local_dyn = pack.stages["dynamic"]
     local_dyn.mkdir(parents=True, exist_ok=True)
     ok = False
     err = None
-    remote_dyn = rf'{cfg["remote_pipeline"]}\logs\{sha}\dynamic'
+    remote_dyn = (rf'{cfg["remote_pipeline"]}\logs\{sha}'
+                  rf'\{pack.mode or "agentic"}\dynamic')
     if not job_ran:
         err = (f"detonation did not run: ssh rc={r.returncode} "
                f"helper_rc={helper_rc}; stderr={(r.stderr or '')[:200]}")

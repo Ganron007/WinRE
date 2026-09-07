@@ -1,11 +1,13 @@
 # Evidence Packs & Reporting — where everything lives
 
-WinRE writes one **evidence pack per sample**, keyed by SHA256. Both the
-CLI and the console read from this layout; the RevAI remote driver reads
-the same packs for corroboration.
+WinRE writes one **evidence pack per sample per engine**, keyed by SHA256 +
+deep-dive mode (RevAI-style sections — RevAI `scripted`/`agentic` folders).
+Both the CLI and the console read from this layout; the RevAI remote driver
+reads the same packs for corroboration.
 
 ```
-logs/<sha256>/                        ← the evidence pack (one dir per sample)
+logs/<sha256>/<static|agentic>/         ← one self-contained case per engine
+├── META.json                        pack-level mode/engine/source/truly_green
 ├── intake/
 │   ├── intake.json                   file facts: path, size, magic, format
 │   └── META.json                     stage wrapper (ok/error/timing)
@@ -13,10 +15,11 @@ logs/<sha256>/                        ← the evidence pack (one dir per sample)
 │   ├── quick.json                    verdict + full evidence dict
 │   ├── 01-tools-raw.json             FULL untruncated tool outputs (citation target)
 │   └── META.json
-├── deep/                             LangGraph agentic deep dive
-│   ├── deep.json                     agent verdict + full history + llm_analysis
+├── deep/                             deep dive — engine depends on the section
+│   ├── deep.json                     verdict + full history (+ llm_analysis in agentic)
 │   ├── 01-tools-raw.json             FULL tool-call results (untruncated)
-│   └── META.json                     fallback flag, MCP health, engine badge
+│   └── META.json                     engine (langgraph|static_deterministic),
+│                                     mode, fallback flag, MCP health
 ├── dynamic/                          (opt-in, segregated, runs LAST)
 │   ├── META.json / STAGE.json        run status + snapshot-gate evidence
 │   ├── frida_trace.jsonl / frida_summary.json
@@ -39,13 +42,21 @@ logs/<sha256>/                        ← the evidence pack (one dir per sample)
 └── audit.json                        machine audit gate (truly_green etc.)
 ```
 
+Same-sample/same-mode reruns overwrite their section; the other section is
+untouched. Pre-sectioning packs (flat stages directly under `logs/<sha>/`)
+are still read as legacy rows. Sanitized, mode-keyed publish copies land in
+`docs/case-studies/<mode>/<sha>/` (`--publish`; report-level artifacts only,
+lab specifics redacted, no binaries).
+
 ## What cites what
 
 - `REPORT-TECHNICAL-v3.md` sections cite `deep/01-tools-raw.json` and
   `quick/01-tools-raw.json` — **full raw tool outputs, never truncated**.
-- The agent verdict (`deep.json → agent.verdict`) is reproduced verbatim in
+- The deep verdict (`deep.json → agent.verdict`) is reproduced verbatim in
   section 4 of the report and tagged with its source
-  (`llm_judge` / `deterministic_fallback`).
+  (`llm_judge` / `static_deterministic` / `deterministic_fallback`).
+  Static sections have no `llm_analysis` (zero LLM calls) and show the
+  fired rules instead (`rules_fired`).
 - `iocs.json` is deterministic extraction (no LLM). The agent narrative is
   scanned too, and tagged in `sources` as `agent_narrative(llm_tagged)`.
 - `AUDIT-REPORT.md` renders `audit.json` — the same gate that decides
@@ -59,8 +70,9 @@ logs/<sha256>/                        ← the evidence pack (one dir per sample)
   (mode, marker state, consume result) and in `logs/_vm_state.json` (VM-wide
   ledger). In `enforce` mode a dynamic stage without gate evidence fails
   the audit.
-- Dry-LLM packs honestly show `deterministic_fallback` and cannot be
-  truly_green (deep fallback fails quality).
+- Dry-LLM agentic packs honestly show `deterministic_fallback` and cannot
+  be truly_green (deep fallback fails quality). Static-mode packs show
+  `static_deterministic` — a real verdict, green when the stages pass.
 
 ## Dynamic reporting (reserved section)
 

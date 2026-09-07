@@ -31,7 +31,7 @@ It runs where Windows malware lives: on a [FlareVM](https://github.com/mandiant/
 
 ## What is WinRE?
 
-**WinRE** is the Windows-side of malware analysis, static and dynamic, with a dynamic remote driver for the RevAI Linux pipeline. Work that must run on Windows stays on Windows: SQL-first Ghidra/IDA querying, in-VM dynamic detonation, and debugger automation over MCP. The Linux side (RevAI) stays headless and static-first; the contract between them is **files, not shared process** — a versioned artifact pack in `logs/<sha>/dynamic/` that RevAI reads for corroboration.
+**WinRE** is the Windows-side of malware analysis, static and dynamic, with a dynamic remote driver for the RevAI Linux pipeline. Work that must run on Windows stays on Windows: SQL-first Ghidra/IDA querying, in-VM dynamic detonation, and debugger automation over MCP. The Linux side (RevAI) stays headless and static-first; the contract between them is **files, not shared process** — a versioned artifact pack in `logs/<sha>/<mode>/dynamic/` that RevAI reads for corroboration.
 
 - **Deterministic-first detonation** — a single PowerShell job stages FakeNet-NG (network sink), Procmon (file/reg/process events), Frida (API trace with string/sockaddr decode), and optional pe-sieve + hollows_hunter (injection/hollowing dumps). The LLM can only interpret what these tools emitted — it never runs the sample.
 - **SQL-first Windows RE** — Ghidra (`analyzeHeadless` + SQL post-script) is the primary engine and always present; IDA Pro (`idasql`) and Binary Ninja are optional upgrades that plug into the same SQL surface when installed.
@@ -50,7 +50,7 @@ FlareVM (Windows 10 + Flare-VM)                       Remnux (Linux, RevAI)
 C:\samples\<sha>.exe  ◄──── analyst copies to both ──►  /opt/samples/<sha>/
         │                                                  │
         ├─ tools/flare_ghidra_sql.py ── analyzeHeadless ────┘  static/LLM pipeline
-        │     └─ GhidraSql.java (SQL post-script)           (reads logs/<sha>/dynamic/
+        │     └─ GhidraSql.java (SQL post-script)           (reads logs/<sha>/<mode>/dynamic/
         ├─ tools/flarevm_ida_query.py ── idasql.exe          as corroboration only)
         ├─ tools/flarevm_bn_query.py ── Binary Ninja API
         │
@@ -63,14 +63,14 @@ C:\samples\<sha>.exe  ◄──── analyst copies to both ──►  /opt/sam
                     ├─ x64dbg-MCP  → x64dbg/dump/*.dmp (OEP detect)  │
                     └─ summarize_dynamic.py + enrich_pcap_tshark.py  │
                                                                       │
-              logs/<sha>/dynamic/  ◄── META.json, ANALYST-NEXT.md ───┘
+              logs/<sha>/<mode>/dynamic/  ◄── META.json, ANALYST-NEXT.md ───┘
                        │
                        └─ SMB → Remnux artifact share (read-only there)
 ```
 
 - **SQL services** — `idasql_server.py` (:19300) and `flare_ghidra_sql.py --serve` (:19301) expose `/query` so a remote agent can query Windows databases over HTTP.
 - **Debugger MCP** — `x64dbg-MCP` (:9094 x64 / :9095 x86), `windbg_bridge.py` (:9096). Same JSON-RPC shape on every port: `POST / {"jsonrpc":"2.0","method":"tools/call","params":{"name":...,"arguments":{...}}}`.
-- **Artifact contract** — `logs/<sha>/dynamic/` is versioned (internal: `docs/internal/ARCHITECTURE.md`); RevAI reads it with `load_dynamic_pack()` and never writes into it.
+- **Artifact contract** — `logs/<sha>/<mode>/dynamic/` is versioned (internal: `docs/internal/ARCHITECTURE.md`); RevAI reads it with `load_dynamic_pack()` and never writes into it.
 
 Full breakdown: `docs/internal/ARCHITECTURE.md` (internal) · transports + ports: `docs/internal/VM-ACCESS.md` (internal) · tool layout: `docs/internal/TOOL-INVENTORY.md` (internal).
 
@@ -94,7 +94,7 @@ winre/orchestrator.py <sha256> --mode local --max-seconds 45 [--pesieve]
    └─ META.json (schema_version, yara_lock, ok/skipped/error, artifacts)
 ```
 
-Artifacts land in `logs/<sha>/dynamic/` (`META.json` + `ANALYST-NEXT.md` are always present). After every Windows run the operator **restores the FlareVM clean snapshot** — the orchestrator never auto-reverts.
+Artifacts land in `logs/<sha>/<mode>/dynamic/` (`META.json` + `ANALYST-NEXT.md` are always present). After every Windows run the operator **restores the FlareVM clean snapshot** — the orchestrator never auto-reverts.
 
 ELF samples are rare on Windows; the orchestrator dispatches them to the Linux-side `elf_dynamic_job.sh` path (strace + tcpdump) when one is present.
 
@@ -153,8 +153,10 @@ curl http://127.0.0.1:9094/ -H "Content-Type: application/json" -d '{"jsonrpc":"
 python C:\WinRE\ops\smoke_flare.py
 
 # 7. Full pipeline (static + dynamic + report + audit)
-python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --max-seconds 45
-#    exit 0 only when truly_green; evidence pack under logs/<sha>/
+python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --mode static --dynamic --max-seconds 45
+#    --mode static|agentic selects the deep-dive engine (default agentic);
+#    --dynamic is the opt-in segregated detonation (omit for static-only);
+#    exit 0 only when truly_green; evidence pack under logs/<sha>/<mode>/
 
 # 8. UI console (control plane — operator host, drives FlareVM over SSH)
 python winre\ui\app.py --port 5001

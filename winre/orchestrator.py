@@ -3,7 +3,9 @@
 WinRE dynamic detonation orchestrator (Flare-VM).
 
 Runs FakeNet + Procmon + Frida (+ optional pe-sieve / x64dbg OEP dump)
-via flare_dynamic_job.ps1 and stages artifacts into logs/<sha>/dynamic/.
+via flare_dynamic_job.ps1 and stages artifacts into logs/<sha>/dynamic/
+(WINRE_DYNAMIC_DIR overrides the destination — pipeline drivers set it to
+logs/<sha>/<mode>/dynamic so detonation lands in the run's mode section).
 Originally a Remnux->Flare SSH orchestrator (dynamic_run_v2.py); now
 local-first with `--mode local` as the recommended path (run on Flare,
 no SSH hop). SSH mode is kept for Remnux-side orchestration.
@@ -685,7 +687,11 @@ def run_dynamic(
     sample_override: str | None = None,
 ) -> dict:
     cfg = _flare_cfg()
-    dyn_dir = LOGS_DIR / sha / "dynamic"
+    # Section-aware dynamic dir: pipeline/remote drivers set WINRE_DYNAMIC_DIR
+    # to logs/<sha>/<mode>/dynamic so detonation lands inside the run's mode
+    # section. Manual CLI runs (no env) keep the legacy flat path.
+    dyn_dir = Path(os.environ.get("WINRE_DYNAMIC_DIR")
+                   or (LOGS_DIR / sha / "dynamic"))
     dyn_dir.mkdir(parents=True, exist_ok=True)
     yara_lock = _yara_lock(sha)
     if enable_pesieve is None:

@@ -35,6 +35,12 @@ Conventions used below (no lab specifics committed — set these per lab):
 
 Two equivalent entry points. Both write `logs/<sha>/dynamic/` (+ `META.json`).
 
+> **Sections note (2026-09-07):** standalone orchestrator runs land in the
+> flat path above (no `WINRE_DYNAMIC_DIR` set). Pipeline-driven runs
+> (`pipeline.py` / `remote_driver.py` / UI, `--mode static|agentic`) pin
+> detonation into the run's mode section instead:
+> `logs/<sha>/<static|agentic>/dynamic/`. Same schema, sectioned address.
+
 ### Option A — orchestrator `--mode ssh` (recommended)
 
 Run **on the caller** host. The orchestrator scps the sample

@@ -80,14 +80,19 @@ python -m winre.ui.app          # http://127.0.0.1:5001
 ## 4. First run
 
 ```powershell
-# static-only (default, safe)
-python -m winre.remote_driver C:\samples\notepad.exe --dry-llm
+# static-only (default, safe) — deterministic engine needs no LLM at all
+python -m winre.pipeline C:\samples\notepad.exe --mode static
 
-# or from the UI: Run page -> pick sample -> Run pipeline
+# or agentic engine (needs the LLM endpoint for llm_judge)
+python -m winre.pipeline C:\samples\notepad.exe --mode agentic
+
+# or from the UI: Run page -> pick sample -> deep-mode -> Run pipeline
 ```
 
-Open the Cases page and confirm the pack: audit `truly_green`, honest
-`deterministic_fallback` deep source when the LLM is dry. Then see
+Open the Cases page and confirm the section rows (`static` /
+`agentic`): audit `truly_green`, deep source `static_deterministic`
+(static mode) or `llm_judge` (agentic with LLM). `--dry-llm` on agentic
+mode honestly shows `deterministic_fallback`. Then see
 [`OPERATE.md`](OPERATE.md).
 
 > **Fresh-VM note:** `setup-flarevm.ps1` is idempotent and was verified

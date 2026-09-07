@@ -6,14 +6,19 @@ Day-2 operation of the WinRE lab. Install first: [`INSTALL.md`](INSTALL.md).
 
 | Mode | Command | What runs |
 |---|---|---|
-| **Static (default)** | `python -m winre.remote_driver C:\samples\s.exe` | intake → quick → deep (LangGraph agent) → yara → report → audit |
+| **Static, agentic engine (default)** | `python -m winre.pipeline C:\samples\s.exe` | intake → quick → deep (LangGraph ReAct, `llm_judge`) → yara → report → audit → `logs/<sha>/agentic/` |
+| **Static, deterministic engine** | `... --mode static` | same stages, deep = fixed 24-tool checklist + rules verdict, zero LLM (`static_deterministic`) → `logs/<sha>/static/` |
 | **Static + agentic debug** | `... --agentic-dbg` | static + the deep agent gets bounded x64dbg tools (OEP/unpack/decrypt) — **no detonation** |
-| **Static + dynamic** | `... --dynamic --max-seconds 45` | static first, then segregated detonation (FakeNet + Procmon + Frida [+ pe-sieve]) |
-| **Dry LLM** | add `--dry-llm` | no LLM calls; deep stays `deterministic_fallback` (honest) |
+| **Static + dynamic** | `... --dynamic --max-seconds 45` | static first, then segregated detonation (FakeNet + Procmon + Frida [+ pe-sieve]) into the run's mode section |
+| **Dry LLM** | add `--dry-llm` (agentic mode) | no LLM calls; deep stays `deterministic_fallback` (honest, not green) |
+| **Publish case** | add `--publish` | sanitized case → `docs/case-studies/<mode>/<sha>/` (no binaries) |
 
 Environment equivalents: `WINRE_ENABLE_DYNAMIC=1`, `WINRE_AGENTIC_DBG=1`.
-The UI (`python -m winre.ui.app`, port 5001) drives the same engine with
-per-mode checkboxes and a live deep-mode preview.
+The UI (`python -m winre.ui.app`, port 5001) drives the same engine: a
+deep-mode selector on the Run page (agentic/static + live engine preview),
+one row per `(sha, mode section)` in Cases with S/A badges, a section
+switcher on the pack page, and manual stage control that writes into the
+viewed section. Pack export zips the viewed section.
 
 **Invariants:** dynamic is opt-in and always LAST; `static_yara_wins` —
 dynamic corroborates, never clears a static verdict; every run is audited
@@ -21,11 +26,13 @@ dynamic corroborates, never clears a static verdict; every run is audited
 
 ## Evidence packs
 
-`logs/<sha256>/` per sample: `intake/ quick/ deep/ dynamic/ yara/ report/`
-+ `audit.json` + `snapshot.json` (HITL ledger). Browse them in the UI
-(Cases → pack) — verdicts, agent tool-call timeline, dynamic artifacts
-(Frida traces, Procmon summaries, pcaps, pe-sieve dumps), YARA rules,
-analyst-next report.
+`logs/<sha256>/<static|agentic>/` per sample and engine: `intake/ quick/
+deep/ dynamic/ yara/ report/` + `audit.json` + pack-level `META.json`
+(mode/engine/source). `snapshot.json` (HITL ledger) lives at the sha root
+(VM-state, mode-independent). Browse them in the UI (Cases → pack — one row
+per section) — verdicts, deep tool-call timeline (agentic) or checklist +
+fired rules (static), dynamic artifacts (Frida traces, Procmon summaries,
+pcaps, pe-sieve dumps), YARA rules, analyst-next report.
 
 ## Snapshot gate
 
@@ -78,7 +85,7 @@ Common failures:
 
 | Symptom | Fix |
 |---|---|
-| deep shows `deterministic_fallback` | LLM endpoint down / `.env` keys empty (`llm_client.available()`) |
+| deep shows `deterministic_fallback` | LLM endpoint down / `.env` keys empty (`llm_client.available()`), or `--dry-llm` on agentic mode. Static mode (`--mode static`) never needs the LLM — expect `static_deterministic` |
 | dynamic stage `snapshot gate: VM dirty` | restore the snapshot, or attest in the UI, or set auto-restore vars |
 | MCP x64dbg down | scheduled task `WinRE-X64dbg-Once`, or let the manager ensure it on demand |
 | Malcat calls fail from host | expected — localhost-bound; the SSH bridge handles it. If the bridge fails, restart `start_servers.ps1` on the VM |
@@ -92,4 +99,6 @@ python -m winre.orchestrator <sha256-or-sample-path> --mode local --max-seconds 
 ```
 
 Write the session file first (or pass the sample path — the CLI repairs the
-session from it). Snapshot-restore afterwards.
+session from it). Snapshot-restore afterwards. Manual runs land in the flat
+`logs/<sha>/dynamic/`; pipeline-driven runs pin output into the mode section
+via `WINRE_DYNAMIC_DIR`.
