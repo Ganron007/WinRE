@@ -130,6 +130,12 @@ def _rules_verdict(ev: dict) -> dict:
     if sigs:
         reasons.append("high-signal imports: " + ", ".join(
             s.get("label", "?") for s in sigs[:5] if isinstance(s, dict)))
+    ahr = _dict_of(ev.get("api_hash_resolver"))
+    if ahr.get("signal"):
+        reasons.append(
+            f"api-hash resolver present: {ahr.get('unique_functions', 0)} "
+            f"APIs resolved at runtime by hash "
+            f"(e.g. {', '.join((ahr.get('functions') or [])[:3])})")
     if packed or high_ent:
         reasons.append(f"packed/high-entropy ({len(high_ent)} sections >= 7.0)")
     if forged:
@@ -141,6 +147,19 @@ def _rules_verdict(ev: dict) -> dict:
         return {"verdict": "suspicious", "confidence": "medium",
                 "summary": "Suspicious static indicators, no decisive match.",
                 "key_evidence": reasons, "rules_fired": ["suspicious-singles"]}
+
+    if packed or high_ent:
+        # packed/encrypted with no decisive hit: static output is UNRELIABLE
+        # (KB: packer triage gates static conclusions). Say so explicitly.
+        return {"verdict": "unknown", "confidence": "low",
+                "summary": ("Packed/high-entropy binary with no decisive static "
+                            "match — static evidence is unreliable here; "
+                            "unpack + dynamic validation required."),
+                "key_evidence": [
+                    f"packed/high-entropy ({len(high_ent)} sections >= 7.0)"],
+                "rules_fired": ["packed-unreliable"],
+                "static_confidence": "low",
+                "needs_dynamic": True}
 
     return {"verdict": "unknown", "confidence": "low",
             "summary": "No static indicator fired.",
@@ -209,6 +228,7 @@ def run_static_deep_dive(sample_name: str, sha: str, *,
     # 1. structure first (grounds everything)
     _run("pe_parse")
     _run("pe_import_signals")
+    _run("api_hash_resolver")
     _run("diec")
     # 2. capabilities + metadata
     _run("capa")

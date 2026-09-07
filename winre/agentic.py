@@ -288,6 +288,14 @@ class ToolRegistry:
         """High-signal import→ATT&CK map (pefile; NOT capa)."""
         return self._vm_tool("pe_import_signals")
 
+    def api_hash_resolver(self) -> dict:
+        """Detect runtime API-hash import resolvers (AMAT Track 8 / MalTrak
+        Emotet). Scans executable sections for 4-byte constants matching
+        known-algorithm hashes of common Windows API names. signal=true =>
+        the binary resolves imports by hash at runtime (anti-import-table);
+        matched names reveal the resolved API surface."""
+        return self._vm_tool("api_hash_resolver")
+
     def signature_match(self, func_name: str = "", imports: list | None = None,
                         strings: list | None = None, constants: list | None = None,
                         size: int = 0) -> dict:
@@ -577,7 +585,8 @@ class ToolRegistry:
 TOOL_NAMES = ("ghidra_query", "ida_query", "malcat_analyze",
               "malcat_functions", "malcat_decompile",
               "capa", "floss", "pe_parse", "diec", "strings_tool", "yarascan",
-              "pe_import_signals", "xor_string_search", "olevba_analyze",
+              "pe_import_signals", "api_hash_resolver", "xor_string_search",
+              "olevba_analyze",
               "peepdf_analyze", "speakeasy_emulate", "frida_static_probe",
               "r2_decompile", "upx_unpack", "shellcode_extract",
               "dotnet_analyze", "z3_solve", "angr_analyze", "ghidra_decompile")
@@ -625,6 +634,7 @@ _ARG_MODELS: dict[str, type[BaseModel]] = {
     "strings_tool": EmptyArgs,
     "yarascan": EmptyArgs,
     "pe_import_signals": EmptyArgs,
+    "api_hash_resolver": EmptyArgs,
     "xor_string_search": EmptyArgs,
     "olevba_analyze": EmptyArgs,
     "peepdf_analyze": EmptyArgs,
@@ -815,6 +825,9 @@ Static evidence tools (no args — call and read the JSON):
 capa: ATT&CK-mapped capabilities (e.g. "encode data using XOR") — cite the
   capability name + attack technique. STRONG signal for verdicts.
 pe_import_signals: import→ATT&CK high-signal map (pefile). NOT capa.
+api_hash_resolver: detects runtime API-hash import resolvers (4-byte
+  constants == hashes of API names, murmur/djb2/sdbm/fnv). signal=true =>
+  anti-import-table; matched names reveal the resolved API surface.
 floss: deobfuscated/stack strings — decoded strings often reveal config,
   URLs, mutexes the raw strings hide.
 pe_parse: imports (per-DLL function lists), sections + entropy, digital

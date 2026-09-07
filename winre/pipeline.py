@@ -196,7 +196,8 @@ def _quick(sample: Path, pack: EvidencePack) -> dict:
         except json.JSONDecodeError:
             _st = {}
         for _k in ("capa", "floss", "diec", "yarascan", "strings",
-                   "pe_import_signals", "xor_string_search"):
+                   "pe_import_signals", "api_hash_resolver",
+                   "xor_string_search"):
             _v = _st.get(_k)
             if isinstance(_v, dict):
                 evidence[_k] = _v
@@ -514,6 +515,16 @@ def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = 
         # dynamic is corroboration — do not let it fail static artifacts.
         dynamic = _dynamic(sample, pack, sha, max_seconds, enable_pesieve)
         results["dynamic"] = dynamic
+
+    # DFIR-Nexus ingest pack: dynamic logs + static context in one 7z
+    results["case_pack"] = None
+    if dynamic and dynamic.get("ok"):
+        try:
+            from .casepack import build_case
+            results["case_pack"] = build_case(pack.root, sha, mode)
+        except Exception as e:
+            results["case_pack"] = {"ok": False,
+                                    "error": f"case pack: {str(e)[:200]}"}
 
     report = _report(pack, sha, quick, dynamic, deep)
     results["report"] = report

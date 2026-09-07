@@ -319,6 +319,287 @@ def pe_import_signals(sample: str, timeout: int = 300) -> dict:
             "hint": "PE import high-signal map (pefile). Not capa."}
 
 
+# ── API-hash resolver detection (KB: AMAT Track 8 Miniduke / MalTrak Emotet) ─
+# Runtime import resolvers hash API names (murmur2/3, djb2, sdbm, fnv) and
+# call GetProcAddress/LdrGetProcedureAddress with the constant — a classic
+# evasion/anti-import-table technique. Detection = find 4-byte constants in
+# executable sections that equal a known-algorithm hash of a common API name.
+# Matched names are evidence AND config/IOC value (they reveal which APIs the
+# loader resolves at runtime, which static imports cannot).
+
+_API_HASH_DICT: dict[str, tuple[str, ...]] = {
+    "kernel32.dll": ("VirtualAlloc", "VirtualAllocEx", "VirtualProtect", "VirtualFree",
+                     "WriteProcessMemory", "ReadProcessMemory", "CreateRemoteThread",
+                     "OpenProcess", "GetProcAddress", "LoadLibraryA", "LoadLibraryW",
+                     "CreateProcessA", "CreateProcessW", "GetModuleHandleA",
+                     "GetModuleHandleW", "GetModuleFileNameA", "GetModuleFileNameW",
+                     "Sleep", "GetTickCount", "GetTickCount64", "GetCurrentProcess",
+                     "GetCurrentProcessId", "GetCurrentThreadId", "GetSystemInfo",
+                     "GlobalMemoryStatusEx", "GetComputerNameA", "GetComputerNameW",
+                     "GetUserNameA", "GetUserNameW", "GetTempPathA", "GetTempPathW",
+                     "GetCommandLineA", "GetCommandLineW", "GetEnvironmentVariableA",
+                     "GetEnvironmentVariableW", "SetEnvironmentVariableA", "CreateMutexA",
+                     "CreateMutexW", "CreateThread", "ExitProcess", "TerminateProcess",
+                     "CloseHandle", "DeleteFileA", "DeleteFileW", "CopyFileA",
+                     "CopyFileW", "MoveFileA", "MoveFileW", "CreateDirectoryA",
+                     "CreateDirectoryW", "RemoveDirectoryA", "RemoveDirectoryW",
+                     "FindFirstFileA", "FindFirstFileW", "FindNextFileA",
+                     "FindNextFileW", "GetFileAttributesA", "GetFileAttributesW",
+                     "SetFileAttributesA", "SetFileAttributesW", "GetFileSize",
+                     "GetFileSizeEx", "SetFilePointer", "ReadFile", "WriteFile",
+                     "GetSystemDirectoryA", "GetSystemDirectoryW", "GetWindowsDirectoryA",
+                     "GetWindowsDirectoryW", "IsDebuggerPresent", "OutputDebugStringA",
+                     "OutputDebugStringW", "DebugBreak", "GetThreadContext",
+                     "SetThreadContext", "QueueUserAPC", "CreateProcessInternalW",
+                     "GetStartupInfoA", "GetStartupInfoW", "GetTimeZoneInformation",
+                     "SystemTimeToFileTime", "GetSystemTimeAsFileTime"),
+    "ntdll.dll": ("LdrLoadDll", "LdrGetProcedureAddress", "LdrUnloadDll",
+                  "NtCreateProcess", "NtCreateProcessEx", "NtCreateThread",
+                  "NtCreateThreadEx", "NtOpenProcess", "NtOpenProcessToken",
+                  "NtQueryInformationProcess", "NtQuerySystemInformation",
+                  "NtQueryVirtualMemory", "NtProtectVirtualMemory",
+                  "NtAllocateVirtualMemory", "NtWriteVirtualMemory",
+                  "NtReadVirtualMemory", "NtResumeThread", "NtSuspendThread",
+                  "NtDelayExecution", "RtlDecompressBuffer", "RtlDecompressFragment",
+                  "RtlEqualUnicodeString", "RtlInitUnicodeString",
+                  "RtlCreateUserThread", "RtlGetVersion", "RtlUserThreadStart"),
+    "user32.dll": ("MessageBoxA", "MessageBoxW", "FindWindowA", "FindWindowW",
+                   "GetWindowTextA", "GetWindowTextW", "SetWindowsHookExA",
+                   "SetWindowsHookExW", "GetAsyncKeyState", "GetKeyState",
+                   "SendInput", "SetCursorPos", "GetCursorPos", "BlockInput",
+                   "ShowWindow", "SetWindowPos", "EnumWindows", "GetForegroundWindow",
+                   "RegisterHotKey", "GetDC", "ReleaseDC", "LoadCursorA", "LoadCursorW"),
+    "advapi32.dll": ("RegOpenKeyExA", "RegOpenKeyExW", "RegCreateKeyExA",
+                     "RegCreateKeyExW", "RegSetValueExA", "RegSetValueExW",
+                     "RegDeleteValueA", "RegDeleteValueW", "RegQueryValueExA",
+                     "RegQueryValueExW", "RegDeleteKeyA", "RegDeleteKeyW",
+                     "OpenSCManagerA", "OpenSCManagerW", "CreateServiceA",
+                     "CreateServiceW", "StartServiceA", "StartServiceW",
+                     "OpenProcessToken", "AdjustTokenPrivileges", "LookupPrivilegeValueA",
+                     "LookupPrivilegeValueW", "CryptAcquireContextA",
+                     "CryptAcquireContextW", "CryptReleaseContext", "RegEnumKeyExA",
+                     "RegEnumKeyExW", "OpenProcess", "DuplicateTokenEx",
+                     "GetTokenInformation"),
+    "ws2_32.dll": ("WSAStartup", "WSACleanup", "socket", "closesocket", "connect",
+                   "bind", "listen", "accept", "recv", "send", "recvfrom",
+                   "sendto", "gethostbyname", "gethostbyaddr", "inet_addr",
+                   "htons", "ntohs", "select", "WSAIoctl", "ioctlsocket",
+                   "getaddrinfo", "freeaddrinfo", "setsockopt", "getsockopt",
+                   "GetAddrInfoW", "shutdown"),
+    "wininet.dll": ("InternetOpenA", "InternetOpenW", "InternetConnectA",
+                    "InternetConnectW", "InternetOpenUrlA", "InternetOpenUrlW",
+                    "HttpOpenRequestA", "HttpOpenRequestW", "HttpSendRequestA",
+                    "HttpSendRequestW", "InternetReadFile", "InternetWriteFile",
+                    "InternetCloseHandle", "InternetSetOptionA", "InternetSetOptionW",
+                    "InternetGetConnectedState", "URLDownloadToFileA",
+                    "URLDownloadToFileW", "InternetSetStatusCallback"),
+    "ole32.dll": ("CoInitialize", "CoInitializeEx", "CoUninitialize", "CoCreateInstance",
+                  "CoCreateGuid", "StringFromGUID2", "CLSIDFromString", "OleInitialize",
+                  "CoTaskMemAlloc", "CoTaskMemFree", "OleUninitialize"),
+    "psapi.dll": ("EnumProcesses", "EnumProcessModules", "GetModuleBaseNameA",
+                  "GetModuleBaseNameW", "GetModuleFileNameExA", "GetModuleFileNameExW",
+                  "QueryFullProcessImageNameA", "QueryFullProcessImageNameW"),
+    "crypt32.dll": ("CryptDecrypt", "CryptEncrypt", "CertOpenStore", "CertOpenSystemStoreA",
+                    "CertOpenSystemStoreW", "CryptImportKey", "CryptExportKey",
+                    "CryptGenKey", "CryptDeriveKey", "CryptAcquireCertificatePrivateKey"),
+    "dnsapi.dll": ("DnsQuery_A", "DnsQuery_W", "DnsRecordListFree", "DnsQueryEx"),
+    "mpr.dll": ("WNetAddConnection2A", "WNetAddConnection2W", "WNetOpenEnumA",
+                "WNetOpenEnumW", "WNetEnumResourceA", "WNetEnumResourceW"),
+}
+
+
+def _hash_murmur2_32(data: bytes, seed: int = 0) -> int:
+    m, r = 0x5BD1E995, 24
+    h = (seed ^ len(data)) & 0xFFFFFFFF
+    i = 0
+    while len(data) - i >= 4:
+        k = int.from_bytes(data[i:i + 4], "little")
+        k = (k * m) & 0xFFFFFFFF
+        k ^= k >> r
+        k = (k * m) & 0xFFFFFFFF
+        h = (h * m) & 0xFFFFFFFF
+        h ^= k
+        i += 4
+    tail = data[i:]
+    if tail:
+        if len(tail) >= 3:
+            h ^= tail[2] << 16
+        if len(tail) >= 2:
+            h ^= tail[1] << 8
+        if tail:
+            h ^= tail[0]
+            h = (h * m) & 0xFFFFFFFF
+    h ^= h >> 13
+    h = (h * m) & 0xFFFFFFFF
+    h ^= h >> 15
+    return h & 0xFFFFFFFF
+
+
+def _hash_murmur3_32(data: bytes, seed: int = 0) -> int:
+    c1, c2 = 0xCC9E2D51, 0x1B873593
+    h = seed & 0xFFFFFFFF
+    i = 0
+    n = len(data)
+    while i + 4 <= n:
+        k = int.from_bytes(data[i:i + 4], "little")
+        k = (k * c1) & 0xFFFFFFFF
+        k = ((k << 15) | (k >> 17)) & 0xFFFFFFFF
+        k = (k * c2) & 0xFFFFFFFF
+        h ^= k
+        h = ((h << 13) | (h >> 19)) & 0xFFFFFFFF
+        h = (h * 5 + 0xE6546B64) & 0xFFFFFFFF
+        i += 4
+    tail = data[i:]
+    if tail:
+        k = tail[0] & 0xFF
+        if len(tail) >= 2:
+            k |= (tail[1] & 0xFF) << 8
+        if len(tail) >= 3:
+            k |= (tail[2] & 0xFF) << 16
+        k = (k * c1) & 0xFFFFFFFF
+        k = ((k << 15) | (k >> 17)) & 0xFFFFFFFF
+        k = (k * c2) & 0xFFFFFFFF
+        h ^= k
+    h ^= n
+    h ^= h >> 16
+    h = (h * 0x85EBCA6B) & 0xFFFFFFFF
+    h ^= h >> 13
+    h = (h * 0xC2B2AE35) & 0xFFFFFFFF
+    h ^= h >> 16
+    return h & 0xFFFFFFFF
+
+
+def _hash_djb2(s: str) -> int:
+    h = 5381
+    for ch in s:
+        h = (h * 33 + ord(ch)) & 0xFFFFFFFF
+    return h
+
+
+def _hash_djb2_xor(s: str) -> int:
+    h = 5381
+    for ch in s:
+        h = (((h << 5) + h) ^ ord(ch)) & 0xFFFFFFFF
+    return h
+
+
+def _hash_sdbm(s: str) -> int:
+    h = 0
+    for ch in s:
+        h = (ord(ch) + (h << 6) + (h << 16) - h) & 0xFFFFFFFF
+    return h
+
+
+def _hash_fnv1a32(s: str) -> int:
+    h = 2166136261
+    for ch in s:
+        h ^= ord(ch)
+        h = (h * 16777619) & 0xFFFFFFFF
+    return h
+
+
+def _hash_fnv1_32(s: str) -> int:
+    h = 2166136261
+    for ch in s:
+        h = (h * 16777619) & 0xFFFFFFFF
+        h ^= ord(ch)
+    return h
+
+
+def _api_hash_index() -> dict[int, list[dict]]:
+    """hash -> [{dll, func, algo, case}] for every (algo, case-variant)."""
+    algos = {
+        "murmur2": lambda s: _hash_murmur2_32(s.encode()),
+        "murmur2_s97": lambda s: _hash_murmur2_32(s.encode(), 0x9747B28C),
+        "murmur3": lambda s: _hash_murmur3_32(s.encode()),
+        "djb2": _hash_djb2,
+        "djb2_xor": _hash_djb2_xor,
+        "sdbm": _hash_sdbm,
+        "fnv1a32": _hash_fnv1a32,
+        "fnv1_32": _hash_fnv1_32,
+    }
+    idx: dict[int, list[dict]] = {}
+    for dll, fns in _API_HASH_DICT.items():
+        for fn in fns:
+            for case in ("exact", "lower"):
+                s = fn if case == "exact" else fn.lower()
+                for algo, fn_hash in algos.items():
+                    h = fn_hash(s)
+                    idx.setdefault(h, []).append(
+                        {"dll": dll, "func": fn, "algo": algo, "case": case})
+    return idx
+
+
+def api_hash_resolver(sample: str, timeout: int = 300) -> dict:
+    """Detect runtime API-hash import resolvers (AMAT Track 8 / MalTrak).
+
+    Scans executable sections for 4-byte constants equal to a known-algorithm
+    hash of a common Windows API name. High match counts => the binary resolves
+    imports at runtime by hash (anti-import-table evasion). Matched names are
+    evidence + IOC value (they reveal the resolved API surface).
+    """
+    t0 = time.time()
+    try:
+        import pefile
+        pe = pefile.PE(sample, fast_load=True)
+        target = b""
+        for s in pe.sections:
+            if s.Characteristics & 0x20000000:  # IMAGE_SCN_MEM_EXECUTE
+                raw = (s.get_data() or b"")
+                if len(target) < 32 * 1024 * 1024:
+                    target += raw
+        pe.close()
+        if not target:
+            return _skipped("api_hash_resolver", "no executable section")
+    except Exception as e:
+        return {"ok": False, "error": f"api_hash_resolver: {e}",
+                "tool": "api_hash_resolver"}
+
+    idx = _api_hash_index()
+    matches: list[dict] = []
+    seen: set[tuple] = set()
+    limit = 96
+    for i in range(len(target) - 3):
+        v = int.from_bytes(target[i:i + 4], "little")
+        for cand in idx.get(v, ()):
+            key = (cand["dll"], cand["func"], cand["algo"])
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append({"offset": i, "value": hex(v), **cand})
+            if len(matches) >= limit:
+                break
+        if len(matches) >= limit:
+            break
+
+    matches.sort(key=lambda m: (m["dll"], m["func"]))
+    by_dll: dict[str, list[str]] = {}
+    algos_found: set[str] = set()
+    funcs: list[str] = []
+    for m in matches:
+        by_dll.setdefault(m["dll"], []).append(m["func"])
+        algos_found.add(m["algo"])
+        if m["func"] not in funcs:
+            funcs.append(m["func"])
+
+    signal = len(matches) >= 3
+    return {
+        "ok": True, "tool": "api_hash_resolver",
+        "duration_s": round(time.time() - t0, 2),
+        "signal": signal,
+        "match_count": len(matches),
+        "unique_functions": len(funcs),
+        "algorithms": sorted(algos_found),
+        "by_dll": by_dll,
+        "functions": funcs[:60],
+        "hint": ("Runtime API-hash import resolver present: imports resolved "
+                 "by hash at runtime (anti-import-table evasion); matched "
+                 "names reveal the API surface." if signal else
+                 "No known-algorithm API-hash constants found in executable "
+                 "sections."),
+    }
+
+
 def signature_match(func_name: str = "", imports: list | None = None,
                     strings: list | None = None, constants: list | None = None,
                     size: int = 0) -> dict:
@@ -838,6 +1119,7 @@ def main() -> int:
                   "diec": diec, "ilspy": ilspy, "yarascan": yarascan,
                   "strings": strings,
                   "pe_import_signals": pe_import_signals,
+                  "api_hash_resolver": api_hash_resolver,
                   "signature_match": signature_match,
                   "xor_string_search": xor_string_search,
                   "olevba": olevba_analyze, "peepdf": peepdf_analyze,
@@ -855,7 +1137,7 @@ def main() -> int:
     a = ap.parse_args()
     if a.tool == "all":
         core = ("capa", "floss", "lief", "diec", "yarascan", "strings",
-                "pe_import_signals", "xor_string_search")
+                "pe_import_signals", "api_hash_resolver", "xor_string_search")
         out = {t: TOOL_FUNCS[t](a.sample) for t in core}
     else:
         out = {a.tool: TOOL_FUNCS[a.tool](a.sample)}

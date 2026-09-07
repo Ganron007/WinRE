@@ -201,7 +201,8 @@ else:
 try:
     st = run(tools / "flare_static_tools.py", "all", str(sample), timeout=2700)
     if isinstance(st, dict):
-        for k in ("capa", "floss", "diec", "yarascan", "strings"):
+        for k in ("capa", "floss", "diec", "yarascan", "strings",
+                  "pe_import_signals", "api_hash_resolver"):
             v = st.get(k)
             if isinstance(v, dict):
                 out[k] = v
@@ -745,6 +746,15 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
     if enable_dynamic:
         results["dynamic"] = remote_dynamic(sample.name, sha, pack, cfg,
                                             max_seconds, enable_pesieve)
+        # DFIR-Nexus ingest pack: dynamic logs + static context in one 7z
+        try:
+            from .casepack import build_case
+            dyn = results["dynamic"]
+            if dyn.get("ok"):
+                results["case_pack"] = build_case(pack.root, sha, mode)
+        except Exception as e:
+            results["case_pack"] = {"ok": False,
+                                    "error": f"case pack: {str(e)[:200]}"}
 
     # yara (local, from evidence)
     try:
