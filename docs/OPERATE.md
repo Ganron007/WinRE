@@ -7,7 +7,7 @@ Day-2 operation of the WinRE lab. Install first: [`INSTALL.md`](INSTALL.md).
 | Mode | Command | What runs |
 |---|---|---|
 | **Static, agentic engine (default)** | `python -m winre.pipeline C:\samples\s.exe` | intake → quick → deep (LangGraph ReAct, `llm_judge`) → yara → report → audit → `logs/<sha>/agentic/` |
-| **Static, deterministic engine** | `... --mode static` | same stages, deep = fixed 24-tool checklist + rules verdict, zero LLM (`static_deterministic`) → `logs/<sha>/static/` |
+| **Static, deterministic engine** | `... --mode static` | same stages, deep = fixed 35-tool checklist (30 steps) + rules verdict + calibration gates, zero LLM (`static_deterministic`) → `logs/<sha>/static/` |
 | **Static + agentic debug** | `... --agentic-dbg` | static + the deep agent gets bounded x64dbg tools (OEP/unpack/decrypt) — **no detonation** |
 | **Static + dynamic** | `... --dynamic --max-seconds 45` | static first, then segregated detonation (FakeNet + Procmon + Frida [+ pe-sieve]) into the run's mode section |
 | **Dry LLM** | add `--dry-llm` (agentic mode) | no LLM calls; deep stays `deterministic_fallback` (honest, not green) |
@@ -31,8 +31,35 @@ deep/ dynamic/ yara/ report/` + `audit.json` + pack-level `META.json`
 (mode/engine/source). `snapshot.json` (HITL ledger) lives at the sha root
 (VM-state, mode-independent). Browse them in the UI (Cases → pack — one row
 per section) — verdicts, deep tool-call timeline (agentic) or checklist +
-fired rules (static), dynamic artifacts (Frida traces, Procmon summaries,
-pcaps, pe-sieve dumps), YARA rules, analyst-next report.
+fired rules (static), dynamic artifacts (Frida traces, Procmon summaries +
+persistence catalog + behavior timeline, beacon analysis, post-mortem
+dumps, pcaps, pe-sieve dumps), YARA rules, analyst-next report.
+
+## Sandbox realism (run BEFORE the first detonation)
+
+The detonation VM must look like a real host, or modern malware exits before
+behaving (Maldev 73/74 checks). On the VM:
+
+```powershell
+python -m winre.sandbox_realism check    # probe: CPU/RAM/USBSTOR/procs/boot/display
+python -m winre.sandbox_realism apply    # seeds USBSTOR device history (registry)
+```
+
+Manual items the probe flags: display 1920x1080 (not headless), warm
+snapshot (booted days ago), non-VMware-looking BIOS/MAC, VMware-tools
+sanitization. Sample filenames: keep original human-ish names — never a
+bare hash (intake records the policy note).
+
+## Case pack (DFIR-Nexus ingest)
+
+After every dynamic run the section pack gets a 7z with dynamic logs +
+static context + `case_manifest.json` (file→sha256) + `case_timeline.json`
+(incident-style ordered events). DFIR-Nexus consumes this for host+memory+
+behavior correlation; full-image memory analysis is DFIR-Nexus-owned.
+
+```powershell
+python -m winre.casepack <sha256> [--mode static|agentic]
+```
 
 ## Snapshot gate
 

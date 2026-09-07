@@ -11,6 +11,12 @@ git clone <repo-url> WinRE
 cd WinRE
 
 python -m pip install langchain-openai langgraph langchain-core pydantic
+# KB-derived static tools are pure-python/pefile; the VM needs pefile, psutil
+# and (for Speakeasy) setuptools<81 pinned (pkg_resources removal):
+python -m pip install pefile psutil "setuptools<81"
+
+# Optional fast-path: pyghidra for ghidra_decompile (set GHIDRA_INSTALL_DIR)
+# python -m pip install pyghidra
 
 # LLM config (any OpenAI-compatible provider)
 copy .env.template .env

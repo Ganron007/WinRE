@@ -21,13 +21,20 @@ logs/<sha256>/<static|agentic>/         ← one self-contained case per engine
 │   └── META.json                     engine (langgraph|static_deterministic),
 │                                     mode, fallback flag, MCP health
 ├── dynamic/                          (opt-in, segregated, runs LAST)
-│   ├── META.json / STAGE.json        run status + snapshot-gate evidence
+│   ├── META.json / STAGE.json        run status + sample_pid + snapshot-gate evidence
 │   ├── frida_trace.jsonl / frida_summary.json
 │   ├── procmon.csv / procmon_summary.json
-│   ├── network.json / network_intel.json / network_raw/*.pcap
-│   ├── memory/                       pe-sieve dumps (optional --pesieve)
+│   │                               (+ persistence catalog, spoofing_suspects)
+│   ├── behavior_timeline.csv         ordered high-signal events (incident-style)
+│   ├── network.json / network_intel.json (+ beacon_analysis: cadence/UA/HTTP)
+│   │   / network_raw/*.pcap
+│   ├── memory/                       pe-sieve dumps + suspended-process dumps
+│   │   / *.dmp                       procdump -ma harvest (post-mortem)
+│   ├── post_mortem.json              memory harvest + ntdll integrity + snapshot
 │   ├── x64dbg/dump/                  OEP dumps (local-mode post step)
-│   └── process_snapshot.json
+│   └── process_snapshot.json         PPID/cmdline snapshot (spoof correlation)
+├── case-<sha16>-<mode>.7z            DFIR-Nexus ingest pack (dynamic + static
+│                                     context + manifest + timeline)
 ├── yara/
 │   ├── CADRE_<sha8|family>.yar       generated YARA (deterministic, no LLM)
 │   ├── CADRE_<sha8|family>.yml       Sigma network rule
@@ -56,7 +63,11 @@ lab specifics redacted, no binaries).
   section 4 of the report and tagged with its source
   (`llm_judge` / `static_deterministic` / `deterministic_fallback`).
   Static sections have no `llm_analysis` (zero LLM calls) and show the
-  fired rules instead (`rules_fired`).
+  fired rules instead (`rules_fired`); calibration caps malicious→suspicious
+  when only protection signals exist (`verdict_calibrated` + reason).
+- Step-level tool errors are surfaced into the audit (`failed_tools`) — a
+  failed checklist step can never hide inside the history and still pass
+  `truly_green`.
 - `iocs.json` is deterministic extraction (no LLM). The agent narrative is
   scanned too, and tagged in `sources` as `agent_narrative(llm_tagged)`.
 - `AUDIT-REPORT.md` renders `audit.json` — the same gate that decides

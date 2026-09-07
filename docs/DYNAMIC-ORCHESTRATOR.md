@@ -14,6 +14,14 @@ host: scp sample → C:\samples\foo.exe + C:\WinRE\orchestrator.py --file C:\sam
      ├─ spawn frida_api_trace.py --target C:\samples\foo.exe --apis <hooklist> → frida_trace.jsonl
      ├─ wait --max-seconds (default 45), optional PE-sieve mid-run if --pesieve
      ├─ stop Procmon → procmon.csv, tshark enrich → procmon_summary.json + network_intel.json
+     ├─ post-analysis (KB 2026-09-07): procmon_post (persistence catalog +
+     │   behavior_timeline.csv + spoof suspects), pcap_beacon (cadence/UA/
+     │   HTTP schema), post_mortem (procdump -ma harvest + ntdll integrity +
+     │   process snapshot) → procmon_summary.json extended, network_intel.json
+     │   +beacon_analysis, post_mortem.json
+     ├─ suspended-process monitor: pe-sieve dump of every new sample process
+     │   instance (Early-Bird/APC capture incl. CREATE_SUSPENDED children)
+     ├─ input jiggle: synthetic mouse movement during the run (interaction gates)
      ├─ optional x64dbg-MCP DumpModule → x64dbg/dump/
      ├─ Mallcat triage → malcat-triage.json (if Malcat installed)
      └─ emit ANALYST-NEXT.md (emit_analyst_next.py) + META.json
@@ -56,7 +64,7 @@ See `docs/internal/ARCHITECTURE.md:3` contract table. Key:
 |------|--------|
 | `frida_trace.jsonl` | `tools/frida_api_trace.py` hook set (CreateFileW, VirtualAlloc, etc. `dynamic/README.md:20`) |
 | `procmon.csv` | `C:\tools\sysinternals\Procmon64.exe /Quiet /Minimized /BackingFile` |
-| `procmon_summary.json` | `winre/summarize_dynamic.py` (filters to process `foo.exe`) |
+| `procmon_summary.json` | `winre/summarize_dynamic.py` (filters to process `foo.exe`) + `winre/procmon_post.py` (persistence families, spoofing_suspects, behavior timeline) |
 | `network_intel.json` | `winre/enrich_pcap_tshark.py` over `network_raw/*.pcap` |
 | `memory/pe_sieve_report.json` | `C:\tools\pe-sieve\pe-sieve64.exe /pid <pid> /json` |
 | `malcat-triage.json` | `tools/malcat_win.py` (if licensed) |
@@ -67,6 +75,9 @@ See `docs/internal/ARCHITECTURE.md:3` contract table. Key:
 | Script | Purpose |
 |--------|---------|
 | `summarize_dynamic.py` | Procmon CSV → `procmon_summary.json` (file/reg/proc/net groups) |
+| `procmon_post.py` | Procmon CSV → persistence catalog (Run key/service/task/WMI/sideload/drop), `behavior_timeline.csv`, spoofing suspects |
+| `pcap_beacon.py` | pcaps → `network_intel.json.beacon_analysis` (beacon cadence/jitter, HTTP URIs/UAs, DNS) |
+| `post_mortem.py` | procdump -ma harvest + ntdll-integrity (unhooking) + process snapshot → `post_mortem.json`, `memory/*.dmp` |
 | `enrich_pcap_tshark.py` | `tshark -r packets.pcap -T json` → `network_intel.json` |
 | `emit_analyst_next.py` | `ANALYST-NEXT.md` template (next BPs, strings to chase) |
 | `doc_triage_v2.py` | Office doc triage (OLE/Macro) — not detonation |

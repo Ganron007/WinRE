@@ -54,9 +54,9 @@ winre/pipeline.py <sample> [--mode agentic|static] [--dynamic] [--max-seconds 45
    │             Malcat MCP views + IDA/Ghidra SQL + static-tools layer
    │             (capa/floss/lief/diec/yarascan/strings/import-signals/xor)
    ├─ 3. deep     engine selected by --mode      → logs/<sha>/<mode>/deep/
-   │             agentic: LangGraph ReAct over the 24-tool set (llm_judge)
-   │             static:  fixed 24-tool checklist + rules verdict, zero LLM
-   │                      (static_deterministic — RevAI scripted)
+   │             agentic: LangGraph ReAct over the 35-tool set (llm_judge)
+   │             static:  fixed 35-tool checklist (30 steps) + rules verdict,
+   │                      zero LLM (static_deterministic — RevAI scripted)
    ├─ 4. yara     YARA + Sigma from evidence      → logs/<sha>/<mode>/yara/    (deterministic, no LLM in rules)
    ├─ 5. report   source-tagged report + next     → logs/<sha>/<mode>/report/
    │             source ∈ {llm_judge, static_deterministic, deterministic_fallback}
@@ -80,12 +80,12 @@ winre/pipeline.py <sample> [--mode agentic|static] [--dynamic] [--max-seconds 45
 
 | Stage | Tools | Key artifacts |
 |-------|-------|---------------|
-| intake | file magic, sha256 | `intake.json` |
-| quick | Malcat MCP (:9009) anomalies/yara/strings, IDA SQL funcs (if .i64), Ghidra SQL funcs, static-tools layer (capa/floss/lief/diec/yarascan/strings/import-signals/xor) | `quick.json` + `verdict` |
-| dynamic | FakeNet-NG, Procmon→CSV, Frida trace, pe-sieve (opt), x64dbg OEP/dump | `META.json` (ok, frida_events), `STAGE.json` (audit wrapper + gate evidence), `frida_trace.jsonl`, `procmon.csv`, `network_intel.json` |
-| deep | engine by `--mode`: `agentic` = LangGraph ReAct (x64dbg-MCP LoadBinary/DetectOEP/DumpModule, Malcat-MCP fns/decompile, WinDbg-MCP dump analysis, 24 static tools); `static` = fixed 24-tool checklist, no LLM | `deep.json` + verdict (`llm_judge` / `static_deterministic`), full history, `llm_analysis` (null in static mode) |
-| yara | deterministic YARA (`CADRE_<sha8>.yar`) + Sigma (`CADRE_<sha8>.yml`) | `rule_report.json` |
-| report | source-tagged `report.json` + `ANALYST-NEXT.md` | — |
+| intake | file magic, sha256 | `intake.json` (+ filename-policy note) |
+| quick | Malcat MCP (:9009) anomalies/yara/strings, IDA SQL funcs (if .i64), Ghidra SQL funcs, static-tools layer (capa/floss/lief/diec/yarascan/strings/import-signals/xor/api-hash-resolver/crypto/mitigations/iocs) | `quick.json` + `verdict` |
+| dynamic | FakeNet-NG, Procmon→CSV, Frida trace, pe-sieve (opt) + suspended-process dump monitor, hollows_hunter, input jiggle, x64dbg OEP/dump; post-analysis: procmon persistence catalog + behavior timeline + spoof suspects, pcap beacon/HTTP-schema, post-mortem (procdump -ma harvest, ntdll integrity, process snapshot) | `META.json` (ok, frida_events, sample_pid), `STAGE.json` (audit wrapper + gate evidence), `frida_trace.jsonl`, `procmon.csv`, `procmon_summary.json` (+persistence/timeline/spoof), `behavior_timeline.csv`, `network_intel.json` (+beacon_analysis), `post_mortem.json`, `memory/*.dmp`, `process_snapshot.json` |
+| deep | engine by `--mode`: `agentic` = LangGraph ReAct (x64dbg-MCP LoadBinary/DetectOEP/DumpModule + write-BP trace, Malcat-MCP fns/decompile, WinDbg-MCP dump analysis, 35 static tools); `static` = fixed 35-tool checklist (30 steps), no LLM | `deep.json` + verdict (`llm_judge` / `static_deterministic`), full history, `llm_analysis` (null in static mode), step-level `tool_failures` surfaced into audit |
+| yara | deterministic YARA (`CADRE_<sha8>.yar`) + Sigma (`CADRE_<sha8>.yml`), curation lint (soundness/dupes/noise warnings in rule_report) | `rule_report.json` |
+| report | source-tagged `report.json` + `ANALYST-NEXT.md`; sections incl. behavior-context (kill-switch/CLI/artifact catalog) + crypto-identified tags | — |
 
 ## Local-only
 
