@@ -235,8 +235,56 @@ try {
 }
 Log ("Frida exit={0}" -f $fridaExit)
 
-Kill-Image "$SampleProcName.exe"
-Kill-Image "frida-helper-64.exe"
+# ---- KB: Early-Bird/APC-aware capture + sandbox input jiggle -------------
+# 1) suspended-process monitor: dump EVERY sample process instance as it
+#    appears (incl. CREATE_SUSPENDED children that never resume) so the
+#    pre-resume shellcode is captured before userland hooks would matter.
+# 2) input jiggle: synthetic mouse movement defeats WH_MOUSE_LL interaction
+#    gates (Maldev 73: <5 clicks in 20s => sandbox).
+$monitor = Join-Path $OutDir "_monitor_suspended.ps1"
+$jiggle = Join-Path $OutDir "_input_jiggle.ps1"
+@"
+param(`$SampleName, `$PeSieveExe, `$MemDir, `$MaxSeconds)
+`$deadline = (Get-Date).AddSeconds(`$MaxSeconds)
+`$seen = @{}
+while ((Get-Date) -lt `$deadline) {
+  Get-Process -Name `$SampleName -ErrorAction SilentlyContinue | ForEach-Object {
+    if (-not `$seen.ContainsKey(`$_.Id)) {
+      `$seen[`$_.Id] = `$true
+      & `$PeSieveExe /pid `$_.Id /dir `$MemDir /quiet /minidmp /shellc A /dnet 4 /data 3 2>`$null | Out-Null
+    }
+  }
+  Start-Sleep -Seconds 3
+}
+"@ | Set-Content $monitor -Encoding ASCII
+@"
+param(`$Seconds)
+`$sig = '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);'
+`$t = Add-Type -MemberDefinition `$sig -Name J -Namespace W -PassThru
+`$deadline = (Get-Date).AddSeconds(`$Seconds)
+`$r = New-Object System.Random
+while ((Get-Date) -lt `$deadline) {
+  `$t::SetCursorPos(`$r.Next(100, 1500), `$r.Next(100, 800)) | Out-Null
+  Start-Sleep -Milliseconds 400
+}
+"@ | Set-Content $jiggle -Encoding ASCII
+$monProc = $null
+$jigProc = $null
+if ((Test-Path $PeSieveExe) -and (Test-Path $monitor)) {
+  New-Item -ItemType Directory -Force -Path $memDir | Out-Null
+  $monProc = Start-Process powershell -ArgumentList @(
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $monitor,
+    "$SampleProcName", $PeSieveExe, $memDir, "$MaxSeconds"
+  ) -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
+  Log ("suspended-process monitor started pid={0}" -f $monProc.Id)
+}
+if (Test-Path $jiggle) {
+  $jigProc = Start-Process powershell -ArgumentList @(
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $jiggle,
+    "$MaxSeconds"
+  ) -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
+  Log ("input jiggle started pid={0}" -f $jigProc.Id)
+}
 
 Log "stopping Procmon"
 Start-Process -FilePath $ProcmonExe -ArgumentList "/AcceptEula","/Terminate" -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
@@ -256,6 +304,14 @@ if (Test-Path $pml) {
   Log "WARN: PML missing"
 }
 Start-Process -FilePath $ProcmonExe -ArgumentList "/AcceptEula","/Terminate" -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
+
+# KB: stop the aux monitors/jiggle (bounded; never stall the job)
+foreach ($aux in @($monProc, $jigProc)) {
+  if ($aux) {
+    Stop-Process -Id $aux.Id -Force -ErrorAction SilentlyContinue
+  }
+}
+Remove-Item $monitor, $jiggle -Force -ErrorAction SilentlyContinue
 
 if ($fnProc -and -not $fnProc.HasExited) {
   Log "stopping FakeNet"
@@ -325,6 +381,7 @@ if (Test-Path $trace) {
   pe_sieve_pid = $peSievePid
   pe_sieve_rc = $peSieveRc
   pe_sieve_report_valid = $psReportValid
+  sample_pid = if ($peSievePid) { $peSievePid } else { (Get-Process -Name $SampleProcName -ErrorAction SilentlyContinue | Select-Object -First 1).Id }
   memory_dir = if (Test-Path $memDir) { $memDir } else { $null }
   snapshot_restore_required = $true
   finished_at = (Get-Date).ToUniversalTime().ToString("o")

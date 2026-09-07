@@ -52,6 +52,49 @@ def _is_url_or_host(s: str) -> bool:
             or ".onion" in s or re.match(r"^\d{1,3}(\.\d{1,3}){3}(:\d+)?$", s))
 
 
+# ── YARA curation pass (Z2A 8_ Hunting: sound rules, meta, review gate) ─────
+
+_NOISE_WORDS = {
+    "the", "and", "for", "this", "that", "with", "from", "you", "your",
+    "have", "will", "can", "not", "are", "was", "were", "has", "had",
+    "program", "file", "files", "data", "user", "system", "windows",
+    "microsoft", "error", "runtime", "version", "copyright", "software",
+    "application", "cannot", "could", "would", "should",
+}
+_COMMON_DLLS = {"kernel32", "ntdll", "user32", "advapi32", "ws2_32",
+                "wininet", "ole32", "shell32", "gdi32", "crypt32", "psapi"}
+
+
+def _curate(strings: list[str], imports: list[str]) -> dict:
+    """Soundness lint for the generated rule (Z2A 8_ slides 4-13)."""
+    warnings: list[str] = []
+    n = len(strings)
+    short = [s for s in strings if len(s) < 8]
+    noise = [s for s in strings
+             if s.lower().strip() in _NOISE_WORDS
+             or (s.lower() in _NOISE_WORDS)]
+    dupes = n - len({s.lower() for s in strings})
+    if n > 60:
+        warnings.append(f"rule uses {n} strings — high recall/low "
+                        "diagnosticity; prefer curated subsets")
+    if short:
+        warnings.append(f"{len(short)} strings < 8 chars — false-positive prone")
+    if noise:
+        warnings.append(f"{len(noise)} noise/stopword strings — drop them")
+    if dupes:
+        warnings.append(f"{dupes} case-insensitive duplicates")
+    return {
+        "warnings": warnings[:6],
+        "string_count": n,
+        "short_strings": len(short),
+        "noise_strings": len(noise),
+        "duplicates": dupes,
+        "sound": not warnings,
+        "curation_note": ("generated rule is a detection STARTING POINT — "
+                          "review + trim before release (Z2A 8_)"),
+    }
+
+
 def _strings_from_evidence(quick: dict, dynamic: dict | None) -> list[str]:
     """Collect candidate strings: quick (malcat + floss + strings64) +
     dynamic (frida/network). Deterministic only."""
@@ -193,6 +236,9 @@ def generate_rules(evidence: Path, out_dir: Path) -> dict:
     # honesty: a rule with no evidence can never match - say so loudly
     empty_rule = "condition: false" in yara_body
 
+    # curation lint (Z2A 8_) — warnings land in the rule report for review
+    curation = _curate(strings, imports)
+
     report = {
         "rule_id": rule_id,
         "sha256": sha,
@@ -205,6 +251,7 @@ def generate_rules(evidence: Path, out_dir: Path) -> dict:
             "network_used": sorted({s for s in strings if _is_url_or_host(s)}),
         },
         "empty_rule": empty_rule,
+        "curation": curation,
         "honesty": "rules are deterministic; no LLM-authored content",
     }
     (out_dir / "rule_report.json").write_text(

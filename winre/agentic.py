@@ -296,6 +296,59 @@ class ToolRegistry:
         matched names reveal the resolved API surface."""
         return self._vm_tool("api_hash_resolver")
 
+    def crypto_constants(self) -> dict:
+        """FindCrypt-class scan: crypto magic constants + AES S-box in
+        executable sections -> crypto_identified tags (config/key recovery
+        leads)."""
+        return self._vm_tool("crypto_constants")
+
+    def mitigations(self) -> dict:
+        """PE mitigation catalog (ASLR/DEP/SEH/CFG...). Low-coverage is a
+        weak evasion-pipeline signal, never a verdict driver."""
+        return self._vm_tool("mitigations")
+
+    def sink_sites(self) -> dict:
+        """Dangerous-API call sites in top functions (r2). Provenance =
+        caller function name. Evidence for the report sinks section."""
+        return self._vm_tool("sink_sites")
+
+    def rtf_predecode(self) -> dict:
+        """RTF container decode (control words/hex/\\bin/OLE2) — run BEFORE
+        olevba; embedded OLE2 means extract + olevba that blob."""
+        return self._vm_tool("rtf_predecode")
+
+    def string_decode_emulate(self) -> dict:
+        """Encoded-config recovery: high-entropy blob windows decoded with
+        xor/add/sub/rol keys (1-2 byte + date-seeded) -> plaintext config
+        candidates. Seed for the config-extractor deliverable."""
+        return self._vm_tool("string_decode_emulate")
+
+    def rolling_xor(self) -> dict:
+        """Rolling/date-seeded XOR key recovery via known-plaintext guidance
+        (nested PE 'MZ', compile-date keys) — beats fixed single-key
+        bruteforce on Qakbot-class loaders."""
+        return self._vm_tool("rolling_xor")
+
+    def script_decode(self) -> dict:
+        """Script-stage deobfuscation: base64/deflate layers, FromCharCode
+        chains, embedded PE/shellcode in scripts (PS/JS/VBS/HTA)."""
+        return self._vm_tool("script_decode")
+
+    def ioc_extract(self) -> dict:
+        """IOC extraction: wallets (btc/eth/xmr/ltc) + defanged URLs +
+        domains/IPs/emails from strings."""
+        return self._vm_tool("ioc_extract")
+
+    def goresym_analyze(self) -> dict:
+        """Go binary symbol recovery (goresym); honest skip when not Go."""
+        return self._vm_tool("goresym_analyze")
+
+    def decrypt_gate(self) -> dict:
+        """Analysis-readiness gate (AMAT Track 7): import-stripped + sparse
+        strings + packer taxonomy -> 'gated' status. When gated, capa/strings
+        evidence is UNRELIABLE and must not drive the verdict."""
+        return self._vm_tool("decrypt_gate")
+
     def signature_match(self, func_name: str = "", imports: list | None = None,
                         strings: list | None = None, constants: list | None = None,
                         size: int = 0) -> dict:
@@ -305,6 +358,23 @@ class ToolRegistry:
                               "size": size}, default=str)
         import base64
         b64 = base64.b64encode(payload.encode()).decode()
+        if self.mode == "local":
+            # VM-side: run the tool via subprocess (no ssh hop)
+            import subprocess as _sp
+            import sys as _sys
+            tools_dir = r"C:\WinRE\tools"
+            try:
+                p = _sp.run(
+                    [_sys.executable, tools_dir + r"\flare_static_tools.py",
+                     "signature_match", self.remote_sample,
+                     "--json-args", b64],
+                    capture_output=True, text=True, timeout=300,
+                    encoding="utf-8", errors="replace")
+                if p.returncode != 0:
+                    return {"error": (p.stderr or p.stdout)[-250:]}
+                return json.loads(p.stdout).get("signature_match") or {}
+            except Exception as e:
+                return {"error": str(e)[:250]}
         py = r"C:\Python313\python.exe"
         cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} -c '
                f'"import sys,json,base64; '
@@ -415,21 +485,31 @@ class ToolRegistry:
         pre-step; running it here burns the agent's budget)."""
         if self.mode == "local":
             import subprocess as _sp
-            import os as _os
             i64 = Path(self.remote_sample).with_suffix(
                 Path(self.remote_sample).suffix + ".i64")
             if not i64.is_file():
                 return {"skipped": "no .i64 on VM yet",
                         "hint": "use ghidra_query / ghidra_decompile instead"}
+            # HTTP transport on an existing .i64 is fast; the one-shot path
+            # re-runs idat auto-analysis (10+ min on packed) — never in the
+            # checklist. IDA is commercial-OPTIONAL: if the HTTP server can't
+            # start fast, degrade to an honest skip (Ghidra is primary).
             tools = Path(r"C:\WinRE\tools")
             p = _sp.run([sys.executable, str(tools / "flarevm_ida_query.py"),
-                         self.remote_sample, sql, "--json"],
-                        capture_output=True, text=True, timeout=600,
+                         self.remote_sample, sql, "--http", "--json"],
+                        capture_output=True, text=True, timeout=120,
                         encoding="utf-8", errors="replace")
             try:
-                return json.loads(p.stdout)
+                res = json.loads(p.stdout)
             except json.JSONDecodeError:
-                return {"error": (p.stderr or p.stdout)[-300:]}
+                return {"skipped": "idasql http query failed",
+                        "detail": (p.stderr or p.stdout)[-200:],
+                        "hint": "use ghidra_query instead"}
+            if not res.get("ok"):
+                return {"skipped": "idasql server unavailable",
+                        "detail": str(res.get("error") or "")[:200],
+                        "hint": "use ghidra_query instead"}
+            return res
         # remote mode: SSH existence check + scp'd helper
         r = remote_driver.ssh_run(self.cfg, f'powershell -NoProfile -Command "Test-Path '
                                   f"'C:\\samples\\{Path(self.remote_sample).name}.i64'\"",
@@ -578,6 +658,22 @@ class ToolRegistry:
         except Exception as e:
             return {"error": str(e)}
 
+    def x64dbg_write_bp_trace(self) -> dict:
+        """Write-BP memory-source trace (AMAT Track 14): HW write bp on the
+        module header, run, capture WHO wrote it (RIP + module + regs) —
+        the memory SOURCE of the unpacker write."""
+        gate = self._dbg_gate()
+        if gate:
+            return gate
+        try:
+            from winre import debug_loops
+            r = debug_loops.write_bp_trace(self.remote_sample,
+                                           xc=self._dbg_client())
+            return {"ok": r.get("ok"), "hit": r.get("hit"),
+                    "summary": r.get("summary"), "error": r.get("error")}
+        except Exception as e:
+            return {"error": str(e)}
+
 
 # ---------------------------------------------------------------------------
 # LangGraph ReAct (static phase)
@@ -589,11 +685,16 @@ TOOL_NAMES = ("ghidra_query", "ida_query", "malcat_analyze",
               "olevba_analyze",
               "peepdf_analyze", "speakeasy_emulate", "frida_static_probe",
               "r2_decompile", "upx_unpack", "shellcode_extract",
-              "dotnet_analyze", "z3_solve", "angr_analyze", "ghidra_decompile")
+              "dotnet_analyze", "z3_solve", "angr_analyze", "ghidra_decompile",
+              "crypto_constants", "mitigations", "sink_sites",
+              "rtf_predecode", "string_decode_emulate", "rolling_xor",
+              "script_decode", "ioc_extract", "goresym_analyze",
+              "decrypt_gate")
 # Opt-in dynamic tools: x64dbg debug loops over MCP. Bounded, deterministic
 # primitives — the LLM composes them, never free-forms debugger commands.
 DYNAMIC_TOOL_NAMES = ("x64dbg_oep", "x64dbg_wpm_dump",
-                      "x64dbg_crypt_dump", "x64dbg_unpack")
+                      "x64dbg_crypt_dump", "x64dbg_unpack",
+                      "x64dbg_write_bp_trace")
 
 
 class GhidraQueryArgs(BaseModel):
@@ -636,6 +737,16 @@ _ARG_MODELS: dict[str, type[BaseModel]] = {
     "pe_import_signals": EmptyArgs,
     "api_hash_resolver": EmptyArgs,
     "xor_string_search": EmptyArgs,
+    "crypto_constants": EmptyArgs,
+    "mitigations": EmptyArgs,
+    "sink_sites": EmptyArgs,
+    "rtf_predecode": EmptyArgs,
+    "string_decode_emulate": EmptyArgs,
+    "rolling_xor": EmptyArgs,
+    "script_decode": EmptyArgs,
+    "ioc_extract": EmptyArgs,
+    "goresym_analyze": EmptyArgs,
+    "decrypt_gate": EmptyArgs,
     "olevba_analyze": EmptyArgs,
     "peepdf_analyze": EmptyArgs,
     "speakeasy_emulate": EmptyArgs,
@@ -651,6 +762,7 @@ _ARG_MODELS: dict[str, type[BaseModel]] = {
     "x64dbg_wpm_dump": X64DbgHitsArgs,
     "x64dbg_crypt_dump": X64DbgHitsArgs,
     "x64dbg_unpack": EmptyArgs,
+    "x64dbg_write_bp_trace": EmptyArgs,
 }
 
 
@@ -784,6 +896,9 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
 Dynamic debugger tools (x64dbg in the VM snapshot — bounded primitives):
 x64dbg_oep (find unpack OEP), x64dbg_wpm_dump (capture process-injected
 buffers), x64dbg_crypt_dump (capture pre/post-decrypt buffers),
+x64dbg_write_bp_trace (HW write-BP on the module header -> who wrote it:
+memory-source of the unpacker write — use for multi-stage unpack where a
+single OEP is misleading),
 x64dbg_unpack (full OEP->dump->Malcat-compare in one call — prefer this for
 packed samples over composing primitives yourself).
 Debugger discipline: prefer x64dbg_unpack for packed binaries; keep hit
@@ -847,8 +962,32 @@ r2_decompile / upx_unpack / shellcode_extract / frida_static_probe:
 olevba_analyze / peepdf_analyze: Office/PDF triage (not for PE).
 signature_match: crypto/stdlib/winapi function signature DBs (pass the
   function's imports/strings/constants from other tool output).
+crypto_constants: crypto magic constants + AES S-box in exec sections ->
+  crypto_identified tags (RC4/XTEA/SHA256/... leads for config extraction).
+decrypt_gate: analysis-readiness gate — import-stripped + sparse strings +
+  packer taxonomy. status='gate' means capa/string evidence is UNRELIABLE:
+  do NOT lean a malicious verdict on capa clusters when gated.
+string_decode_emulate: encoded-config recovery (xor/add/sub/rol 1-2-byte +
+  date-seeded keys) over high-entropy blobs -> plaintext config candidates.
+rolling_xor: known-plaintext-guided rolling/date-seeded XOR keys (nested PE,
+  compile-date seeds) — beats fixed-key bruteforce on loader-class samples.
+mitigations: PE hardening catalog (ASLR/DEP/SEH/CFG). Weak signal only.
+sink_sites: dangerous-API call sites with caller-function provenance (r2).
+script_decode: script-stage deobfuscation (base64/deflate/fromcharcode) +
+  embedded PE/shellcode flags for PS/JS/VBS/HTA delivery.
+ioc_extract: wallets + defanged URLs + domains/IPs/emails from strings.
+goresym_analyze: Go symbol recovery (honest skip when not Go).
+rtf_predecode: RTF container decode; embedded OLE2 -> then olevba.
 z3_solve / angr_analyze: deobfuscation solvers — only for confirmed
   obfuscation (MBA/CFF), never first-line.
+
+VERDICT METHOD (ACH): frame the verdict as competing hypotheses
+(malicious | tool/legit | unknown). Weight the DIAGNOSTICITY of each piece
+of evidence, not its volume. Explicitly try to DISPROVE your leading
+hypothesis (e.g., is the C2 string actually a kill-switch? is the
+high-entropy section a legitimate packer?). Protection/obfuscation alone
+never proves malicious. Report which evidence you tried to disprove and
+why it held.
 
 Your job:
 1. Ground the verdict first: pe_parse + capa + malcat_analyze

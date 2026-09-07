@@ -78,6 +78,16 @@ def _intake(sample: Path, pack: EvidencePack) -> dict:
             "intake", False, error=meta["error"]))
         return meta
     meta["elapsed_s"] = round(time.time() - t0, 1)
+    # sandbox-realism filename policy (Maldev 73 digit-count check): a
+    # bare-hash sample name is itself a sandbox tell — record it honestly
+    import re as _re
+    meta["filename_policy"] = {
+        "name": sample.name,
+        "hash_named": bool(_re.fullmatch(r"[0-9a-f]{32,64}",
+                                         sample.name.split(".")[0])),
+        "note": ("keep original human-ish names; never run samples as "
+                 "bare-hash files"),
+    }
     pack.write("intake", "intake.json", meta)
     pack.write("intake", "META.json", stage_result("intake", True, summary=meta["format"]))
     return meta
@@ -373,6 +383,13 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
     except Exception as e:
         failures.append(f"agent:{e}")
         agent_result = None
+
+    # surface step-level tool errors from the static checklist (honesty —
+    # a failed tool must show in the audit, not hide inside history)
+    if mode == "static" and agent_result:
+        for _tf in (agent_result.get("tool_failures") or []):
+            if _tf not in failures:
+                failures.append(_tf)
 
     if agent_result and agent_result.get("source") in ("llm_judge", "static_deterministic"):
         fallback = False

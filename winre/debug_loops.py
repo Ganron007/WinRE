@@ -667,6 +667,93 @@ def api_loop(sample: str, api: str, xc: X64DbgClient | None = None,
 # ---------------------------------------------------------------------------
 # Scenario 5 — agentic unpack (deterministic composer)
 # ---------------------------------------------------------------------------
+def write_bp_trace(sample: str, xc: X64DbgClient | None = None,
+                   region: str = "header") -> dict:
+    """Write-BP memory-source tracing (Kaspersky AMAT Track 14, Cridex).
+
+    Sets a hardware write breakpoint on the module base (MZ/PE header) or
+    the first code section, runs, and on hit records WHO wrote it: the
+    current instruction (RIP) + owning module + thread — the memory SOURCE
+    of the unpacker. Bounded: one breakpoint, one hit, then cleanup.
+    """
+    import os
+    xc = xc or X64DbgClient()
+    evidence: list[dict] = []
+    try:
+        lb = xc.load_binary(sample)
+        if not lb.get("ok"):
+            return {"ok": False, "error": f"load: {lb.get('error')}",
+                    "evidence": evidence}
+        evidence.append({"label": "loaded"})
+    except Exception as e:
+        return {"ok": False, "error": f"load: {e}", "evidence": evidence}
+
+    base, sections = _module_base_and_sections(xc, os.path.splitext(
+        os.path.basename(sample))[0])
+    if not base:
+        return {"ok": False, "error": "module base not found",
+                "evidence": evidence}
+    if region == "section0" and sections:
+        target = base + sections[0].get("va", 0x1000)
+    else:
+        target = base
+    evidence.append({"label": "watch", "region": region, "address": hex(target)})
+
+    try:
+        hb = xc.set_hw_breakpoint(target, dr_index=0, bp_type="w", size=1)
+        if not hb.get("ok"):
+            return {"ok": False, "error": f"hw bp: {hb.get('error')}",
+                    "evidence": evidence}
+        evidence.append({"label": "hwbp_set"})
+        xc.clear_event_log()
+        xc.run()
+        time.sleep(2)
+        st = xc.get_state()
+        xc.pause()
+        if not _state_text(st).startswith("PAUSED"):
+            # maybe it ran past; try pause + read state again
+            time.sleep(1)
+            st = xc.get_state()
+        ev = xc.get_event_log() or {}
+        evidence.append({"label": "after_run", "state": _state_text(st),
+                         "event_log": (ev.get("result") or ev)[:400]})
+    except Exception as e:
+        evidence.append({"label": "run_error", "error": str(e)[:150]})
+
+    # memory source: RIP + module at the hit
+    rip = _rip(xc)
+    mod_owner = None
+    try:
+        lm = xc.list_modules() or {}
+        mods = lm.get("result") or lm.get("modules") or []
+        for m in mods if isinstance(mods, list) else []:
+            base_m = m.get("base") or m.get("module_base") or m.get("addr")
+            size = m.get("size") or m.get("module_size") or 0
+            if isinstance(base_m, int) and rip and base_m <= rip < base_m + size:
+                mod_owner = m.get("name") or m.get("module") or hex(base_m)
+                break
+    except Exception:
+        pass
+    regs = _regs(xc)
+    evidence.append({"label": "hit", "rip": hex(rip) if rip else None,
+                     "module_owner": mod_owner,
+                     "registers": regs[:300],
+                     "disasm": _disasm(xc, rip, 4)})
+
+    try:
+        xc.delete_breakpoint(target)
+    except Exception:
+        pass
+    ok = bool(rip and mod_owner)
+    return {"ok": ok,
+            "hit": {"rip": hex(rip) if rip else None, "module": mod_owner,
+                    "registers": regs[:300]},
+            "summary": (f"write to {region} by {mod_owner} @ {hex(rip) if rip else '?'} — "
+                        "memory source of the unpacker write traced"
+                        if ok else "no write hit captured in this window"),
+            "evidence": evidence}
+
+
 def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
                    dump_suffix: str = "_unpacked.exe") -> dict:
     """OEP -> DumpModule -> static re-analysis of the dump -> compare.
@@ -790,6 +877,7 @@ if __name__ == "__main__":
     fn = {"ep_break": ep_break, "oep_by_section": oep_by_section,
           "oep_by_esp": oep_by_esp,
           "wpm_dump": wpm_dump, "crypt_dump": crypt_dump,
+          "write_bp_trace": write_bp_trace,
           "agentic_unpack": agentic_unpack,
           "api_loop": api_loop}[args.scenario]
     res = None

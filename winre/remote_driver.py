@@ -665,6 +665,12 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
         failures.append(f"agent:{e}")
         agent_result = None
 
+    # surface step-level tool errors from the static checklist (honesty)
+    if mode == "static" and agent_result:
+        for _tf in (agent_result.get("tool_failures") or []):
+            if _tf not in failures:
+                failures.append(_tf)
+
     if agent_result and agent_result.get("source") in ("llm_judge",
                                                         "static_deterministic"):
         # deep produced a real verdict (LLM or deterministic rules) — not a fallback

@@ -69,7 +69,18 @@ def _rules_verdict(ev: dict) -> dict:
     """Deterministic verdict from collected evidence. Returns verdict dict."""
     reasons: list[str] = []
 
-    # 1. YARA (curated ruleset scan OR malcat yara engine)
+    # 0. decrypt gate (AMAT Track 7): when the sample is gated, capa and
+    # string-derived clusters are UNRELIABLE — do not lean verdicts on them.
+    dg = _dict_of(ev.get("decrypt_gate"))
+    gated = dg.get("status") == "gate"
+    if gated:
+        reasons.append(
+            f"decrypt-gate: {dg.get('taxonomy', 'unknown')} packing — "
+            f"imports={dg.get('import_count')} strings sparse — "
+            f"capa/string evidence unreliable")
+
+    # 1. YARA (curated ruleset scan OR malcat yara engine) — decisive even
+    #    when packed (family-level match on staged curated rules)
     yh = _dict_of(ev.get("yarascan"))
     hits = _as_hit_names(yh.get("hits"))
     my = _as_hit_names(ev.get("malcat_yara"))
@@ -80,22 +91,24 @@ def _rules_verdict(ev: dict) -> dict:
                 "summary": "Curated YARA rule match on the sample.",
                 "key_evidence": reasons, "rules_fired": ["yara-hit"]}
 
-    # 2. ransomware/exfil capa clusters
+    # 2. ransomware/exfil capa clusters — SUPPRESSED when the decrypt gate
+    #    says the code we analyzed isn't the real (decrypted) code
     capa = _dict_of(ev.get("capa"))
     caps = {(c.get("name") or "").lower() for c in (capa.get("capabilities") or [])
             if isinstance(c, dict)}
-    ransom_hits = {c for c in caps if any(k in c for k in RANSOMWARE_CAPA)}
-    exfil_hits = {c for c in caps if any(k in c for k in EXFIL_CAPA)}
-    if len(ransom_hits) >= 2:
-        reasons.append("capa ransomware cluster: " + ", ".join(sorted(ransom_hits)[:5]))
-        return {"verdict": "malicious", "confidence": "medium",
-                "summary": "Ransomware-family capability cluster (capa).",
-                "key_evidence": reasons, "rules_fired": ["capa-ransomware-cluster"]}
-    if len(exfil_hits) >= 2:
-        reasons.append("capa exfil cluster: " + ", ".join(sorted(exfil_hits)[:5]))
-        return {"verdict": "malicious", "confidence": "medium",
-                "summary": "Exfiltration capability cluster (capa).",
-                "key_evidence": reasons, "rules_fired": ["capa-exfil-cluster"]}
+    if not gated:
+        ransom_hits = {c for c in caps if any(k in c for k in RANSOMWARE_CAPA)}
+        exfil_hits = {c for c in caps if any(k in c for k in EXFIL_CAPA)}
+        if len(ransom_hits) >= 2:
+            reasons.append("capa ransomware cluster: " + ", ".join(sorted(ransom_hits)[:5]))
+            return {"verdict": "malicious", "confidence": "medium",
+                    "summary": "Ransomware-family capability cluster (capa).",
+                    "key_evidence": reasons, "rules_fired": ["capa-ransomware-cluster"]}
+        if len(exfil_hits) >= 2:
+            reasons.append("capa exfil cluster: " + ", ".join(sorted(exfil_hits)[:5]))
+            return {"verdict": "malicious", "confidence": "medium",
+                    "summary": "Exfiltration capability cluster (capa).",
+                    "key_evidence": reasons, "rules_fired": ["capa-exfil-cluster"]}
 
     # 3. packed + XOR strings + forged metadata cluster
     pe = _dict_of(ev.get("pe_parse"))
@@ -166,6 +179,81 @@ def _rules_verdict(ev: dict) -> dict:
             "key_evidence": [], "rules_fired": []}
 
 
+# ── Calibration gates (RevAI calibrate_verdict port; keygenme/vidar fixes) ──
+# CEILING: malicious claims need behavioral-intent evidence; protection/
+# obfuscation alone caps to suspicious. FLOOR: not applicable — the ladder
+# never emits benign/clean.
+
+_BEHAVIORAL_INTENT = (
+    "encrypt file", "ransomware", "cryptolocker", "delete file", "overwrite",
+    "destroy file", "c2", "command and control", "beacon", "exfiltrat",
+    "credential", "keylog", "password dump", "token theft", "persistence",
+    "registry run", "startup", "scheduled task", "service install",
+    "lateral", "wmi exec", "disable defender", "disable av", "kill process",
+    "patch amsi", "etw", "network share", "data theft", "infosteal",
+    "drop payload", "spyware", "escalate_priv", "screenshot", "anti_dbg",
+    "anti-debug", "process injection", "inject", "keylogg", "getkeystate",
+    "writeprocessmemory", "virtualallocex", "createremotethread",
+    "dump credential", "lsass", "sam dump", "ntds", "steal", "exfil",
+    "upload", "internetopen", "winhttp", "urlmon", "socket", "connect to",
+    "shellcode", "loader", "dropper", "downloader", "create_remote_thread",
+    "queue_apc", "unmap_section_view", "write_process_memory",
+    "check_debugger", "download_file", "http_client",
+)
+_PROTECTION_SIGNALS = (
+    "obfuscat", "packed", "packer", "xor", "entropy", "anti-debug", "anti-vm",
+    "vm protect", "themid", "custom vm", "spaghetti", "encode data",
+    "encrypt data", "high entropy", "packing", "crypter", "protector",
+)
+
+
+def _evidence_text(ev: dict) -> str:
+    parts = []
+    capa = _dict_of(ev.get("capa"))
+    for c in (capa.get("capabilities") or []):
+        if isinstance(c, dict):
+            parts.append(str(c.get("name") or ""))
+    sig_ev = _dict_of(ev.get("pe_import_signals"))
+    for s in (sig_ev.get("signals") or []):
+        if isinstance(s, dict):
+            parts.append(str(s.get("label") or ""))
+    for k in ("yarascan", "malcat_yara"):
+        v = ev.get(k)
+        if isinstance(v, dict):
+            for h in (v.get("hits") or [])[:10]:
+                parts.append(str(h))
+    for k in ("strings_tool", "floss"):
+        v = ev.get(k)
+        if isinstance(v, dict):
+            for s in (v.get("decoded_strings") or v.get("strings") or [])[:40]:
+                parts.append(str(s))
+    return " ".join(parts).lower()
+
+
+def _calibrate(verdict: dict, ev: dict) -> dict:
+    """Apply RevAI-style evidence floor/ceiling to a rules verdict."""
+    if not isinstance(verdict, dict):
+        return verdict
+    label = str(verdict.get("verdict") or "").strip().lower()
+    if label != "malicious":
+        return verdict
+    text = _evidence_text(ev)
+    has_intent = any(s in text for s in _BEHAVIORAL_INTENT)
+    if has_intent:
+        return verdict
+    has_protection = any(s in text for s in _PROTECTION_SIGNALS)
+    if not has_protection:
+        return verdict
+    out = dict(verdict)
+    out["verdict"] = "suspicious"
+    out["verdict_calibrated"] = True
+    out["calibration_reason"] = (
+        "malicious claimed but only protection/obfuscation signals present — "
+        "capped to suspicious (obfuscation is neutral; keygenme-class fix)")
+    out["rules_fired"] = list(verdict.get("rules_fired") or []) + ["calibrated"]
+    return out
+
+
 def _is_dotnet(pe_ev: dict) -> bool:
     if not isinstance(pe_ev, dict):
         return False
@@ -186,11 +274,21 @@ def _is_doc(sample: str) -> str | None:
         return "zip-office?"
     if magic[:5] == b"%PDF-":
         return "pdf"
+    if magic.lstrip().startswith(b"{\\rtf"):
+        return "rtf"
     return None
 
 
+def _is_go(sample: str) -> bool:
+    try:
+        data = Path(sample).read_bytes()[:2 * 1024 * 1024]
+    except OSError:
+        return False
+    return b"Go build ID" in data or b"go1." in data or b"runtime.main" in data
+
+
 def run_static_deep_dive(sample_name: str, sha: str, *,
-                         max_steps: int = 30,
+                         max_steps: int = 42,
                          mode: str = "remote",
                          quick: dict | None = None,
                          cfg: dict | None = None) -> dict:
@@ -206,6 +304,7 @@ def run_static_deep_dive(sample_name: str, sha: str, *,
     history: list[dict] = []
     ev: dict = {}
     calls = 0
+    step_failures: list[str] = []
 
     def _run(tool: str, **kw):
         nonlocal calls
@@ -217,6 +316,8 @@ def run_static_deep_dive(sample_name: str, sha: str, *,
         except Exception as e:
             r = {"error": str(e)[:200]}
         ev[tool] = r
+        if isinstance(r, dict) and r.get("error"):
+            step_failures.append(f"{tool}:{str(r['error'])[:80]}")
         history.append({"step": len(history) + 1, "tool": tool,
                         "args": kw,
                         "result": r if len(json.dumps(r, default=str)) < 60000
@@ -225,6 +326,9 @@ def run_static_deep_dive(sample_name: str, sha: str, *,
                         "error": r.get("error") if isinstance(r, dict) else None})
         return r
 
+    # 0. analysis-readiness gate FIRST (AMAT Track 7): packed/encrypted?
+    #    Gates whether capa/strings clusters may drive the verdict.
+    _run("decrypt_gate")
     # 1. structure first (grounds everything)
     _run("pe_parse")
     _run("pe_import_signals")
@@ -234,6 +338,14 @@ def run_static_deep_dive(sample_name: str, sha: str, *,
     _run("capa")
     _run("malcat_analyze")
     _run("malcat_functions", count=10)
+    # 2b. KB-derived static evidence
+    _run("crypto_constants")
+    _run("mitigations")
+    _run("ioc_extract")
+    _run("string_decode_emulate")
+    _run("rolling_xor")
+    _run("script_decode")
+    _run("sink_sites")
     # 3. SQL surfaces
     _run("ghidra_query", sql="SELECT name, address, size FROM funcs ORDER BY size DESC LIMIT 20",
          max_rows=20)
@@ -281,6 +393,14 @@ def run_static_deep_dive(sample_name: str, sha: str, *,
         _run("olevba_analyze")
     elif doc == "pdf":
         _run("peepdf_analyze")
+    elif doc == "rtf":
+        # RTF is a container: decode it, then olevba the embedded OLE2
+        _run("rtf_predecode")
+        if _dict_of(ev.get("rtf_predecode")).get("embedded_ole2"):
+            _run("olevba_analyze")
+    # Go binaries: symbol recovery (honest skip when not Go)
+    if _is_go(reg.remote_sample):
+        _run("goresym_analyze")
     # 8. second engines + emulation (bounded, best-effort)
     _run("r2_decompile")
     _run("upx_unpack")
@@ -302,7 +422,7 @@ def run_static_deep_dive(sample_name: str, sha: str, *,
             ev.setdefault("malcat_anomalies", mcq["anomalies"])
 
     try:
-        verdict = _rules_verdict(ev)
+        verdict = _calibrate(_rules_verdict(ev), ev)
     except Exception as e:
         verdict = {"verdict": "unknown", "confidence": "low",
                    "summary": f"rules engine error: {str(e)[:120]}",
@@ -311,7 +431,7 @@ def run_static_deep_dive(sample_name: str, sha: str, *,
     return {"verdict": verdict, "source": "static_deterministic",
             "history": history, "llm_analysis": None,
             "tool_calls": calls, "elapsed_s": elapsed,
-            "mode": "static"}
+            "mode": "static", "tool_failures": step_failures}
 
 
 if __name__ == "__main__":

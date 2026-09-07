@@ -96,8 +96,17 @@ def _sample_format(session: dict, sample: str) -> str:
 
 
 def _post_pull_enrich(dyn_dir: Path, sha: str) -> dict:
-    """tshark enrich + ANALYST-NEXT after every dynamic pull (Win or ELF)."""
-    notes: dict = {"enrich_pcap": None, "analyst_next": None}
+    """tshark enrich + KB-derived post-analysis + ANALYST-NEXT after every
+    dynamic pull (Win or ELF).
+
+    KB additions (2026-09-07): pcap beacon/HTTP schema (Wireshark course),
+    Procmon persistence catalog + behavior timeline + spoof suspects (Maldev
+    47/48 + Mandiant cheat sheet), post-mortem harvest + ntdll integrity
+    (Volatility Part3 / Maldev 83-89). All best-effort, never gating.
+    """
+    notes: dict = {"enrich_pcap": None, "analyst_next": None,
+                   "pcap_beacon": None, "procmon_post": None,
+                   "post_mortem": None}
     enrich = _local_tool("enrich_pcap_tshark.py")
     if enrich and (dyn_dir / "network_raw").is_dir():
         try:
@@ -115,6 +124,37 @@ def _post_pull_enrich(dyn_dir: Path, sha: str) -> dict:
             notes["enrich_pcap"] = {"error": str(e)}
     else:
         notes["enrich_pcap"] = {"skipped": True, "reason": "no script or no network_raw"}
+
+    # KB: beacon cadence + HTTP param/UA schema from pcaps
+    try:
+        from winre.pcap_beacon import analyze_pcaps
+        notes["pcap_beacon"] = analyze_pcaps(dyn_dir)
+    except Exception as e:
+        notes["pcap_beacon"] = {"error": str(e)[:200]}
+
+    # KB: Procmon persistence catalog + behavior timeline + spoof suspects
+    if (dyn_dir / "procmon.csv").is_file():
+        try:
+            from winre.procmon_post import build_procmon_report
+            notes["procmon_post"] = build_procmon_report(dyn_dir)
+        except Exception as e:
+            notes["procmon_post"] = {"error": str(e)[:200]}
+
+    # KB: memory harvest + ntdll integrity + process snapshot (DFIR-Nexus
+    # handoff: process-level dumps here; full-image is DFIR-Nexus-owned)
+    try:
+        from winre.post_mortem import run_all as _pm
+        sample_pid = None
+        meta_f = dyn_dir / "META.json"
+        if meta_f.is_file():
+            try:
+                meta_pm = json.loads(meta_f.read_text(encoding="utf-8")) or {}
+                sample_pid = meta_pm.get("sample_pid")
+            except Exception:
+                pass
+        notes["post_mortem"] = _pm(dyn_dir, sample_pid)
+    except Exception as e:
+        notes["post_mortem"] = {"error": str(e)[:200]}
 
     emit = _local_tool("emit_analyst_next.py")
     if emit:

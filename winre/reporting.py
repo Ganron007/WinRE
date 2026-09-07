@@ -179,7 +179,15 @@ def build_report_v3(pack_root: Path) -> dict:
     intake = _load(pack_root / "intake" / "intake.json") or {}
     quick = _load(pack_root / "quick" / "quick.json") or {}
     ev = quick.get("evidence") or {}
+    # merge deep-tool results (history results keyed by tool) so report
+    # sections see the KB-derived deep evidence too (crypto/decrypt-gate/ioc)
     deep = _load(pack_root / "deep" / "deep.json") or {}
+    deep_ev = {}
+    for h in ((deep.get("agent") or {}).get("history") or []):
+        res = h.get("result")
+        if isinstance(res, dict) and h.get("tool"):
+            deep_ev[h["tool"]] = res
+    ev = {**ev, **deep_ev}
     agent = (deep.get("agent") or {})
     verdict = agent.get("verdict") or {}
     if not isinstance(verdict, dict):
@@ -329,14 +337,59 @@ def build_report_v3(pack_root: Path) -> dict:
     else:
         A("- (no iocs.json)")
     A("")
+    crypto = ev.get("crypto_constants") or {}
+    crypto_ids = crypto.get("crypto_identified") or []
+    if crypto_ids:
+        A(f"- **Crypto identified (constants/shape):** "
+          + ", ".join(f"`{c}`" for c in crypto_ids[:8])
+          + " — config/key recovery leads (signature_match may resolve keys).")
+        A("")
+    dg = ev.get("decrypt_gate") or {}
+    if dg.get("status") == "gate":
+        A(f"- **Decrypt gate: GATED** ({dg.get('taxonomy') or 'unknown'} — "
+          f"imports={dg.get('import_count')} sparse strings). Static "
+          "capability evidence is unreliable; unpack + dynamic validation "
+          "required before trusting capa/strings clusters.")
+        A("")
 
-    A("## 6. YARA")
+    A("## 6. Behavior-context notes (kill-switch / CLI / artifacts)")
+    A("")
+    _bc = _behavior_context(ev)
+    ks = _bc.get("kill_switch") or []
+    if ks:
+        A("- **Kill-switch / sandbox-avoidance candidates:** "
+          + "; ".join(f"`{k}`" for k in ks[:6])
+          + " — NOTE: connectivity to these may be a NO-OP signal, not C2 "
+          "(WannaCry-class); treat as its own analytic dimension.")
+    else:
+        A("- No kill-switch/sandbox-avoidance candidates surfaced.")
+    cli = _bc.get("cli") or []
+    if cli:
+        A(f"- **CLI behavior table:** " + "; ".join(f"`{c}`" for c in cli[:8])
+          + " (switches from strings + GetCommandLine imports; verify per-branch "
+          "in the debugger/dynamic phase).")
+    art = _bc.get("artifacts") or {}
+    if art:
+        A("- **Artifact catalog:** mutexes: "
+          + "; ".join(f"`{m}`" for m in (art.get("mutexes") or [])[:5])
+          + " | registry: "
+          + "; ".join(f"`{r}`" for r in (art.get("registry") or [])[:5])
+          + " | services/tasks: "
+          + "; ".join(f"`{t}`" for t in (art.get("services") or [])[:5])
+          + " | file paths: "
+          + "; ".join(f"`{p}`" for p in (art.get("paths") or [])[:5]))
+    A("")
+
+    A("## 7. YARA")
     A("")
     A(f"- Rule: `{yara_rep.get('rule_id')}` — "
       f"empty_rule={yara_rep.get('empty_rule')} — deterministic, no LLM content")
+    cur = (yara_rep.get("curation") or {})
+    if cur.get("warnings"):
+        A(f"- Curation warnings: {'; '.join(cur['warnings'])}")
     A("")
 
-    A("## 7. Dynamic analysis")
+    A("## 8. Dynamic analysis")
     A("")
     if has_dynamic:
         A(f"- Detonation ran (frida_events={dyn.get('frida_events')}) — "
@@ -348,7 +401,7 @@ def build_report_v3(pack_root: Path) -> dict:
           "pe-sieve dumps, unpacked-image re-analysis.")
     A("")
 
-    A("## 8. Honesty & audit")
+    A("## 9. Honesty & audit")
     A("")
     A(f"- truly_green: **{audit.get('truly_green')}** | all_green: "
       f"{audit.get('all_green')} | quality_green: {audit.get('quality_green')}")
@@ -366,8 +419,65 @@ def build_report_v3(pack_root: Path) -> dict:
     md = "\n".join(L)
     out = pack_root / "report" / "REPORT-TECHNICAL-v3.md"
     out.write_text(md, encoding="utf-8")
-    return {"ok": True, "path": str(out), "sections": 8,
+    return {"ok": True, "path": str(out), "sections": 9,
             "length": len(md)}
+
+
+def _behavior_context(ev: dict) -> dict:
+    """Kill-switch / CLI-behavior / artifact-catalog from static evidence
+    (MalTrak WannaCry/NotPetya/Emotet report structure; AMAT anti-sandbox)."""
+    text_pool: list[str] = []
+    for k in ("strings_tool", "floss", "ioc_extract"):
+        v = ev.get(k)
+        if isinstance(v, dict):
+            for key in ("decoded_strings", "strings", "urls", "domains"):
+                val = v.get(key)
+                if isinstance(val, list):
+                    text_pool.extend(str(x) for x in val)
+    joined = " ".join(text_pool).lower()
+
+    kill_switch: list[str] = []
+    import re as _re
+    domains = {d for d in _re.findall(
+        r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+        r"(?:com|net|org|onion|cc|top|ru|xyz)\b", joined)}
+    caps = {str(c.get("name") or "").lower() for c in
+            ((ev.get("capa") or {}).get("capabilities") or [])
+            if isinstance(c, dict)}
+    if any("anti-vm" in c or "anti-sandbox" in c or "sleep" in c
+           or "delay" in c for c in caps):
+        kill_switch.append("anti-sandbox/anti-vm capability (capa)")
+    for d in sorted(domains)[:5]:
+        kill_switch.append(f"domain candidate: {d}")
+
+    cli: list[str] = []
+    for s in text_pool:
+        t = str(s).strip()
+        if (t.startswith(("-", "/", "--")) and 2 <= len(t) <= 32
+                and not t.lower().startswith(("https://", "http://", "hxxp"))):
+            cli.append(t)
+    cli = list(dict.fromkeys(cli))[:10]
+
+    mutexes = [s for s in text_pool
+               if ("global\\" in str(s).lower() or "local\\" in str(s).lower())]
+    registry = [s for s in text_pool
+                if "hkcu\\" in str(s).lower() or "hklm\\" in str(s).lower()
+                or str(s).startswith("HKEY_")]
+    svc = [s for s in text_pool if "create service" in str(s).lower()
+           or "schtasks" in str(s).lower()]
+    paths = [s for s in text_pool
+             if ("\\appdata" in str(s).lower() or "\\programdata" in str(s).lower()
+                 or "%temp%" in str(s).lower() or "\\windows\\" in str(s).lower())]
+    return {
+        "kill_switch": kill_switch[:8],
+        "cli": cli,
+        "artifacts": {
+            "mutexes": list(dict.fromkeys(mutexes))[:5],
+            "registry": list(dict.fromkeys(registry))[:5],
+            "services": list(dict.fromkeys(svc))[:5],
+            "paths": list(dict.fromkeys(paths))[:5],
+        },
+    }
 
 
 def build_audit_report(pack_root: Path) -> dict:

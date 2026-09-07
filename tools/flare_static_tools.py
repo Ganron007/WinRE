@@ -31,10 +31,10 @@ YARA_RULES_DIR = r"C:\Tools\yara-rules"
 STRINGS64 = r"C:\Tools\sysinternals\strings64.exe"
 
 
-def _run(cmd: list[str], timeout: int) -> tuple[int, str, str]:
+def _run(cmd: list[str], timeout: int, env: dict | None = None) -> tuple[int, str, str]:
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                           encoding="utf-8", errors="replace")
+                           encoding="utf-8", errors="replace", env=env)
         return p.returncode, p.stdout or "", p.stderr or ""
     except subprocess.TimeoutExpired:
         return -1, "", f"timeout after {timeout}s"
@@ -837,6 +837,7 @@ def speakeasy_emulate(sample: str, timeout: int = 900) -> dict:
         return {"ok": False, "skipped": True,
                 "reason": "not_applicable:only PE emulated"}
     script = (
+        "import sys\n"
         "import json\n"
         "from pathlib import Path\n"
         "from speakeasy import Speakeasy\n"
@@ -845,18 +846,38 @@ def speakeasy_emulate(sample: str, timeout: int = 900) -> dict:
         "module = se.load_module(str(p))\n"
         "se.run_module(module)\n"
         "report = se.get_json_report()\n"
+        "if not isinstance(report, dict):\n"
+        "    try:\n"
+        "        report = json.loads(str(report))\n"
+        "    except Exception:\n"
+        "        report = {'raw': str(report)[:4000]}\n"
         "summary = {'speakeasy_ok': True,\n"
         "  'module_base': report.get('module_base'),\n"
         "  'entry_point': report.get('entry_point'),\n"
-        "  'key_events': (report.get('key_events') or [])[:20],\n"
-        "  'api_calls': (report.get('api_calls') or [])[:20],\n"
-        "  'strings': (report.get('strings') or [])[:20]}\n"
+        "  'key_events': [x for x in (report.get('key_events') or []) if not isinstance(x, dict)][:20] if isinstance(report.get('key_events'), list) else [],\n"
+        "  'api_calls': [x for x in (report.get('api_calls') or []) if not isinstance(x, dict)][:20] if isinstance(report.get('api_calls'), list) else [],\n"
+        "  'strings': (report.get('strings') if isinstance(report.get('strings'), list) else [])[:20]}\n"
         "print(json.dumps(summary, default=str)[:8000])\n")
-    rc, out, err = _run([PY, "-c", script, sample], timeout)
+    # suppress setuptools pkg_resources DeprecationWarning that pollutes stdout
+    _env = os.environ.copy()
+    _env["PYTHONWARNINGS"] = _env.get("PYTHONWARNINGS", "ignore::DeprecationWarning")
+    rc, out, err = _run([PY, "-c", script, sample], timeout, env=_env)
     if rc != 0:
         return {"ok": False, "error": (err or out)[-400:], "tool": "speakeasy"}
+    # parse the LAST JSON object on stdout — setuptools pkg_resources
+    # DeprecationWarning can pollute stdout; scanning for the object is robust
+    blob = (out or "").strip()
+    start = blob.rfind("{")
+    end = blob.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            d = json.loads(blob[start:end + 1])
+            if isinstance(d, dict):
+                return {"ok": True, "tool": "speakeasy", **d}
+        except json.JSONDecodeError:
+            pass
     try:
-        d = json.loads(out.strip().splitlines()[-1])
+        d = json.loads(blob.splitlines()[-1])
         return {"ok": True, "tool": "speakeasy", **d}
     except Exception as e:
         return {"ok": False, "error": f"parse: {e}: {(out or '')[:200]}",
@@ -1069,9 +1090,35 @@ def angr_analyze(sample: str, timeout: int = 300) -> dict:
 
 def ghidra_decompile(sample: str, function_addr: str = "",
                      timeout: int = 1800) -> dict:
-    """Ghidra decompile via headless + decompile post-script (v1: slower
-    than RevAI's RPC but same method; ghidra-rpc/PyGhidra is the upgrade
-    path, tested separately)."""
+    """Ghidra decompile — pyghidra fast-path when configured (needs
+    GHIDRA_INSTALL_DIR), headless + post-script fallback otherwise.
+    Same method as RevAI's RPC; pyghidra removes the headless cold-start."""
+    # fast-path: pyghidra flat API (much faster than headless per-call)
+    try:
+        gid = os.environ.get("GHIDRA_INSTALL_DIR", "")
+        if gid:
+            import pyghidra
+            pyghidra.start()
+            with pyghidra.open_program(sample) as flat:
+                func = (flat.get_function_at(flat.to_addr(function_addr))
+                        if function_addr else None)
+                if func is None:
+                    func = flat.get_function_containing(
+                        flat.get_symbol("entry").get_address())
+                if func is not None:
+                    from ghidra.app.decompiler import DecompInterface
+                    di = DecompInterface()
+                    di.openProgram(flat.get_program())
+                    res = di.decompileFunction(func, 60, None)
+                    if res and res.getDecompiledFunction():
+                        code = res.getDecompiledFunction().getC()
+                        return {"ok": True, "tool": "ghidra_decompile",
+                                "engine": "pyghidra",
+                                "function": str(func),
+                                "code": code[:12000]}
+    except Exception as e:
+        # graceful fall-through to headless on any pyghidra failure
+        pass
     import tempfile
     ghidra = None
     for g in Path(r"C:\Tools").glob("ghidra_*_PUBLIC"):
@@ -1107,7 +1154,8 @@ def ghidra_decompile(sample: str, function_addr: str = "",
                 "tail": blob[-300:], "tool": "ghidra_decompile"}
     try:
         d, _ = json.JSONDecoder().raw_decode(blob[start:])
-        return {"ok": True, "tool": "ghidra_decompile", **d}
+        return {"ok": True, "tool": "ghidra_decompile", "engine": "headless",
+                **d}
     except json.JSONDecodeError as e:
         return {"ok": False, "error": f"parse: {e}", "tail": blob[start:start + 300],
                 "tool": "ghidra_decompile"}
@@ -1115,6 +1163,11 @@ def ghidra_decompile(sample: str, function_addr: str = "",
 
 def main() -> int:
     import argparse
+    # KB-derived gap tools (pure-python / r2) live in kb_gap_tools.py
+    try:
+        from kb_gap_tools import TOOL_FUNCS as KB_TOOL_FUNCS
+    except Exception:
+        KB_TOOL_FUNCS = {}
     TOOL_FUNCS = {"capa": capa, "floss": floss, "lief": lief_parse,
                   "diec": diec, "ilspy": ilspy, "yarascan": yarascan,
                   "strings": strings,
@@ -1129,18 +1182,34 @@ def main() -> int:
                   "shellcode_extract": shellcode_extract,
                   "dotnet_analyze": dotnet_analyze,
                   "z3_solve": z3_solve, "angr_analyze": angr_analyze,
-                  "ghidra_decompile": ghidra_decompile}
+                  "ghidra_decompile": ghidra_decompile,
+                  **KB_TOOL_FUNCS}
     ap = argparse.ArgumentParser(description="RevAI-parity static evidence wrappers")
     ap.add_argument("tool", choices=list(TOOL_FUNCS.keys()) + ["all"])
     ap.add_argument("sample")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--json-args", default=None,
+                    help="base64-encoded JSON kwargs for the tool call")
     a = ap.parse_args()
+    kwargs = {}
+    if a.json_args:
+        import base64 as _b64
+        try:
+            kwargs = json.loads(_b64.b64decode(a.json_args).decode("utf-8"))
+            if not isinstance(kwargs, dict):
+                kwargs = {}
+        except Exception:
+            kwargs = {}
     if a.tool == "all":
         core = ("capa", "floss", "lief", "diec", "yarascan", "strings",
-                "pe_import_signals", "api_hash_resolver", "xor_string_search")
+                "pe_import_signals", "api_hash_resolver", "xor_string_search",
+                "crypto_constants", "mitigations", "ioc_extract")
         out = {t: TOOL_FUNCS[t](a.sample) for t in core}
+    elif a.tool == "signature_match":
+        # signature_match is the odd tool: first param is func_name, no sample
+        out = {a.tool: TOOL_FUNCS[a.tool](**kwargs)}
     else:
-        out = {a.tool: TOOL_FUNCS[a.tool](a.sample)}
+        out = {a.tool: TOOL_FUNCS[a.tool](a.sample, **kwargs)}
     print(json.dumps(out, indent=2, default=str))
     return 0
 
