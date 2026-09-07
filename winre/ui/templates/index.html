@@ -90,7 +90,7 @@
           </div>
           <div class="board-body" style="padding:var(--sp-2)">
             {% for p in packs[:5] %}
-            <a href="/packs/{{ p.sha }}" style="display:flex; align-items:center; gap:8px;
+            <a href="/packs/{{ p.sha }}{% if p.mode %}?mode={{ p.mode }}{% endif %}" style="display:flex; align-items:center; gap:8px;
                  padding:7px 8px; border-radius:var(--r-sm); color:var(--tx-1)">
               <span class="mono" style="flex:1">{{ p.short }}…</span>
               {% set v = p.verdicts.deep or p.verdicts.quick %}

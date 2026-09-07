@@ -489,7 +489,7 @@ def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = 
       - requires snapshot restore after (analyst/operator)
     """
     sha = __import__("winre.evidence", fromlist=["sha256_file"]).sha256_file(sample)
-    pack = EvidencePack(LOGS_DIR, sha).ensure()
+    pack = EvidencePack(LOGS_DIR, sha, mode=mode).ensure()
     results: dict = {}
 
     # ---- STATIC phase (default, clean) ----
@@ -549,7 +549,7 @@ def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = 
     phase = "static"
     if dynamic:
         phase += f"+dynamic({'ok' if dynamic.get('ok') else 'FAIL'})"
-    print(f"[winre-pipeline] {sha[:16]}… [{phase}] "
+    print(f"[winre-pipeline] {sha} [{phase}] "
           f"quick={quick.get('verdict')} "
           f"truly_green={audit_res['truly_green']}", flush=True)
     return {"sha": sha, "results": results}
@@ -594,7 +594,8 @@ def main() -> int:
         if args.publish:
             from .reporting import publish_case
             from .evidence import EvidencePack as _EP
-            pub = publish_case(_EP(LOGS_DIR, res["sha"]).root, mode=args.mode)
+            pub = publish_case(_EP(LOGS_DIR, res["sha"], mode=args.mode).root,
+                               mode=args.mode)
             print(f"[winre-pipeline] published {pub['dest']}", flush=True)
         return 0 if res["results"]["audit"]["truly_green"] else 1
     res = run_pipeline(args.sample, max_seconds=args.max_seconds,
@@ -603,7 +604,8 @@ def main() -> int:
                        mode=args.mode)
     if args.publish:
         from .reporting import publish_case
-        pub = publish_case(EvidencePack(LOGS_DIR, res["sha"]).root, mode=args.mode)
+        pub = publish_case(EvidencePack(LOGS_DIR, res["sha"], mode=args.mode).root,
+                           mode=args.mode)
         print(f"[winre-pipeline] published {pub['dest']}", flush=True)
     return 0 if res["results"]["audit"]["truly_green"] else 1
 

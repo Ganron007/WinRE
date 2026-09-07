@@ -61,27 +61,33 @@ Write-Host "[run_vm_static] pipeline is running on the VM (may take several minu
 $vmOut = ssh -i $flareKey -o StrictHostKeyChecking=no -o ConnectTimeout=15 $sshTarget "powershell -NoProfile -EncodedCommand $enc" 2>&1 | Out-String
 $rc = $LASTEXITCODE
 Write-Host "[run_vm_static] VM pipeline exit=$rc"
+if ($rc -ne 0) {
+    # never swallow VM output on failure — the traceback is the diagnosis
+    Write-Host "--- VM output (tail) ---"
+    Write-Host ($vmOut -split "`r?`n" | Select-Object -Last 25 | Out-String)
+}
 # The pipeline prints: [winre-pipeline] <sha>... - parse the SHA from output
 $sha = ""
 $m2 = [regex]::Match($vmOut, "winre-pipeline\]\s+([0-9a-f]{64})")
 if ($m2.Success) { $sha = $m2.Groups[1].Value }
 
 if ($PullReports -and $rc -eq 0 -and $sha -and $sha.Length -eq 64) {
-    Write-Host "[run_vm_static] SHA=$sha - pulling report files"
-    $dest = Join-Path $repo "logs" $sha
-    New-Item -ItemType Directory -Force -Path (Join-Path $dest "report") | Out-Null
+    Write-Host "[run_vm_static] SHA=$sha mode=$Mode - pulling report files"
+    # mirror the VM's mode-section layout: logs/<sha>/<mode>/ (UI rows)
+    $sect = Join-Path (Join-Path (Join-Path $repo "logs" $sha) $Mode)
+    New-Item -ItemType Directory -Force -Path (Join-Path $sect "report") | Out-Null
     foreach ($f in @("REPORT-TECHNICAL-v3.md", "AUDIT-REPORT.md",
                      "EVIDENCE-BUNDLE.md", "iocs.json", "META.json")) {
         scp -i $flareKey -o StrictHostKeyChecking=no `
-            "${sshTarget}:C:/WinRE/logs/$sha/report/$f" `
-            (Join-Path $dest "report\$f") 2>$null | Out-Null
+            "${sshTarget}:C:/WinRE/logs/$sha/$Mode/report/$f" `
+            (Join-Path $sect "report\$f") 2>$null | Out-Null
     }
-    foreach ($f in @("audit.json", "stage_trace.json")) {
+    foreach ($f in @("audit.json", "stage_trace.json", "META.json")) {
         scp -i $flareKey -o StrictHostKeyChecking=no `
-            "${sshTarget}:C:/WinRE/logs/$sha/$f" `
-            (Join-Path $dest $f) 2>$null | Out-Null
+            "${sshTarget}:C:/WinRE/logs/$sha/$Mode/$f" `
+            (Join-Path $sect $f) 2>$null | Out-Null
     }
-    Write-Host "[run_vm_static] report files pulled to $dest (no binary artifacts)"
+    Write-Host "[run_vm_static] report files pulled to $sect (no binary artifacts)"
 } elseif ($PullReports) {
     Write-Host "[run_vm_static] WARN report pull skipped (rc=$rc sha set=$($sha.Length -eq 64))"
 }

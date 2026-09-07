@@ -10,10 +10,14 @@
   <div class="page-head">
     <h1>Case <span class="mono" style="color:var(--tx-mono)">{{ pack.short }}…</span></h1>
     <span class="sub mono">{{ pack.sha }}</span>
+    {% if pack.mode == 'static' %}<span class="badge flat" title="deterministic deep dive — zero LLM">section: static</span>
+    {% elif pack.mode == 'agentic' %}<span class="badge flat" title="LangGraph agentic deep dive">section: agentic</span>
+    {% elif pack.mode %}<span class="badge flat">section: {{ pack.mode }}</span>
+    {% else %}<span class="badge flat" title="pre-sectioning pack">legacy</span>{% endif %}
     <button class="copybtn" style="margin-left:8px"
             onclick="winreCopy(this, '{{ pack.sha }}')">copy</button>
     <a class="btn ghost" style="margin-left:auto; font-size:var(--tx-xs); padding:3px 10px"
-       href="/packs/{{ pack.sha }}/export" title="zip the whole evidence pack">⬇ export pack</a>
+       href="/packs/{{ pack.sha }}/export{% if pack.mode %}?mode={{ pack.mode }}{% endif %}" title="zip the whole evidence pack">⬇ export pack</a>
   </div>
 
   {% set v = pack.views %}
@@ -32,7 +36,7 @@
           static_yara_wins
         </span>
       {% endif %}
-      <a href="/packs/{{ pack.sha }}/report/ANALYST-NEXT.md" style="margin-left:auto; font-size:var(--tx-xs)">analyst-next →</a>
+      <a href="/packs/{{ pack.sha }}/report/ANALYST-NEXT.md{% if pack.mode %}?mode={{ pack.mode }}{% endif %}" style="margin-left:auto; font-size:var(--tx-xs)">analyst-next →</a>
     </div>
   </div>
 
@@ -65,17 +69,17 @@
             onclick="runStage('{{ s }}')">▶ {{ s }}</button>
     {% endfor %}
     <span style="margin-left:10px; font-size:var(--tx-xs)">
-      <input type="radio" name="deepmode" value="agentic" checked id="dmAgentic">
-      <label for="dmAgentic">agentic</label>
-      <input type="radio" name="deepmode" value="static" id="dmStatic">
-      <label for="dmStatic">static</label>
-      <span class="muted">(deep mode)</span>
+      view section:
+      <a href="/packs/{{ pack.sha }}?mode=agentic">agentic</a> ·
+      <a href="/packs/{{ pack.sha }}?mode=static">static</a>
+      <span class="muted">(manual stages below write into the viewed section)</span>
     </span>
   </div>
   <pre id="stageOut" style="display:none"></pre>
 </div></div>
 
 <script>
+const PACK_MODE = '{{ pack.mode or "" }}';
 async function hitl(action) {
   const r = await fetch('/api/hitl/snapshot', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -83,19 +87,13 @@ async function hitl(action) {
   const j = await r.json();
   document.getElementById('hitlState').textContent = JSON.stringify(j.snapshot || j);
 }
-function deepMode() {
-  const r = document.querySelector('input[name="deepmode"]:checked');
-  return r ? r.value : 'agentic';
-}
 async function runStage(stage) {
   const el = document.getElementById('stageOut');
   el.style.display = 'block';
-  let body = {};
+  // every manual stage writes into this pack's mode section
+  let body = {mode: PACK_MODE};
   if (stage === 'dynamic') {
-    body = {confirm_snapshot: true, max_seconds: 45};
-  }
-  if (stage === 'deep') {
-    body = {mode: deepMode()};
+    body = {mode: PACK_MODE, confirm_snapshot: true, max_seconds: 45};
   }
   el.textContent = 'starting ' + stage + '…';
   const r = await fetch('/stages/{{ pack.sha }}/' + stage, {

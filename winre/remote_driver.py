@@ -714,7 +714,7 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
 
     cfg = flare_cfg()
     sha = sha256_file(sample)
-    pack = EvidencePack(LOCAL_LOGS, sha).ensure()
+    pack = EvidencePack(LOCAL_LOGS, sha, mode=mode).ensure()
 
     # upload the sample to the VM (C:\samples\<name>) — tools run there
     remote_sample = rf"C:\samples\{sample.name}"
@@ -779,7 +779,7 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
     results["cleanup"] = _final_sweep(cfg, dynamic=enable_dynamic,
                                       debug=enable_agentic_dbg)
 
-    print(f"[winre-remote] {sha[:16]}… quick={results['quick'].get('verdict')} "
+    print(f"[winre-remote] {sha} quick={results['quick'].get('verdict')} "
           f"dynamic={'ok' if results.get('dynamic',{}).get('ok') else 'not-run'} "
           f"truly_green={audit_res['truly_green']}", flush=True)
     return {"sha": sha, "results": results}
@@ -849,7 +849,9 @@ def main() -> int:
         from .evidence import EvidencePack
         from .reporting import publish_case
         from .pipeline import LOGS_DIR
-        pub = publish_case(EvidencePack(LOGS_DIR, res["sha"]).root, mode=args.mode)
+        pub = publish_case(
+            EvidencePack(LOGS_DIR, res["sha"], mode=args.mode).root,
+            mode=args.mode)
         print(f"[winre-remote] published {pub['dest']}", flush=True)
     return 0 if res["results"]["audit"]["truly_green"] else 1
 

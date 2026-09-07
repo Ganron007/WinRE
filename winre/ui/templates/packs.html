@@ -26,7 +26,7 @@
     <tbody>
     {% for p in packs %}
     <tr>
-      <td class="mono"><a href="/packs/{{ p.sha }}">{{ p.short }}…</a></td>
+      <td class="mono"><a href="/packs/{{ p.sha }}{% if p.mode %}?mode={{ p.mode }}{% endif %}">{{ p.short }}…</a></td>
       {% if p.audit %}
         {% set c = p.audit.checks or [] %}
         {% set dyn = c|selectattr('stage','equalto','dynamic')|first %}

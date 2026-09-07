@@ -6,16 +6,25 @@ under logs/<sha>/, the LLM can only cite what a deterministic tool emitted,
 and a report carries a `source` (llm_judge vs deterministic_fallback) so a
 stubbed run can never look green.
 
-Layout:
+Layout (RevAI-style mode sections — one self-contained case per engine):
     logs/<sha>/
-      session.json          intake: sha, paths, format, hashes
-      intake/               metadata, magic, format tools
-      quick/                deterministic triage (Malcat/SQL) + verdict
-      dynamic/              detonation pack (META.json, frida, procmon, ...)
-      deep/                 agentic MCP-driven pass (x64dbg/malcat/windbg)
-      yara/                 generated YARA/Sigma + rule reports
-      report/               final report (source-tagged) + analyst-next
-      audit.json            truly_green gate
+      static/                 deterministic engine section (RevAI scripted)
+        intake/               metadata, magic, format tools
+        quick/                deterministic triage (Malcat/SQL) + verdict
+        dynamic/              detonation pack (META.json, frida, procmon, ...)
+        deep/                 deterministic checklist pass
+        yara/                 generated YARA/Sigma + rule reports
+        report/               final report (source-tagged) + analyst-next
+        audit.json            truly_green gate
+        META.json             pack-level mode/engine/source
+        stage_trace.json      stage ordering/timing trace
+      agentic/                LangGraph engine section (RevAI agentic)
+        <same stage layout>
+      snapshot.json           HITL snapshot ledger (VM-state, mode-independent)
+
+Same-sample/same-mode reruns overwrite their section; the other section is
+untouched. Pre-sectioning packs (flat stages directly under logs/<sha>/)
+are read as legacy rows.
 """
 from __future__ import annotations
 
@@ -39,12 +48,20 @@ def sha256_file(path: Path) -> str:
 
 
 class EvidencePack:
-    """Read/write a stage-tagged evidence pack under logs/<sha>/."""
+    """Read/write a stage-tagged evidence pack under logs/<sha>/<mode>/."""
 
     STAGES = ("intake", "quick", "dynamic", "deep", "yara", "report")
 
-    def __init__(self, logs_dir: Path, sha: str):
-        self.root = logs_dir / sha
+    # Deep-dive engine sections (RevAI: scripted/agentic folders). mode=None
+    # = legacy flat layout logs/<sha>/ (read-only compat for old packs).
+    MODES = ("agentic", "static")
+
+    def __init__(self, logs_dir: Path, sha: str, mode: str | None = None):
+        self.logs_dir = Path(logs_dir)
+        self.sha = sha
+        self.mode: str | None = mode if mode in self.MODES else None
+        self.root = (self.logs_dir / sha / self.mode) if self.mode \
+            else (self.logs_dir / sha)
         self.stages = {s: self.root / s for s in self.STAGES}
 
     def ensure(self) -> "EvidencePack":
@@ -77,10 +94,28 @@ class EvidencePack:
 
     def manifest(self) -> dict:
         return {
-            "sha256": self.root.name,
+            "sha256": self.sha,
+            "mode": self.mode,
             "stages": {s: self.stage_artifacts(s) for s in self.STAGES},
             "generated_at": utcnow(),
         }
+
+
+def pack_sections(sha_dir: Path) -> list[dict]:
+    """Mode sections present under logs/<sha>/ (for UI rows).
+
+    Returns [{mode, root}] in MODES order, plus a legacy entry
+    ({mode: None}) when flat stages exist directly under the sha dir.
+    """
+    out: list[dict] = []
+    if not sha_dir.is_dir():
+        return out
+    for m in EvidencePack.MODES:
+        if (sha_dir / m).is_dir():
+            out.append({"mode": m, "root": sha_dir / m})
+    if any((sha_dir / s).is_dir() for s in EvidencePack.STAGES):
+        out.append({"mode": None, "root": sha_dir})
+    return out
 
 
 def stage_result(stage: str, ok: bool, *, error: str | None = None,

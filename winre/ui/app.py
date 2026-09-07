@@ -36,6 +36,7 @@ sys.path.insert(0, str(REPO))
 
 from winre import remote_driver  # noqa: E402
 from winre.remote_driver import flare_cfg  # noqa: E402
+from winre.evidence import pack_sections  # noqa: E402
 
 # Evidence packs live on the control plane (pulled by remote driver)
 LOGS_DIR = Path(remote_driver.LOCAL_LOGS)
@@ -43,7 +44,15 @@ LOGS_DIR = Path(remote_driver.LOCAL_LOGS)
 # A single run at a time (deterministic; avoid VM stampede)
 _run_lock = threading.Lock()
 _run_state: dict = {"running": False, "last": None, "pid": None,
-                    "sha": None, "log": []}
+                    "sha": None, "log": [], "mode": "agentic"}
+
+
+def _section_root(sha: str, mode: str | None) -> Path:
+    """Pack section root: logs/<sha>/<mode>/, falling back to the legacy
+    flat layout logs/<sha>/ for pre-sectioning packs."""
+    if mode in ("agentic", "static") and (LOGS_DIR / sha / mode).is_dir():
+        return LOGS_DIR / sha / mode
+    return LOGS_DIR / sha
 
 
 def _run_log_tail(n: int = 60) -> list[str]:
@@ -90,7 +99,11 @@ def _pack_verdicts(root: Path) -> dict:
 
 
 def _packs() -> list[dict]:
-    """List evidence packs (newest first) with audit summaries + verdicts."""
+    """List evidence packs (newest first) with audit summaries + verdicts.
+
+    One row per (sha, mode section): logs/<sha>/<static|agentic>/. Legacy
+    flat packs (pre-sectioning) appear as a single mode-inferred row.
+    """
     out = []
     if not LOGS_DIR.is_dir():
         return out
@@ -98,27 +111,30 @@ def _packs() -> list[dict]:
                     reverse=True):
         if not d.is_dir():
             continue
-        audit = None
-        a = d / "audit.json"
-        if a.is_file():
-            audit = _read_json(a)
-        out.append({
-            "sha": d.name,
-            "short": d.name[:16],
-            "mtime": d.stat().st_mtime,
-            "audit": audit,
-            "verdicts": _pack_verdicts(d),
-        })
+        for sec in pack_sections(d):
+            root = sec["root"]
+            audit = None
+            a = root / "audit.json"
+            if a.is_file():
+                audit = _read_json(a)
+            out.append({
+                "sha": d.name,
+                "short": d.name[:16],
+                "mtime": root.stat().st_mtime,
+                "mode": sec["mode"],
+                "audit": audit,
+                "verdicts": _pack_verdicts(root),
+            })
     return out
 
 
-def _pack_detail(sha: str) -> dict | None:
+def _pack_detail(sha: str, mode: str | None = None) -> dict | None:
     if not _valid_sha(sha):
         return None
-    d = LOGS_DIR / sha
+    d = _section_root(sha, mode)
     if not d.is_dir():
         return None
-    detail = {"sha": sha, "short": sha[:16], "stages": {}}
+    detail = {"sha": sha, "short": sha[:16], "mode": None, "stages": {}}
     for stage in ("intake", "quick", "dynamic", "deep", "yara", "report"):
         sd = d / stage
         files = {}
@@ -139,6 +155,9 @@ def _pack_detail(sha: str) -> dict | None:
                         files[f.name] = {"error": "unreadable"}
         detail["stages"][stage] = files
     detail["views"] = _pack_views(d, detail["stages"])
+    pm = _read_json(d / "META.json") or {}
+    detail["mode"] = (pm.get("mode") if pm.get("mode") in ("agentic", "static")
+                      else mode)
     return detail
 
 
@@ -404,11 +423,11 @@ def _valid_sha(sha: str) -> bool:
     return bool(_re.fullmatch(r"[0-9a-fA-F]{64}", sha or ""))
 
 
-def _current_stage(sha: str | None) -> str | None:
+def _current_stage(sha: str | None, mode: str | None = None) -> str | None:
     """Which stage is the running pipeline currently in (from landed META)."""
     if not sha:
         return None
-    root = LOGS_DIR / sha
+    root = _section_root(sha, mode)
     if not root.is_dir():
         return "intake"
     landed = {s for s in STAGE_ORDER
@@ -425,11 +444,11 @@ def _current_stage(sha: str | None) -> str | None:
     return STAGE_ORDER[-1]
 
 
-def _stage_timings(sha: str | None) -> dict:
+def _stage_timings(sha: str | None, mode: str | None = None) -> dict:
     """elapsed_s per landed stage (from META.json) for the run timeline."""
     if not sha or not _valid_sha(sha):
         return {}
-    root = LOGS_DIR / sha
+    root = _section_root(sha, mode)
     out = {}
     for stage in STAGE_ORDER:
         for name in ("META.json", "STAGE.json"):
@@ -602,6 +621,7 @@ def create_app() -> "Flask":
                 _run_state["sha"] = None
                 _run_state["log"] = []
                 _run_state["last"] = None
+                _run_state["mode"] = mode
                 _run_pipeline_in_thread(sample, max_seconds, pesieve, dry_llm,
                                         dynamic, agentic_dbg, mode)
                 # form POST: redirect back so the browser lands on the live
@@ -617,11 +637,13 @@ def create_app() -> "Flask":
     @app.route("/run/status")
     def run_status():
         sha = _run_state.get("sha")
+        mode = _run_state.get("mode") or "agentic"
         return jsonify({"running": _run_state["running"],
                         "last": _run_state["last"],
                         "sha": sha,
-                        "current_stage": _current_stage(sha) if _run_state["running"] else None,
-                        "stage_timings": _stage_timings(sha) if sha else {}})
+                        "mode": mode,
+                        "current_stage": _current_stage(sha, mode) if _run_state["running"] else None,
+                        "stage_timings": _stage_timings(sha, mode) if sha else {}})
 
     @app.route("/api/run/log")
     def run_log():
@@ -684,6 +706,9 @@ def create_app() -> "Flask":
         if not root.is_dir():
             return jsonify({"ok": False, "error": "pack not found"}), 404
         body = request.get_json(force=True, silent=True) or {}
+        mode = body.get("mode") or request.args.get("mode") or "agentic"
+        if mode not in ("agentic", "static"):
+            mode = "agentic"
         if stage == "dynamic" and not body.get("confirm_snapshot"):
             return jsonify({
                 "ok": False,
@@ -696,8 +721,14 @@ def create_app() -> "Flask":
 
         def _run_one():
             cfg = _rd.flare_cfg()
-            pack = EvidencePack(LOGS_DIR, sha).ensure()
-            name = _stage_sample(root)
+            sect = _section_root(sha, mode)
+            name = _stage_sample(sect)
+            if not name:
+                return {"ok": False,
+                        "error": f"no intake in section {mode or 'legacy'} — "
+                                 "run the pipeline for this mode first"}
+            pack = EvidencePack(LOGS_DIR, sha, mode=mode).ensure()
+            root = pack.root
             if not name:
                 return {"ok": False, "error": "intake sample unknown"}
             try:
@@ -711,9 +742,6 @@ def create_app() -> "Flask":
                         bool(body.get("pesieve", False)))
                     return {"ok": True, "result": out}
                 if stage == "deep":
-                    mode = body.get("mode", "agentic")
-                    if mode not in ("agentic", "static"):
-                        mode = "agentic"
                     out = _rd.remote_deep(name, pack, cfg,
                                           bool(body.get("dry_llm", False)),
                                           sha=sha, mode=mode)
@@ -742,6 +770,7 @@ def create_app() -> "Flask":
             with _run_lock:
                 _run_state["running"] = True
                 _run_state["sha"] = sha
+                _run_state["mode"] = mode
                 _run_state["log"] = []
                 try:
                     # reuse the same capture helper by calling inline
@@ -754,7 +783,8 @@ def create_app() -> "Flask":
                     _run_state["running"] = False
 
         threading.Thread(target=_do, daemon=True).start()
-        return jsonify({"ok": True, "msg": f"stage {stage} started", "sha": sha})
+        return jsonify({"ok": True, "msg": f"stage {stage} started",
+                        "sha": sha, "mode": mode})
 
     @app.route("/packs")
     def packs():
@@ -766,15 +796,16 @@ def create_app() -> "Flask":
         out = []
         for p in _packs():
             sha = p["sha"]
+            mode = p.get("mode")
             rep = None
-            rp = LOGS_DIR / sha / "report" / "report.json"
+            rp = _section_root(sha, mode) / "report" / "report.json"
             if rp.is_file():
                 try:
                     rep = json.loads(rp.read_text(encoding="utf-8"))
                 except json.JSONDecodeError:
                     pass
             out.append({
-                "sha": sha, "short": p["short"],
+                "sha": sha, "short": p["short"], "mode": mode,
                 "audit": p["audit"],
                 "phase": (rep or {}).get("phase", "static"),
                 "source": (rep or {}).get("source", "?"),
@@ -783,7 +814,8 @@ def create_app() -> "Flask":
 
     @app.route("/packs/<sha>")
     def pack(sha: str):
-        detail = _pack_detail(sha)
+        mode = request.args.get("mode")
+        detail = _pack_detail(sha, mode)
         if detail is None:
             return render_template("packs.html", packs=_packs(),
                                    error=f"pack not found: {sha}"), 404
@@ -797,7 +829,8 @@ def create_app() -> "Flask":
         from flask import Response, abort
         if not _valid_sha(sha):
             abort(400, "invalid sha")
-        root = (LOGS_DIR / sha).resolve()
+        mode = request.args.get("mode")
+        root = _section_root(sha, mode).resolve()
         if not root.is_dir():
             return jsonify({"error": "not found"}), 404
         buf = io.BytesIO()
@@ -807,9 +840,10 @@ def create_app() -> "Flask":
                     continue  # skip >64MB monsters (pcaps dumps are separate)
                 zf.write(f, f.relative_to(root))
         buf.seek(0)
+        tag = (mode or (root.name if root.name in ("agentic", "static") else "pack"))
         return Response(buf.getvalue(), mimetype="application/zip",
                         headers={"Content-Disposition":
-                                 f"attachment; filename=winre-{sha[:16]}.zip"})
+                                 f"attachment; filename=winre-{sha[:16]}-{tag}.zip"})
 
     @app.route("/packs/<sha>/<stage>/<fname>")
     def pack_file(sha: str, stage: str, fname: str):
@@ -819,7 +853,7 @@ def create_app() -> "Flask":
         for seg in (sha, stage, fname):
             if not seg or seg in (".", "..") or "/" in seg or "\\" in seg:
                 abort(400, "invalid path segment")
-        base = (LOGS_DIR / sha / stage).resolve()
+        base = (_section_root(sha, request.args.get("mode")) / stage).resolve()
         d = (base / fname).resolve()
         try:
             d.relative_to(base)
