@@ -98,6 +98,8 @@
               {% elif v == 'benign' %}<span class="badge up">benign</span>
               {% elif v %}<span class="badge warn">{{ v }}</span>{% endif %}
               {% set dyn = ((p.audit.checks or [])|selectattr('stage','equalto','dynamic')|first) if p.audit else none %}
+              {% if p.verdicts.mode == 'static' %}<span class="badge flat" title="deterministic deep dive — zero LLM">S</span>
+              {% elif p.verdicts.mode == 'agentic' %}<span class="badge flat" title="LangGraph agentic deep dive">A</span>{% endif %}
               {% if p.audit and p.audit.truly_green %}<span class="badge up">green</span>
               {% elif p.audit %}<span class="badge {{ 'warn' if dyn and dyn.ran else 'flat' }}">
                 {{ 'static+dyn' if dyn and dyn.ran else 'static' }}{{ '+dbg' if p.verdicts.engine == 'langgraph+dbg' }}</span>

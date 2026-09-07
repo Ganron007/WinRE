@@ -40,7 +40,8 @@
         <td>{% if dv == 'malicious' %}<span class="badge malware">malicious</span>
             {% elif dv == 'benign' %}<span class="badge up">benign</span>
             {% elif dv %}<span class="badge warn">{{ dv }}</span>
-            {% else %}<span class="badge flat">—</span>{% endif %}</td>
+            {% else %}<span class="badge flat">—</span>{% endif %}
+            {% if p.verdicts.mode %}<span class="badge flat" title="deep-dive mode">{{ {'agentic':'A','static':'S'}[p.verdicts.mode] }}</span>{% endif %}</td>
         {% for s in ['intake','yara','report'] %}
           {% set row = c|selectattr('stage','equalto',s)|first %}
           <td>{% if row and row.ran %}<span class="badge up">ok</span>

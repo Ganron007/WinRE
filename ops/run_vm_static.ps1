@@ -19,7 +19,8 @@ param(
     [Parameter(Mandatory = $true)][string]$SampleName,
     [switch]$DryLlm,
     [switch]$PullReports,
-    [int]$MaxSeconds = 60
+    [int]$MaxSeconds = 60,
+    [ValidateSet("agentic", "static")][string]$Mode = "agentic"
 )
 
 $repo = Split-Path -Parent $PSScriptRoot
@@ -52,7 +53,7 @@ $vmSample = "C:\samples\$SampleName"
 # Build the VM command
 $dryFlag = ""
 if ($DryLlm) { $dryFlag = " --dry-llm" }
-$vmCmd = "`$ErrorActionPreference = 'Continue'; Set-Location C:\WinRE; & `"$py`" -m winre.pipeline `"$vmSample`" --max-seconds $MaxSeconds$dryFlag 2>&1"
+$vmCmd = "`$ErrorActionPreference = 'Continue'; Set-Location C:\WinRE; & `"$py`" -m winre.pipeline `"$vmSample`" --max-seconds $MaxSeconds --mode $Mode$dryFlag 2>&1"
 $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($vmCmd))
 
 Write-Host "[run_vm_static] SSH -> $sshTarget : pipeline.py $vmSample"

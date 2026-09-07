@@ -281,7 +281,7 @@ def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict) -> dict:
     # (commercial tool absent / no .i64 yet) and must NOT penalize quality
     failed_sources = [k for k, v in evidence.items()
                       if isinstance(v, dict) and v.get("error")]
-    tool_failures = [f"{k}:{v.get('error')[:80]}"
+    tool_failures = [f"{k}:{(v.get('error') or '')[:80]}"
                      for k, v in evidence.items()
                      if isinstance(v, dict) and v.get("error")]
     active_sources = [k for k, v in evidence.items()
@@ -577,15 +577,18 @@ def remote_mcp_health(cfg: dict) -> dict:
 
 
 def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
-                sha: str = "", dynamic: bool = False) -> dict:
+                sha: str = "", dynamic: bool = False,
+                mode: str = "agentic") -> dict:
     """Deep dive from the control plane.
 
-    Engine: LangGraph ReAct agent (winre/agentic.py) over the static toolset
+    mode="agentic" (default): LangGraph ReAct agent over the static toolset
     (Ghidra/IDA SQL over SSH + Malcat MCP over HTTP). When the LLM endpoint is
     configured the agent runs and the result is `llm_judge`; otherwise the
     stage records `deterministic_fallback` (honest, not green).
-    Set dynamic=True (same --dynamic opt-in as detonation) to also expose the
-    bounded x64dbg debug-loop tools to the agent.
+    mode="static": deterministic fixed-checklist deep dive, zero LLM calls
+    (RevAI scripted). dry_llm is orthogonal.
+    Set dynamic=True to also expose the bounded x64dbg debug-loop tools
+    to the agent (agentic mode only).
     """
     from . import llm_client
     t0 = time.time()
@@ -595,7 +598,8 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
     malcat_present = malcat_installed(cfg)
     if not malcat_present:
         mcp["malcat"] = "not-installed"
-    engine = "langgraph+dbg" if dynamic else "langgraph"
+    engine = "static_deterministic" if mode == "static" else (
+        "langgraph+dbg" if dynamic else "langgraph")
     out: dict = {"mcp": mcp, "remote": True, "engine": engine}
     fallback = False
     failures: list[str] = []
@@ -610,19 +614,25 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
         except Exception as e:
             failures.append(f"x64dbg:{e}")
 
-    # LangGraph agent (static toolset) — llm_judge if LLM up
+    # Deep engine: static deterministic checklist, or LangGraph agent
     agent_result = None
     try:
-        from winre.agentic import (run_langgraph_deep_dive, TOOL_NAMES)
-        names = list(TOOL_NAMES)
-        if not malcat_present:
-            names = [n for n in names if not n.startswith("malcat_")]
         quick_ev = pack.read("quick", "quick.json")
-        agent_result = run_langgraph_deep_dive(sample_name, sha or sample_name,
-                                               max_steps=10, dry=dry_llm,
-                                               dynamic=dynamic,
-                                               available_tools=names,
-                                               quick=quick_ev)
+        if mode == "static":
+            from winre.static_deep import run_static_deep_dive
+            agent_result = run_static_deep_dive(
+                sample_name, sha or sample_name,
+                mode="remote", quick=quick_ev, cfg=cfg)
+        else:
+            from winre.agentic import (run_langgraph_deep_dive, TOOL_NAMES)
+            names: list[str] = list(TOOL_NAMES)
+            if not malcat_present:
+                names = [n for n in names if not n.startswith("malcat_")]
+            agent_result = run_langgraph_deep_dive(sample_name, sha or sample_name,
+                                                   max_steps=10, dry=dry_llm,
+                                                   dynamic=dynamic,
+                                                   available_tools=names,
+                                                   quick=quick_ev)
         history = []
         for h in (agent_result.get("history") or [])[:80]:
             entry = {"step": h.get("step"), "tool": h.get("tool"),
@@ -645,8 +655,9 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
         failures.append(f"agent:{e}")
         agent_result = None
 
-    if agent_result and agent_result.get("source") == "llm_judge":
-        # deep produced real LLM analysis — not a fallback
+    if agent_result and agent_result.get("source") in ("llm_judge",
+                                                        "static_deterministic"):
+        # deep produced a real verdict (LLM or deterministic rules) — not a fallback
         fallback = False
     else:
         fallback = True
@@ -662,8 +673,8 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
 
     pack.write("deep", "deep.json", out)
     pack.write("deep", "META.json", stage_result(
-        "deep", True, summary=f"mcp={mcp} engine={engine} fallback={fallback}",
-        fallback=fallback, tool_failures=failures,
+        "deep", True, summary=f"mcp={mcp} engine={engine} mode={mode} fallback={fallback}",
+        engine=engine, mode=mode, fallback=fallback, tool_failures=failures,
         elapsed_s=round(time.time() - t0, 1)))
     # neat closure: if the agent had debug tools, x64dbg + the sample must
     # not outlive this stage (covers manual single-stage runs; the full
@@ -684,7 +695,8 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
 def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
                         enable_pesieve: bool = False, enable_dynamic: bool = False,
                         dry_llm: bool = False,
-                        enable_agentic_dbg: bool = False) -> dict:
+                        enable_agentic_dbg: bool = False,
+                        mode: str = "agentic") -> dict:
     """Control-plane pipeline driver: SSH/HTTP to the VM + local LLM + local audit.
 
     DEFAULT = static-only (quick + deep + yara + report + audit). Dynamic is
@@ -692,6 +704,9 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
     enable_agentic_dbg is independent: it gives the deep-dive agent the
     bounded x64dbg debug-loop tools (engine langgraph+dbg), without running
     the detonation phase.
+
+    mode: "agentic" (default, RevAI agentic) or "static" (deterministic,
+    RevAI scripted). dry_llm stays orthogonal.
     """
     from .evidence import sha256_file
     from . import audit as audit_mod
@@ -715,7 +730,7 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
     # ---- STATIC phase (quick + deep over SSH/HTTP) ----
     results["quick"] = remote_quick(sample.name, pack, cfg)
     results["deep"] = remote_deep(sample.name, pack, cfg, dry_llm, sha=sha,
-                                  dynamic=enable_agentic_dbg)
+                                  dynamic=enable_agentic_dbg, mode=mode)
 
     # ---- DYNAMIC phase (segregated, opt-in, runs LAST after static) ----
     if enable_dynamic:
@@ -744,6 +759,21 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
         results["reporting"] = generate_all(pack.root)
     except Exception as e:
         results["reporting"] = {"error": str(e)[:200]}
+
+    # pack-level META: mode/engine/source for UI rows + publish paths
+    try:
+        _deep_meta = pack.read("deep", "META.json") or {}
+        (pack.root / "META.json").write_text(json.dumps({
+            "sha256": sha,
+            "mode": mode,
+            "engine": _deep_meta.get("engine"),
+            "source": (results.get("report") or {}).get("source"),
+            "phase": (results.get("report") or {}).get("phase"),
+            "truly_green": audit_res["truly_green"],
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
 
     # ---- final tool sweep: nothing keeps running after the pipeline ----
     results["cleanup"] = _final_sweep(cfg, dynamic=enable_dynamic,
@@ -795,6 +825,12 @@ def main() -> int:
                     help="give the deep-dive agent bounded x64dbg tools "
                          "(engine langgraph+dbg; no detonation)")
     ap.add_argument("--dry-llm", action="store_true")
+    ap.add_argument("--mode", choices=["agentic", "static"], default="agentic",
+                    help="deep-dive engine: agentic = LangGraph ReAct (RevAI "
+                         "agentic); static = deterministic fixed-checklist, "
+                         "zero LLM calls (RevAI scripted)")
+    ap.add_argument("--publish", action="store_true",
+                    help="publish sanitized case to docs/case-studies/<mode>/<sha>/")
     args = ap.parse_args()
     if not args.sample.is_file():
         print(f"ERROR: sample not found: {args.sample}", file=sys.stderr)
@@ -807,7 +843,14 @@ def main() -> int:
     res = run_remote_pipeline(args.sample, max_seconds=args.max_seconds,
                               enable_pesieve=args.pesieve,
                               enable_dynamic=enable_dynamic, dry_llm=args.dry_llm,
-                              enable_agentic_dbg=enable_agentic_dbg)
+                              enable_agentic_dbg=enable_agentic_dbg,
+                              mode=args.mode)
+    if args.publish:
+        from .evidence import EvidencePack
+        from .reporting import publish_case
+        from .pipeline import LOGS_DIR
+        pub = publish_case(EvidencePack(LOGS_DIR, res["sha"]).root, mode=args.mode)
+        print(f"[winre-remote] published {pub['dest']}", flush=True)
     return 0 if res["results"]["audit"]["truly_green"] else 1
 
 

@@ -430,6 +430,90 @@ def _utc() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+_PUB_FILES = (
+    ("report", "REPORT-TECHNICAL-v3.md"),
+    ("report", "iocs.json"),
+    ("report", "AUDIT-REPORT.md"),
+    ("report", "EVIDENCE-BUNDLE.md"),
+    ("report", "report.json"),
+    ("yara", None),  # rule_report.json + generated rules, handled below
+    ("", "audit.json"),
+    ("", "stage_trace.json"),
+    ("", "META.json"),
+)
+
+
+def _sanitize_text(text: str) -> str:
+    """Redact lab specifics so published packs stay public-safe."""
+    red = IP_RE.sub("<redacted-ip>", text)
+    red = re.sub(r"C:\\Users\\[^\\/\s\"']+", r"C:\\Users\\analyst", red)
+    for token in ("FLARE-VM", "desktop-s8k347p"):
+        red = red.replace(token, "<redacted-host>")
+    red = re.sub(r"cadre-[0-9a-z.\-]*key", "<redacted-key>", red,
+                 flags=re.IGNORECASE)
+    red = re.sub(r"(?i)(api[_-]?key\s*[\"':=]+\s*)[^\s\"',}]+",
+                 r"\1<redacted>", red)
+    return red
+
+
+def _mode_of_pack(pack_root: Path) -> str:
+    meta = _load(pack_root / "META.json") or {}
+    if meta.get("mode") in ("static", "agentic"):
+        return meta["mode"]
+    deep_meta = _load(pack_root / "deep" / "META.json") or {}
+    if deep_meta.get("mode") in ("static", "agentic"):
+        return deep_meta["mode"]
+    engine = str(deep_meta.get("engine") or "")
+    return "static" if "static" in engine else "agentic"
+
+
+def publish_case(pack_root: Path, dest_root: Path | None = None,
+                 mode: str | None = None) -> dict:
+    """Publish a sanitized, mode-keyed case directory.
+
+    Default destination: <repo>/docs/case-studies/<mode>/<sha>/.
+    Only report-level artifacts (no binaries, no raw pcaps/dumps).
+    """
+    pack_root = Path(pack_root)
+    sha = pack_root.name
+    mode = mode or _mode_of_pack(pack_root)
+    if mode not in ("static", "agentic"):
+        mode = "agentic"
+    if dest_root is None:
+        dest_root = Path(__file__).resolve().parents[1] / "docs" / "case-studies"
+    dest = Path(dest_root) / mode / sha
+    dest.mkdir(parents=True, exist_ok=True)
+    copied: list[str] = []
+    for stage, name in _PUB_FILES:
+        if name is None:  # yara rules: generated rule files only
+            ydir = pack_root / "yara"
+            if ydir.is_dir():
+                for f in sorted(ydir.iterdir()):
+                    if f.is_file() and f.suffix in (".yar", ".yml"):
+                        (dest / f.name).write_text(
+                            _sanitize_text(f.read_text(encoding="utf-8",
+                                                       errors="replace")),
+                            encoding="utf-8")
+                        copied.append(f"yara/{f.name}")
+            continue
+        src = (pack_root / stage / name) if stage else (pack_root / name)
+        if not src.is_file():
+            continue
+        (dest / src.name).write_text(
+            _sanitize_text(src.read_text(encoding="utf-8", errors="replace")),
+            encoding="utf-8")
+        copied.append(f"{stage + '/' if stage else ''}{src.name}")
+    (dest / "CASE.json").write_text(json.dumps({
+        "sha256": sha,
+        "mode": mode,
+        "engine": ((_load(pack_root / "deep" / "META.json") or {}).get("engine")),
+        "source": ((_load(pack_root / "report" / "report.json") or {}).get("source")),
+        "published_at": _utc(),
+        "files": copied,
+    }, indent=2) + "\n", encoding="utf-8")
+    return {"ok": True, "mode": mode, "dest": str(dest), "files": copied}
+
+
 def generate_all(pack_root: Path) -> dict:
     """Full reporting chain for one pack (static now; dynamic appends later)."""
     results = {}

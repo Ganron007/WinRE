@@ -58,14 +58,28 @@ def _read_json(path: Path) -> dict | None:
 
 
 def _pack_verdicts(root: Path) -> dict:
-    """quick/deep verdicts + deep source/engine for a pack row (tolerant)."""
-    out: dict = {"quick": None, "deep": None, "source": None, "engine": None}
+    """quick/deep verdicts + deep source/engine/mode for a pack row (tolerant)."""
+    out: dict = {"quick": None, "deep": None, "source": None, "engine": None,
+                 "mode": None}
     quick = _read_json(root / "quick" / "quick.json") or {}
     if isinstance(quick.get("verdict"), str):
         out["quick"] = quick["verdict"]
     deep = _read_json(root / "deep" / "deep.json") or {}
     if isinstance(deep.get("engine"), str):
         out["engine"] = deep["engine"]
+    # mode: pack-level META (pipeline) → deep META → engine inference
+    pm = _read_json(root / "META.json") or {}
+    dm = _read_json(root / "deep" / "META.json") or {}
+    for src in (pm.get("mode"), dm.get("mode")):
+        if src in ("agentic", "static"):
+            out["mode"] = src
+            break
+    else:
+        eng = str(deep.get("engine") or "")
+        if "static" in eng:
+            out["mode"] = "static"
+        elif eng:
+            out["mode"] = "agentic"
     agent = deep.get("agent") if isinstance(deep.get("agent"), dict) else None
     if agent:
         v = agent.get("verdict")
@@ -428,7 +442,8 @@ def _stage_timings(sha: str | None) -> dict:
 
 def _run_pipeline_in_thread(sample_path: str, max_seconds: int,
                             pesieve: bool, dry_llm: bool, dynamic: bool,
-                            agentic_dbg: bool = False) -> None:
+                            agentic_dbg: bool = False,
+                            mode: str = "agentic") -> None:
     """Run the remote pipeline in a background thread; store the result."""
     import contextlib
     import datetime
@@ -486,7 +501,8 @@ def _run_pipeline_in_thread(sample_path: str, max_seconds: int,
                 res = remote_driver.run_remote_pipeline(
                     Path(sample_path), max_seconds=max_seconds,
                     enable_pesieve=pesieve, enable_dynamic=dynamic,
-                    dry_llm=dry_llm, enable_agentic_dbg=agentic_dbg)
+                    dry_llm=dry_llm, enable_agentic_dbg=agentic_dbg,
+                    mode=mode)
                 _run_state["sha"] = res["sha"]
                 _run_state["last"] = {"ok": True, "sha": res["sha"],
                                       "started": started,
@@ -580,11 +596,14 @@ def create_app() -> "Flask":
                 dry_llm = request.form.get("dry_llm") == "on"
                 dynamic = request.form.get("dynamic") == "on"
                 agentic_dbg = request.form.get("agentic_dbg") == "on"
+                mode = request.form.get("mode", "agentic")
+                if mode not in ("agentic", "static"):
+                    mode = "agentic"
                 _run_state["sha"] = None
                 _run_state["log"] = []
                 _run_state["last"] = None
                 _run_pipeline_in_thread(sample, max_seconds, pesieve, dry_llm,
-                                        dynamic, agentic_dbg)
+                                        dynamic, agentic_dbg, mode)
                 # form POST: redirect back so the browser lands on the live
                 # progress board instead of a raw JSON body
                 return redirect("/run", 303)
@@ -692,8 +711,12 @@ def create_app() -> "Flask":
                         bool(body.get("pesieve", False)))
                     return {"ok": True, "result": out}
                 if stage == "deep":
+                    mode = body.get("mode", "agentic")
+                    if mode not in ("agentic", "static"):
+                        mode = "agentic"
                     out = _rd.remote_deep(name, pack, cfg,
-                                          bool(body.get("dry_llm", False)), sha=sha)
+                                          bool(body.get("dry_llm", False)),
+                                          sha=sha, mode=mode)
                     return {"ok": True, "result": out}
                 if stage == "yara":
                     from winre import yara_gen

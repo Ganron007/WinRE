@@ -24,6 +24,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Callable
+from collections.abc import Sequence
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -699,7 +700,7 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
                             log_dir: Path | None = None,
                             dry: bool = False,
                             dynamic: bool = False,
-                            available_tools: "list[str] | None" = None,
+                            available_tools: "Sequence[str] | None" = None,
                             mode: str = "remote",
                             quick: dict | None = None) -> dict:
     """Run the LangGraph ReAct agent over the static toolset.

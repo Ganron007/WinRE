@@ -169,15 +169,17 @@ def _quick(sample: Path, pack: EvidencePack) -> dict:
 
     # Ghidra SQL (canonical funcs + high-signal imports for YARA)
     ghidra = _run_sql("ghidra", sample, "@funcs")
+    gh_ev: dict = {}
     if ghidra.get("ok"):
-        evidence["ghidra"] = {"func_rows": len(ghidra.get("rows") or [])}
+        gh_ev["func_rows"] = len(ghidra.get("rows") or [])
     else:
         failures.append(f"ghidra:{ghidra.get('error','')[:80]}")
-        evidence["ghidra"] = {"error": ghidra.get("error", "")}
+        gh_ev["error"] = ghidra.get("error", "")
     ghidra_imp = _run_sql("ghidra", sample, "@imports")
     if ghidra_imp.get("ok"):
         rows = ghidra_imp.get("rows") or []
-        evidence["ghidra"]["imports"] = [r[0] for r in rows if r][:20]
+        gh_ev["imports"] = [r[0] for r in rows if r][:20]
+    evidence["ghidra"] = gh_ev
 
     # RevAI-parity static tools (VM-side subprocess — same surface as the
     # remote quick helper). All tolerate absence.
@@ -299,8 +301,14 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
     return stage_meta
 
 
-def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False) -> dict:
-    """LangGraph agentic deep dive — same engine as the control plane.
+def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
+          mode: str = "agentic") -> dict:
+    """Deep dive — mode selects the engine (same contract either way).
+
+    mode="agentic" (default): LangGraph ReAct agent (RevAI agentic).
+    mode="static": deterministic fixed-checklist deep dive, zero LLM calls
+        (RevAI scripted). dry_llm is orthogonal: agentic+dry_llm falls back
+        honestly; static mode never touches the LLM.
 
     When running on the FlareVM, the agent calls tools via subprocess
     (local mode — no SSH hop). Same 24-tool registry, same LLM, same
@@ -329,12 +337,20 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False) 
 
     # LangGraph agent — local mode (subprocess tools, no SSH)
     agent_result = None
+    engine = "langgraph"
     try:
-        from .agentic import run_langgraph_deep_dive, TOOL_NAMES
-        agent_result = run_langgraph_deep_dive(
-            sample.name, pack.root.name,
-            max_steps=10, dry=dry_llm,
-            mode="local", quick=quick)
+        if mode == "static":
+            from .static_deep import run_static_deep_dive
+            engine = "static_deterministic"
+            agent_result = run_static_deep_dive(
+                sample.name, pack.root.name,
+                mode="local", quick=quick)
+        else:
+            from .agentic import run_langgraph_deep_dive, TOOL_NAMES
+            agent_result = run_langgraph_deep_dive(
+                sample.name, pack.root.name,
+                max_steps=10, dry=dry_llm,
+                mode="local", quick=quick)
         history = []
         for h in (agent_result.get("history") or [])[:80]:
             entry = {"step": h.get("step"), "tool": h.get("tool"),
@@ -355,7 +371,7 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False) 
         failures.append(f"agent:{e}")
         agent_result = None
 
-    if agent_result and agent_result.get("source") == "llm_judge":
+    if agent_result and agent_result.get("source") in ("llm_judge", "static_deterministic"):
         fallback = False
     else:
         fallback = True
@@ -366,8 +382,8 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False) 
     pack.write("deep", "deep.json", out)
     pack.write("deep", "META.json", stage_result(
         "deep", ok=True, error=None,
-        summary=f"mcp={mcp} fallback={fallback}",
-        fallback=fallback, tool_failures=failures,
+        summary=f"mcp={mcp} engine={engine} mode={mode} fallback={fallback}",
+        engine=engine, mode=mode, fallback=fallback, tool_failures=failures,
         elapsed_s=round(time.time() - t0, 1)))
     return {"ok": True, "fallback": fallback, "failures": failures, "mcp": mcp,
             "agent": out.get("agent"), "llm_analysis": out.get("llm_analysis")}
@@ -428,7 +444,9 @@ def _report(pack: EvidencePack, sha: str, quick: dict, dynamic: dict | None,
     report = {
         "sha256": sha,
         "generated_at": utcnow(),
-        "source": "llm_judge" if source == "llm_judge" else "deterministic_fallback",
+        # honest source tags: llm_judge / static_deterministic / fallback
+        "source": source if source in ("llm_judge", "static_deterministic")
+        else "deterministic_fallback",
         "phase": "static+dynamic" if dynamic_ran else "static",
         "quick": {k: q.get(k) for k in ("ida", "ghidra", "malcat") if k in q},
         "dynamic": {
@@ -451,11 +469,16 @@ def _report(pack: EvidencePack, sha: str, quick: dict, dynamic: dict | None,
 
 
 def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = False,
-                 enable_dynamic: bool = False, dry_llm: bool = False) -> dict:
+                 enable_dynamic: bool = False, dry_llm: bool = False,
+                 mode: str = "agentic") -> dict:
     """Run the WinRE pipeline.
 
     DEFAULT = STATIC-ONLY (mirrors RevEng/RevAI): intake → quick → deep → yara
     → report → audit. Never detonates. Safe on any host.
+
+    mode: "agentic" (default) = LangGraph ReAct deep dive (RevAI agentic);
+          "static" = deterministic deep dive, zero LLM calls (RevAI scripted).
+    dry_llm stays orthogonal: agentic+dry_llm = honest deterministic_fallback.
 
     enable_dynamic=True appends a SEGREGATED dynamic phase (detonation) that:
       - runs AFTER static completes (never mid-static — no VM contamination
@@ -476,7 +499,7 @@ def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = 
     quick = _quick(sample, pack)
     results["quick"] = quick
 
-    deep = _deep(sample, pack, quick, dry_llm=dry_llm)
+    deep = _deep(sample, pack, quick, dry_llm=dry_llm, mode=mode)
     results["deep"] = deep
 
     yara = _yara(pack, quick, None)
@@ -507,6 +530,21 @@ def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = 
     except Exception as e:
         results["reporting"] = {"error": str(e)[:200]}
 
+    # pack-level META: mode/engine/source for UI rows + publish paths
+    try:
+        _deep_meta = pack.read("deep", "META.json") or {}
+        (pack.root / "META.json").write_text(json.dumps({
+            "sha256": sha,
+            "mode": mode,
+            "engine": _deep_meta.get("engine"),
+            "source": (results.get("report") or {}).get("source"),
+            "phase": (results.get("report") or {}).get("phase"),
+            "truly_green": audit_res["truly_green"],
+            "generated_at": utcnow(),
+        }, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
     # summary line
     phase = "static"
     if dynamic:
@@ -531,9 +569,15 @@ def main() -> int:
                          "requires snapshot-restored VM; static_yara_wins)")
     ap.add_argument("--dry-llm", action="store_true",
                     help="never call the LLM (deterministic fallback only)")
+    ap.add_argument("--mode", choices=["agentic", "static"], default="agentic",
+                    help="deep-dive engine: agentic = LangGraph ReAct (RevAI "
+                         "agentic); static = deterministic fixed-checklist, "
+                         "zero LLM calls (RevAI scripted)")
     ap.add_argument("--driver", choices=["local", "remote"], default="local",
                     help="local = run on FlareVM itself; remote = control-plane "
                          "driver (SSH to FlareVM + HTTP MCP + local LLM)")
+    ap.add_argument("--publish", action="store_true",
+                    help="publish sanitized case to docs/case-studies/<mode>/<sha>/")
     args = ap.parse_args()
     if not args.sample.is_file():
         print(f"ERROR: sample not found: {args.sample}", file=sys.stderr)
@@ -545,11 +589,22 @@ def main() -> int:
         from . import remote_driver
         res = remote_driver.run_remote_pipeline(
             args.sample, max_seconds=args.max_seconds, enable_pesieve=args.pesieve,
-            enable_dynamic=enable_dynamic, dry_llm=args.dry_llm)
+            enable_dynamic=enable_dynamic, dry_llm=args.dry_llm,
+            mode=args.mode)
+        if args.publish:
+            from .reporting import publish_case
+            from .evidence import EvidencePack as _EP
+            pub = publish_case(_EP(LOGS_DIR, res["sha"]).root, mode=args.mode)
+            print(f"[winre-pipeline] published {pub['dest']}", flush=True)
         return 0 if res["results"]["audit"]["truly_green"] else 1
     res = run_pipeline(args.sample, max_seconds=args.max_seconds,
                        enable_pesieve=args.pesieve,
-                       enable_dynamic=enable_dynamic, dry_llm=args.dry_llm)
+                       enable_dynamic=enable_dynamic, dry_llm=args.dry_llm,
+                       mode=args.mode)
+    if args.publish:
+        from .reporting import publish_case
+        pub = publish_case(EvidencePack(LOGS_DIR, res["sha"]).root, mode=args.mode)
+        print(f"[winre-pipeline] published {pub['dest']}", flush=True)
     return 0 if res["results"]["audit"]["truly_green"] else 1
 
 

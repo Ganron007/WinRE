@@ -59,11 +59,18 @@
       ✓ Snapshot restored after dynamic</button>
     <span id="hitlState" class="muted" style="font-size:var(--tx-xs); margin-left:8px"></span>
   </div>
-  <div style="display:flex; gap:6px; flex-wrap:wrap">
+  <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center">
     {% for s in ['quick','dynamic','deep','yara','report','audit'] %}
     <button class="btn ghost" style="font-size:var(--tx-xs)"
             onclick="runStage('{{ s }}')">▶ {{ s }}</button>
     {% endfor %}
+    <span style="margin-left:10px; font-size:var(--tx-xs)">
+      <input type="radio" name="deepmode" value="agentic" checked id="dmAgentic">
+      <label for="dmAgentic">agentic</label>
+      <input type="radio" name="deepmode" value="static" id="dmStatic">
+      <label for="dmStatic">static</label>
+      <span class="muted">(deep mode)</span>
+    </span>
   </div>
   <pre id="stageOut" style="display:none"></pre>
 </div></div>
@@ -76,12 +83,19 @@ async function hitl(action) {
   const j = await r.json();
   document.getElementById('hitlState').textContent = JSON.stringify(j.snapshot || j);
 }
+function deepMode() {
+  const r = document.querySelector('input[name="deepmode"]:checked');
+  return r ? r.value : 'agentic';
+}
 async function runStage(stage) {
   const el = document.getElementById('stageOut');
   el.style.display = 'block';
   let body = {};
   if (stage === 'dynamic') {
     body = {confirm_snapshot: true, max_seconds: 45};
+  }
+  if (stage === 'deep') {
+    body = {mode: deepMode()};
   }
   el.textContent = 'starting ' + stage + '…';
   const r = await fetch('/stages/{{ pack.sha }}/' + stage, {

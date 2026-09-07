@@ -126,6 +126,17 @@
             <label>Detonation seconds (dynamic only)</label>
             <input name="max_seconds" type="number" value="45" min="10" max="600">
           </div>
+          <div>
+            <label>Deep-dive mode</label>
+            <div style="display:flex; gap:14px; align-items:center; margin-top:4px">
+              <label class="check" style="margin:0">
+                <input type="radio" name="mode" value="agentic" checked>
+                agentic <span class="muted" style="font-size:var(--tx-xs)">(LangGraph ReAct — RevAI agentic)</span></label>
+              <label class="check" style="margin:0">
+                <input type="radio" name="mode" value="static">
+                static <span class="muted" style="font-size:var(--tx-xs)">(fixed checklist, zero LLM — RevAI scripted)</span></label>
+            </div>
+          </div>
         </div>
 
         <div style="margin-top:10px">
@@ -174,14 +185,28 @@
     const dbg = document.getElementById('dbgChk');
     const dry = document.getElementById('dryChk');
     const mode = document.getElementById('deepMode');
+    const modeRadios = document.querySelectorAll('input[name="mode"]');
+    function selMode() {
+      for (const r of modeRadios) if (r.checked) return r.value;
+      return 'agentic';
+    }
     function refreshMode() {
-      // deep engine preview: dry-LLM => deterministic; else langgraph(+dbg)
-      let m = 'langgraph', cls = 'up';
-      if (dry.checked) { m = 'deterministic'; cls = 'flat'; }
-      else if (dbg.checked) { m = 'langgraph+dbg'; cls = 'warn'; }
-      mode.textContent = m;
+      // deep engine preview: static mode => fixed checklist; agentic => dry/dry+dbg
+      const m = selMode();
+      let txt, cls;
+      if (m === 'static') {
+        txt = 'static_deterministic'; cls = 'flat';
+        dry.disabled = dbg.disabled = true;
+      } else {
+        dry.disabled = dbg.disabled = false;
+        if (dry.checked) { txt = 'deterministic'; cls = 'flat'; }
+        else if (dbg.checked) { txt = 'langgraph+dbg'; cls = 'warn'; }
+        else { txt = 'langgraph'; cls = 'up'; }
+      }
+      mode.textContent = txt;
       mode.className = 'badge ' + cls;
     }
+    for (const r of modeRadios) r.addEventListener('change', refreshMode);
     chk.addEventListener('change', () => {
       warn.hidden = !chk.checked;
       pes.hidden = !chk.checked;

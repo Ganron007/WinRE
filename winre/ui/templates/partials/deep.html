@@ -1,10 +1,12 @@
 {% set d = pack.views.deep %}
-<div class="page-section-title">Deep dive · LangGraph agent</div>
+<div class="page-section-title">Deep dive</div>
 {% set agent = d.agent %}
 {% if agent %}
 <div class="board">
   <div class="board-head">
-    {% if agent.get('source') == 'llm_judge' %}
+    {% if agent.get('source') == 'static_deterministic' %}
+      <span class="badge up">static_deterministic</span>
+    {% elif agent.get('source') == 'llm_judge' %}
       <span class="badge up">llm_judge</span>
     {% else %}<span class="badge warn">deterministic_fallback</span>{% endif %}
     {% if d.engine %}
@@ -17,6 +19,9 @@
       <span style="margin-left:8px; font-size:var(--tx-sm)">
         verdict <b>{{ v.verdict if v is mapping else v }}</b>
         <span class="muted">({{ v.confidence if v is mapping else '?' }})</span>
+        {% if v is mapping and v.get('rules_fired') %}
+          <span class="muted">· rules: {{ v.rules_fired|join(', ') }}</span>
+        {% endif %}
       </span>
     {% endif %}
     <span class="muted" style="margin-left:auto; font-size:var(--tx-xs)">
