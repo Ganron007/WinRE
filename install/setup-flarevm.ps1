@@ -136,6 +136,14 @@ if ($idaResolved) {
     Ok "IDA -> $idaResolved"
     if (Test-Path (Join-Path $idaResolved "idasql.exe")) { Ok "idasql present" }
     else { Manual "Install idasql.exe into $idaResolved (id_query tool needs it)." }
+    # license flavor: IDA Free cannot drive headless ida_query (.i64/idalib)
+    $licDir = Join-Path $env:APPDATA "Hex-Rays\IDA Pro"
+    $freeLic = Get-ChildItem $licDir -Filter "idafree_*.hexlic" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($freeLic) {
+        Warn "IDA FREE license detected ($($freeLic.Name)) - headless ida_query/.i64 needs IDA Professional. Ghidra stays canonical; activate Pro to enable IDA participation."
+    } else {
+        Ok "IDA license: no idafree marker (Pro assumed)"
+    }
 } else {
     Warn "IDA not detected (optional - deep degrades to Ghidra+Malcat)."
     if (-not $env:WINRE_IDA_DIR) { Info "Installed IDA somewhere else? Set WINRE_IDA_DIR (and IDASQL) so the pipeline finds it - see docs\TOOL-PATHS.md." }

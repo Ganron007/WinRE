@@ -46,6 +46,34 @@ def _find_ida_exe(name: str) -> str | None:
     return None
 
 
+def _ida_edition_note() -> dict:
+    """License-flavor probe: IDA Free cannot drive headless idalib/idat -A,
+    so ida_query can never work on it. Report instantly instead of hanging."""
+    for d in _ida_candidates():
+        p = os.path.join(d, "idat.exe")
+        if not os.path.isfile(p):
+            continue
+        lic = os.path.join(os.environ.get("APPDATA", ""),
+                           "Hex-Rays", "IDA Pro")
+        free = False
+        try:
+            for f in os.listdir(lic):
+                if f.lower().startswith("idafree"):
+                    free = True
+                    break
+        except OSError:
+            pass
+        if free:
+            return {"edition": "free", "dir": d,
+                    "detail": ("IDA Free license detected — headless "
+                               "ida_query/idalib is unsupported (GUI-only). "
+                               "Activate an IDA Professional license (GUI -> "
+                               "Help -> activate) or point IDASQL at a Pro "
+                               "install.")}
+        return {"edition": "pro", "dir": d}
+    return {"edition": "missing", "detail": "no idat.exe found"}
+
+
 def _ensure_i64(db_path: str, timeout: int = 900) -> tuple[bool, str]:
     """If the target has no .i64 database yet, run IDA headless auto-analysis
     (`idat -A -c -o<file>.i64`) to create one. idasql can only query an
@@ -62,6 +90,13 @@ def _ensure_i64(db_path: str, timeout: int = 900) -> tuple[bool, str]:
         return False, ("idat.exe not found (cannot create .i64). Set "
                        "WINRE_IDA_DIR to your IDA install dir (e.g. "
                        "C:\\Program Files\\IDA Professional 9.3).")
+    ed = _ida_edition_note()
+    if ed.get("edition") == "free":
+        return False, ("IDA Free license detected — headless auto-analysis "
+                       "(.i64 creation) is unsupported. ida_query requires "
+                       "IDA Professional (activate the Pro license in the "
+                       "GUI, or set IDASQL/WINRE_IDA_DIR to a Pro install). "
+                       "Ghidra remains the canonical static engine.")
     try:
         r = subprocess.run(
             [ida, "-A", "-c", f"-o{i64}", str(p)],
@@ -151,6 +186,13 @@ def query_http(db_path: str, sql: str, port: int = 19300, write: bool = False) -
     import time
 
     # Start idasql --http server
+    ed = _ida_edition_note()
+    if ed.get("edition") == "free":
+        return {"ok": False,
+                "error": ("IDA Free license detected — headless idasql HTTP "
+                          "server is unsupported (GUI-only). ida_query "
+                          "requires IDA Professional; Ghidra remains the "
+                          "canonical static engine.")}
     proc = subprocess.Popen(
         [IDASQL, "-s", db_path, "--http", str(port), "--bind", "127.0.0.1"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,

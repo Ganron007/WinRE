@@ -26,7 +26,7 @@ the air-gapped VM.
 | scdbg `[base]` | `C:\Tools\scdbg\scdbg.exe` | — | shellcode extraction emulation | shellcode_extract degrades |
 | goresym `[user]`/`[stage]` | `C:\Tools\goresym\goresym.exe` | — | Go binaries only | goresym tool skips (Go detection gates it) |
 | ILSpy CLI `[user]` | `%USERPROFILE%\.dotnet\tools\ilspycmd.exe` | — | .NET decompile | dotnet_analyze degrades to metadata-only |
-| IDA Pro/Free + idasql `[user]` | `C:\Program Files\IDA Professional 9.3` (also probed: IDA Free 9.3/8.3, `C:\Tools\IDA*`) | **`WINRE_IDA_DIR`** (dir with `idat.exe`); **`IDASQL`** / `WINRE_IDASQL` (idasql.exe full path) | ida_query, .i64 creation | ida_query skips with a hint; Ghidra is canonical |
+| IDA Pro/Free + idasql `[user]` | `C:\Program Files\IDA Professional 9.3` (also probed: IDA Free 9.3/8.3, `C:\Tools\IDA*`) | **`WINRE_IDA_DIR`** (dir with `idat.exe`); **`IDASQL`** / `WINRE_IDASQL` (idasql.exe full path) | ida_query, .i64 creation | **IDA Free license is detected and skipped INSTANTLY with a clear message** — headless idalib/.i64 creation requires **IDA Professional** (activate Pro in the GUI, or point the env vars at a Pro install). Ghidra is canonical; IDA is corroboration |
 | Malcat (portable) `[user]` | `C:\Tools\malcat\bin` (also probed: `C:\Program Files\Malcat\bin`, `%USERPROFILE%\Downloads\malcat\bin`) — must contain `bin\malcat.mcp.py` | `MALCAT_BIN_DIR`; license `MALCAT_LICENSE` (default `%APPDATA%\Malcat\license.dat`) | quick triage views, agent malcat tools, unpack compare | all malcat evidence skips honestly; Ghidra + x64dbg carry the analysis |
 
 ## Dynamic / detonation
