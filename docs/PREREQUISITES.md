@@ -62,20 +62,35 @@ Start from a **Windows 10/11 VM on an isolated/host-only network**.
 | Tool | Default location | Source |
 |---|---|---|
 | **FlareVM base** | — | mandiant/flare-vm `install.ps1` (step 1 above) |
-| **Ghidra** 11.x/12.x + CADRE loader | `C:\Tools\ghidra_<version>` | NSA releases (primary static engine) |
+| **Ghidra** 11.x/12.x + CADRE loader | `C:\Tools\ghidra_<version>` | NSA releases (primary static engine; auto-detected by glob) |
 | **x64dbg** + MCP plugin | `C:\Tools\x64dbg` | x64dbg releases; plugin built by setup from `integrations/x64dbg-mcp-server` |
 | **FakeNet-NG** 3.5 | `C:\Tools\fakenet\fakenet3.5\fakenet.exe` | FlareVM base / mandiant releases |
 | **Procmon** (Sysinternals) | `C:\Tools\sysinternals\Procmon64.exe` | FlareVM base |
 | **pe-sieve** | `C:\ProgramData\chocolatey\bin\pe-sieve.exe` | FlareVM base / hasherezade releases |
 | **hollows_hunter** | `C:\Tools\hollows_hunter\hollows_hunter.exe` | FlareVM base / hasherezade releases |
-| **Python** 3.13 + `frida`, `flask` | `C:\Python313` | FlareVM base; deps also auto-installed by setup |
+| **Python** 3.13 | `C:\Python313` | FlareVM base; deps auto-installed by setup (`frida`, `flask`, `pefile`, `psutil`, `oletools`, `pypdf`, `dnfile`, `z3`, `angr`, `speakeasy`, `setuptools<81`) |
+| **capa** + mandiant rules | `C:\Tools\capa\capa.exe` + `C:\Tools\capa-rules` | FlareVM base / pip fallback auto-used |
+| **Detect It Easy** | `C:\Tools\die\diec.exe` | FlareVM base (or stage via `ops/provision_tools.ps1`) |
+| **yara-x** + curated rules | `C:\Tools\yr\yr.exe` + `C:\Tools\yara-rules` | FlareVM base (rules: operator stages curated sets) |
+| **scdbg** | `C:\Tools\scdbg\scdbg.exe` | FlareVM base |
+| **radare2** | `C:\Tools\radare2\radare2.exe` | FlareVM base (sink_sites / r2_decompile) |
+| **goresym** | `C:\Tools\goresym\goresym.exe` | hasherezade releases (Go samples only) |
+| **ILSpy CLI** | `%USERPROFILE%\.dotnet\tools\ilspycmd.exe` | `dotnet tool install -g ilspycmd` (.NET samples only) |
+| **7-Zip** | `C:\Program Files\7-Zip\7z.exe` | FlareVM base (DFIR-Nexus case packs; zip fallback) |
+| **Wireshark/tshark** | `C:\Program Files\Wireshark\tshark.exe` | FlareVM base (beacon/pcap post-analysis) |
 
 ### Optional — commercial (setup detects; pipeline skips gracefully)
 
-| Tool | Default location | Degradation when absent |
-|---|---|---|
-| **Malcat** (+ license) | `C:\Tools\malcat\bin` | quick-triage strings/anomalies and Malcat agent tools are skipped (honest `skipped` annotations); Ghidra + x64dbg carry the analysis |
-| **IDA Professional** 9.x + `idasql` | `C:\Program Files\IDA Professional 9.3` | `ida_query` agent tool disabled; Ghidra SQL is the canonical source |
+| Tool | Default location | Env override | Degradation when absent |
+|---|---|---|---|
+| **Malcat** (portable; + license) | `C:\Tools\malcat\bin` (also probed: `C:\Program Files\Malcat\bin`, `%USERPROFILE%\Downloads\malcat\bin`) — expects `bin\malcat.mcp.py` | `MALCAT_BIN_DIR` (license: `MALCAT_LICENSE`) | quick-triage strings/anomalies and Malcat agent tools are skipped (honest `skipped` annotations); Ghidra + x64dbg carry the analysis |
+| **IDA Professional** 9.x + `idasql` | `C:\Program Files\IDA Professional 9.3` (also probed: IDA Free 9.3/8.3, `C:\Tools\IDA*`) — **install-at-preference is fully supported** | `WINRE_IDA_DIR` (dir containing `idat.exe`); `IDASQL`/`WINRE_IDASQL` (full path to `idasql.exe`) | `ida_query` agent tool skips (honest skip + hint); Ghidra SQL is the canonical source |
+
+> **Tool-location contract:** every expected path, its detection order, and
+> the exact degradation is documented in [`TOOL-PATHS.md`](TOOL-PATHS.md).
+> `install/setup-flarevm.ps1 -CheckMode` reports each tool as found/missing
+> with the precise fix; `ops/smoke_flare.py` and `install/verify-flarevm.ps1`
+> re-verify the resolved set at run time.
 
 ## Safety requirements
 

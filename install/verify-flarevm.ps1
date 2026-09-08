@@ -39,7 +39,8 @@ $py = "C:\Python313\python.exe"
 if (Test-Path $py) {
     $v = & $py --version 2>&1
     Ok "python -> $py ($v)"
-    foreach ($mod in @("frida", "flask")) {
+    foreach ($mod in @("frida", "flask", "pefile", "psutil", "oletools",
+                       "pypdf", "dnfile", "z3", "angr", "speakeasy")) {
         $mv = & $py -c "import $mod; print($mod.__version__)" 2>$null
         if ($LASTEXITCODE -eq 0 -and $mv) { Ok "python module $mod == $mv" }
         else { Fail "python module $mod not importable (pip install $mod)" }
@@ -110,7 +111,7 @@ if ($malcatBin) {
 
 Write-Host ""
 Write-Host "--- IDA ---"
-$idaDir = "C:\Program Files\IDA Professional 9.3"
+$idaDir = if ($env:WINRE_IDA_DIR) { $env:WINRE_IDA_DIR } else { "C:\Program Files\IDA Professional 9.3" }
 if (Test-Path (Join-Path $idaDir "ida.exe")) { Ok "IDA Professional -> $idaDir" }
 elseif (Test-Path (Join-Path $idaDir "idat.exe")) { Ok "IDA Professional (idat) -> $idaDir" }
 else { Warn "IDA not found at $idaDir (optional: deep stage degrades to Ghidra+Malcat)" }
@@ -134,7 +135,25 @@ Test-PathOk "C:\Tools\fakenet\fakenet3.5\fakenet.exe" "FakeNet-NG" "docs\PREREQU
 Test-PathOk "C:\Tools\sysinternals\Procmon64.exe" "Procmon" "docs\PREREQUISITES.md"
 Test-PathOk "C:\ProgramData\chocolatey\bin\pe-sieve.exe" "pe-sieve" "choco install pe-sieve"
 Test-PathOk "C:\Tools\hollows_hunter\hollows_hunter.exe" "hollows_hunter" "docs\PREREQUISITES.md"
+Test-PathOk "C:\Tools\sysinternals\Procdump64.exe" "Procdump" "Sysinternals (post-mortem harvest)"
 Test-PathOk "C:\samples" "samples dir" "mkdir C:\samples"
+
+Write-Host ""
+Write-Host "--- Free static tooling ---"
+Test-PathOk "C:\Tools\capa\capa.exe" "capa" "FlareVM base / pip fallback"
+Test-PathOk "C:\Tools\die\diec.exe" "diec (Detect It Easy)" "FlareVM base / provision_tools.ps1"
+Test-PathOk "C:\Tools\yr\yr.exe" "yara-x" "FlareVM base / provision_tools.ps1"
+Test-PathOk "C:\Tools\yara-rules" "yara-rules dir" "stage curated rules (operator)"
+Test-PathOk "C:\Tools\scdbg\scdbg.exe" "scdbg" "FlareVM base"
+Test-PathOk "C:\Tools\radare2\radare2.exe" "radare2" "FlareVM base"
+Test-PathOk "C:\Tools\goresym\goresym.exe" "goresym" "hasherezade releases (Go only)"
+Test-PathOk "C:\Tools\sysinternals\strings64.exe" "strings64" "FlareVM base"
+if (Test-Path "$env:USERPROFILE\.dotnet\tools\ilspycmd.exe") { Ok "ilspycmd (.NET) present" }
+else { Warn "ilspycmd missing (dotnet tool install -g ilspycmd) - .NET decompile degrades" }
+if (Test-Path "C:\Program Files\7-Zip\7z.exe") { Ok "7-Zip present" }
+else { Warn "7-Zip missing - DFIR-Nexus case packs fall back to .zip" }
+if (Test-Path "C:\Program Files\Wireshark\tshark.exe") { Ok "tshark present" }
+else { Warn "tshark missing - beacon/pcap analysis degrades" }
 
 Write-Host ""
 Write-Host "--- MCP plane ---"

@@ -65,9 +65,24 @@ $zigOk = Get-File "https://ziglang.org/download/${zigVer}/zig-windows-x86_64-${z
 
 # pe-sieve / hollows_hunter (direct release binaries)
 $peOk = Get-File "https://github.com/hasherezade/pe-sieve/releases/latest/download/pe_sieve64.exe" `
-    (Join-Path $stage "pe_sieve64.exe")
+    (Join-Path $stage "pe-sieve64.exe")
 $hhOk = Get-File "https://github.com/hasherezade/hollows_hunter/releases/latest/download/hollows_hunter64.exe" `
     (Join-Path $stage "hollows_hunter64.exe")
+
+# Additional free static tools (staged for the air-gapped VM):
+#   - Detect It Easy (portable release zip: contains diec.exe)
+$dieVer = "3.09"
+$dieOk = Get-File "https://github.com/horsicq/Detect-It-Easy/releases/download/${dieVer}/die_win32_portable_${dieVer}.zip" `
+    (Join-Path $stage "die_win32_portable_${dieVer}.zip")
+#   - goresym (Go symbol recovery; only needed for Go samples)
+$goresymOk = Get-File "https://github.com/mandiant/GoReSym/releases/latest/download/GoReSym.exe" `
+    (Join-Path $stage "GoReSym.exe")
+#   - scdbg (shellcode emulator; FlareVM base usually ships it)
+$scdbgOk = Get-File "https://github.com/dzzie/SCDBG/releases/latest/download/scdbg.zip" `
+    (Join-Path $stage "scdbg.zip")
+#   - yara-x scanner (yr.exe; FlareVM base usually ships it)
+$yaraOk = Get-File "https://github.com/VirusTotal/yara-x/releases/latest/download/yr-x86_64-pc-windows-msvc.zip" `
+    (Join-Path $stage "yr-x86_64-pc-windows-msvc.zip")
 
 # x64dbg-MCP source (users fetch upstream; we apply tools\x64dbg-mcp-winre.patch)
 $gitOk = $true
@@ -105,7 +120,10 @@ Write-Host "  2. Unzip C:\Tools-staged\x64dbg.zip        -> C:\Tools\x64dbg"
 Write-Host "  3. Unzip C:\Tools-staged\zig-*.zip         -> C:\Tools\zig (add to PATH)"
 Write-Host "  4. pe-sieve64.exe / hollows_hunter64.exe   -> chocolatey bin / C:\Tools\hollows_hunter"
 Write-Host "     (or let the FlareVM base installer place them)"
-Write-Host "  5. Run: powershell -File C:\WinRE\install\setup-flarevm.ps1"
+Write-Host "  5. die_win32_portable_*.zip                -> unzip, copy diec.exe to C:\Tools\die\"
+Write-Host "  6. GoReSym.exe                             -> C:\Tools\goresym\goresym.exe"
+Write-Host "  7. scdbg.zip / yr-x86_64-*.zip             -> C:\Tools\scdbg\ / C:\Tools\yr\ (FlareVM base often ships these)"
+Write-Host "  8. Run: powershell -File C:\WinRE\install\setup-flarevm.ps1"
 Write-Host "     (builds the MCP plugin with the staged zig, verifies everything)"
 Write-Host ""
 $failed = @()

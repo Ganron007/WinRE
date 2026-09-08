@@ -79,10 +79,20 @@ else {
     Manual "Install Python 3.13 for ALL USERS to C:\Python313 (python.org), then re-run."
 }
 if (Test-Path $py) {
-    foreach ($mod in @("frida", "flask")) {
+    # static-analysis python deps (KB-derived tools + revai-parity wrappers)
+    foreach ($mod in @("frida", "flask", "pefile", "psutil", "oletools",
+                       "pypdf", "dnfile", "z3", "angr", "speakeasy")) {
         & $py -c "import $mod" 2>$null
         if ($LASTEXITCODE -eq 0) { Ok "module $mod present" }
         else { Act "pip install $mod"; if (-not $CheckMode) { & $py -m pip install --quiet $mod } }
+    }
+    # speakeasy imports setuptools.pkg_resources (removed in setuptools>=81)
+    & $py -c "import setuptools" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $stv = & $py -c "import setuptools; print(setuptools.__version__)"
+        if ([version]$stv -ge [version]"81.0.0") {
+            Act "pin setuptools<81 (speakeasy pkg_resources)"; if (-not $CheckMode) { & $py -m pip install --quiet "setuptools<81" }
+        } else { Ok "setuptools $($stv.Trim()) (<81)" }
     }
 }
 
@@ -115,12 +125,40 @@ if ($malcatBin) {
     else { Manual "Activate Malcat (GUI -> Preferences -> license). Headless API reports: $($licOut ?? 'unknown')." }
 } else { Manual "Install Malcat (commercial) with bin\malcat.mcp.py reachable (docs\PREREQUISITES.md)." }
 
-$idaDir = "C:\Program Files\IDA Professional 9.3"
-if (Test-Path (Join-Path $idaDir "idat.exe")) {
-    Ok "IDA Professional -> $idaDir"
-    if (Test-Path (Join-Path $idaDir "idasql.exe")) { Ok "idasql present" }
-    else { Manual "Install idasql.exe into $idaDir (id_query tool needs it)." }
-} else { Warn "IDA not detected (optional - deep degrades to Ghidra+Malcat)." }
+$idaDir = if ($env:WINRE_IDA_DIR) { $env:WINRE_IDA_DIR } else { "C:\Program Files\IDA Professional 9.3" }
+$idaCands = @()
+if ($env:WINRE_IDA_DIR) { $idaCands += $env:WINRE_IDA_DIR }
+$idaCands += @("C:\Program Files\IDA Professional 9.3", "C:\Program Files\IDA Free 9.3",
+               "C:\Program Files\IDA Professional 8.3", "C:\Tools\IDA Pro 9.3",
+               "C:\Tools\IDA Free 9.3")
+$idaResolved = $idaCands | Where-Object { Test-Path (Join-Path $_ "idat.exe") } | Select-Object -First 1
+if ($idaResolved) {
+    Ok "IDA -> $idaResolved"
+    if (Test-Path (Join-Path $idaResolved "idasql.exe")) { Ok "idasql present" }
+    else { Manual "Install idasql.exe into $idaResolved (id_query tool needs it)." }
+} else {
+    Warn "IDA not detected (optional - deep degrades to Ghidra+Malcat)."
+    if (-not $env:WINRE_IDA_DIR) { Info "Installed IDA somewhere else? Set WINRE_IDA_DIR (and IDASQL) so the pipeline finds it - see docs\TOOL-PATHS.md." }
+}
+
+# --- 3b. free static tooling (FlareVM base ships some; detect + instruct) -----
+Write-Host ""
+Write-Host "--- Free static tooling ---"
+foreach ($t in @(
+        @("C:\Tools\capa\capa.exe", "capa (REQUIRED free; pip fallback auto-used)"),
+        @("C:\Tools\die\diec.exe", "Detect It Easy diec (REQUIRED free)"),
+        @("C:\Tools\yr\yr.exe", "yara-x scanner (REQUIRED free)"),
+        @("C:\Tools\yara-rules", "curated YARA rules dir (REQUIRED free)"),
+        @("C:\Tools\scdbg\scdbg.exe", "scdbg shellcode emulator (free)"),
+        @("C:\Tools\radare2\radare2.exe", "radare2 (free)"),
+        @("C:\Tools\goresym\goresym.exe", "goresym (free; Go samples only)"),
+        @("C:\Tools\sysinternals\strings64.exe", "Sysinternals strings64 (free)"))) {
+    if (Test-Path $t[0]) { Ok "$($t[1]) present" }
+    else { Manual "Install $($t[1]) at $($t[0]) - FlareVM base covers some; stage via ops\provision_tools.ps1 (host) or see docs\TOOL-PATHS.md." }
+}
+$ilspy = "$env:USERPROFILE\.dotnet\tools\ilspycmd.exe"
+if (Test-Path $ilspy) { Ok "ilspycmd (.NET) present" }
+else { Manual "Install ILSpy CLI: dotnet tool install -g ilspycmd (see docs\TOOL-PATHS.md)." }
 
 $x64 = "C:\Tools\x64dbg\release\x64\x64dbg.exe"
 if (Test-Path $x64) {

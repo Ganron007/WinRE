@@ -12,12 +12,38 @@ Usage:
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 # IDA Pro 9.3 install path on Flare-VM
-IDASQL = r"C:\Program Files\IDA Professional 9.3\idasql.exe"
+IDASQL = os.environ.get("IDASQL") or os.environ.get("WINRE_IDASQL") or \
+    r"C:\Program Files\IDA Professional 9.3\idasql.exe"
+
+
+def _ida_candidates() -> list[str]:
+    """IDA install dirs to probe: env override first, then common
+    install-at-preference locations (IDA Pro/Free, any version, C:\\Tools)."""
+    env = os.environ.get("WINRE_IDA_DIR") or os.environ.get("IDA_DIR")
+    out = [env] if env else []
+    out += [r"C:\Program Files\IDA Professional 9.3",
+            r"C:\Program Files\IDA Professional 8.3",
+            r"C:\Program Files\IDA Free 9.3",
+            r"C:\Program Files\IDA Free 8.3",
+            r"C:\Tools\IDA Pro 9.3",
+            r"C:\Tools\IDA Free 9.3"]
+    import glob as _g
+    out += sorted(_g.glob(r"C:\Tools\IDA*\*") or [])
+    return out
+
+
+def _find_ida_exe(name: str) -> str | None:
+    for d in _ida_candidates():
+        p = os.path.join(d, name)
+        if os.path.isfile(p):
+            return p
+    return None
 
 
 def _ensure_i64(db_path: str, timeout: int = 900) -> tuple[bool, str]:
@@ -31,14 +57,11 @@ def _ensure_i64(db_path: str, timeout: int = 900) -> tuple[bool, str]:
     i64 = p.with_suffix(p.suffix + ".i64")
     if i64.exists():
         return True, str(i64)
-    ida = None
-    for cand in (r"C:\Program Files\IDA Professional 9.3\idat.exe",
-                 r"C:\Program Files\IDA Free 9.3\idat.exe"):
-        if Path(cand).exists():
-            ida = cand
-            break
+    ida = _find_ida_exe("idat.exe")
     if not ida:
-        return False, "idat.exe not found (cannot create .i64)"
+        return False, ("idat.exe not found (cannot create .i64). Set "
+                       "WINRE_IDA_DIR to your IDA install dir (e.g. "
+                       "C:\\Program Files\\IDA Professional 9.3).")
     try:
         r = subprocess.run(
             [ida, "-A", "-c", f"-o{i64}", str(p)],

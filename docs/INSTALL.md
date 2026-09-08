@@ -2,7 +2,9 @@
 
 Two machines: the **control plane** (where you run the pipeline/UI) and the
 **FlareVM** (where samples execute). See [`PREREQUISITES.md`](PREREQUISITES.md)
-for the full hardware/software list.
+for the full hardware/software list. **Expected tool locations and env
+overrides for non-default installs (IDA/Malcat especially) are in
+[`TOOL-PATHS.md`](TOOL-PATHS.md) — read it before installing.**
 
 ## 1. Control plane (operator host)
 
