@@ -315,13 +315,16 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
 
 
 def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
-          mode: str = "agentic") -> dict:
+          mode: str = "agentic", enable_agentic_dbg: bool = False) -> dict:
     """Deep dive — mode selects the engine (same contract either way).
 
     mode="agentic" (default): LangGraph ReAct agent (RevAI agentic).
     mode="static": deterministic fixed-checklist deep dive, zero LLM calls
         (RevAI scripted). dry_llm is orthogonal: agentic+dry_llm falls back
         honestly; static mode never touches the LLM.
+    enable_agentic_dbg: give the deep-dive agent the bounded x64dbg
+        debug-loop tools (engine langgraph+dbg; agentic mode only — no
+        detonation).
 
     When running on the FlareVM, the agent calls tools via subprocess
     (local mode — no SSH hop). Same 24-tool registry, same LLM, same
@@ -350,11 +353,11 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
 
     # LangGraph agent — local mode (subprocess tools, no SSH)
     agent_result = None
-    engine = "langgraph"
+    engine = "static_deterministic" if mode == "static" else (
+        "langgraph+dbg" if enable_agentic_dbg else "langgraph")
     try:
         if mode == "static":
             from .static_deep import run_static_deep_dive
-            engine = "static_deterministic"
             agent_result = run_static_deep_dive(
                 sample.name, pack.root.name,
                 mode="local", quick=quick)
@@ -363,6 +366,7 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
             agent_result = run_langgraph_deep_dive(
                 sample.name, pack.root.name,
                 max_steps=10, dry=dry_llm,
+                dynamic=enable_agentic_dbg,
                 mode="local", quick=quick)
         history = []
         for h in (agent_result.get("history") or [])[:80]:
@@ -490,7 +494,7 @@ def _report(pack: EvidencePack, sha: str, quick: dict, dynamic: dict | None,
 
 def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = False,
                  enable_dynamic: bool = False, dry_llm: bool = False,
-                 mode: str = "agentic") -> dict:
+                 mode: str = "agentic", enable_agentic_dbg: bool = False) -> dict:
     """Run the WinRE pipeline.
 
     DEFAULT = STATIC-ONLY (mirrors RevEng/RevAI): intake → quick → deep → yara
@@ -499,6 +503,8 @@ def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = 
     mode: "agentic" (default) = LangGraph ReAct deep dive (RevAI agentic);
           "static" = deterministic deep dive, zero LLM calls (RevAI scripted).
     dry_llm stays orthogonal: agentic+dry_llm = honest deterministic_fallback.
+    enable_agentic_dbg: deep agent gets bounded x64dbg tools (langgraph+dbg,
+        agentic mode only; no detonation).
 
     enable_dynamic=True appends a SEGREGATED dynamic phase (detonation) that:
       - runs AFTER static completes (never mid-static — no VM contamination
@@ -519,7 +525,8 @@ def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = 
     quick = _quick(sample, pack)
     results["quick"] = quick
 
-    deep = _deep(sample, pack, quick, dry_llm=dry_llm, mode=mode)
+    deep = _deep(sample, pack, quick, dry_llm=dry_llm, mode=mode,
+                 enable_agentic_dbg=enable_agentic_dbg)
     results["deep"] = deep
 
     yara = _yara(pack, quick, None)
@@ -599,6 +606,10 @@ def main() -> int:
                          "requires snapshot-restored VM; static_yara_wins)")
     ap.add_argument("--dry-llm", action="store_true",
                     help="never call the LLM (deterministic fallback only)")
+    ap.add_argument("--agentic-dbg", action="store_true",
+                    help="give the deep-dive agent bounded x64dbg tools "
+                         "(engine langgraph+dbg; agentic mode only; "
+                         "no detonation)")
     ap.add_argument("--mode", choices=["agentic", "static"], default="agentic",
                     help="deep-dive engine: agentic = LangGraph ReAct (RevAI "
                          "agentic); static = deterministic fixed-checklist, "
@@ -615,11 +626,14 @@ def main() -> int:
     # env-gate: WINRE_ENABLE_DYNAMIC=1 also opts in
     import os as _os
     enable_dynamic = args.dynamic or _os.environ.get("WINRE_ENABLE_DYNAMIC", "").strip().lower() in ("1", "true", "yes")
+    enable_agentic_dbg = args.agentic_dbg or _os.environ.get(
+        "WINRE_AGENTIC_DBG", "").strip().lower() in ("1", "true", "yes")
     if args.driver == "remote":
         from . import remote_driver
         res = remote_driver.run_remote_pipeline(
             args.sample, max_seconds=args.max_seconds, enable_pesieve=args.pesieve,
             enable_dynamic=enable_dynamic, dry_llm=args.dry_llm,
+            enable_agentic_dbg=enable_agentic_dbg,
             mode=args.mode)
         if args.publish:
             from .reporting import publish_case
@@ -631,6 +645,7 @@ def main() -> int:
     res = run_pipeline(args.sample, max_seconds=args.max_seconds,
                        enable_pesieve=args.pesieve,
                        enable_dynamic=enable_dynamic, dry_llm=args.dry_llm,
+                       enable_agentic_dbg=enable_agentic_dbg,
                        mode=args.mode)
     if args.publish:
         from .reporting import publish_case

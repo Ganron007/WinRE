@@ -786,6 +786,106 @@ def create_app() -> "Flask":
         return jsonify({"ok": True, "msg": f"stage {stage} started",
                         "sha": sha, "mode": mode})
 
+    # Default args for single-tool fire (tools needing inputs get a sane
+    # default; the UI lets the analyst override with raw JSON).
+    _TOOL_DEFAULT_ARGS = {
+        "ghidra_query": {"sql": "SELECT name, address, size FROM funcs "
+                                "ORDER BY size DESC LIMIT 20",
+                         "max_rows": 20},
+        "ida_query": {"sql": "SELECT name, address, size FROM funcs LIMIT 20"},
+        "malcat_functions": {"count": 10},
+    }
+
+    @app.route("/stages/<sha>/tool", methods=["POST"])
+    def run_tool(sha: str):
+        """Fire ONE static tool against an existing pack section (manual).
+
+        Body: {"mode": ..., "tool": ..., "args"?: {...}}. x64dbg_* tools are
+        excluded — they need a live debugger session (use the deep stage with
+        agentic-dbg instead). The result lands in deep/01-manual-<tool>.json
+        and is appended to deep/manual_runs.json (audit trail, in-pack).
+        """
+        from winre.evidence import EvidencePack, utcnow
+        from winre.agentic import TOOL_NAMES, ToolRegistry
+        if not _valid_sha(sha):
+            return jsonify({"ok": False, "error": "invalid sha"}), 400
+        if _run_state["running"]:
+            return jsonify({"ok": False, "error": "pipeline already running"}), 409
+        root = LOGS_DIR / sha
+        if not root.is_dir():
+            return jsonify({"ok": False, "error": "pack not found"}), 404
+        body = request.get_json(force=True, silent=True) or {}
+        mode = body.get("mode") or request.args.get("mode") or "agentic"
+        if mode not in ("agentic", "static"):
+            mode = "agentic"
+        tool = (body.get("tool") or "").strip()
+        if tool not in TOOL_NAMES:
+            return jsonify({"ok": False,
+                            "error": f"unknown tool {tool!r}; "
+                                     f"pick one of {len(TOOL_NAMES)} static tools"}), 400
+        args = body.get("args")
+        if args is None:
+            args = dict(_TOOL_DEFAULT_ARGS.get(tool, {}))
+        if not isinstance(args, dict):
+            return jsonify({"ok": False,
+                            "error": "args must be a JSON object"}), 400
+
+        from winre import remote_driver as _rd
+
+        def _run_one():
+            cfg = _rd.flare_cfg()
+            sect = _section_root(sha, mode)
+            name = _stage_sample(sect)
+            if not name:
+                return {"ok": False,
+                        "error": f"no intake in section {mode or 'legacy'} — "
+                                 "run the pipeline for this mode first"}
+            pack = EvidencePack(LOGS_DIR, sha, mode=mode).ensure()
+            reg = ToolRegistry(name, sha, cfg, mode="remote")
+            try:
+                res = reg.call(tool, args)
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "error": str(e)[:300]}
+            ok = not (isinstance(res, dict) and res.get("error"))
+            skipped = isinstance(res, dict) and bool(res.get("skipped"))
+            at = utcnow()
+            rec = {"tool": tool, "at": at, "ok": ok, "skipped": skipped,
+                   "error": (res.get("error") if isinstance(res, dict)
+                             else None),
+                   "file": f"deep/01-manual-{tool}.json"}
+            pack.write("deep", f"01-manual-{tool}.json",
+                       {"tool": tool, "args": args, "at": at, "result": res})
+            mr = pack.read("deep", "manual_runs.json") or {}
+            _runs = mr.get("runs")
+            runs = _runs if isinstance(_runs, list) else []
+            runs.append(rec)
+            mr["runs"] = runs
+            pack.write("deep", "manual_runs.json", mr)
+            preview = json.dumps(res, default=str)[:1500]
+            return {"ok": True,
+                    "result": {"tool": tool, "ok": ok, "skipped": skipped,
+                               "file": rec["file"], "error": rec["error"],
+                               "preview": preview}}
+
+        def _do():
+            with _run_lock:
+                _run_state["running"] = True
+                _run_state["sha"] = sha
+                _run_state["mode"] = mode
+                _run_state["log"] = []
+                try:
+                    _run_state["last"] = _run_one()
+                    if not isinstance(_run_state["last"], dict):
+                        _run_state["last"] = {"ok": False, "error": "no result"}
+                except Exception as e:  # noqa: BLE001
+                    _run_state["last"] = {"ok": False, "error": str(e)}
+                finally:
+                    _run_state["running"] = False
+
+        threading.Thread(target=_do, daemon=True).start()
+        return jsonify({"ok": True, "msg": f"tool {tool} started",
+                        "sha": sha, "mode": mode})
+
     @app.route("/packs")
     def packs():
         return render_template("packs.html", packs=_packs())
@@ -819,7 +919,10 @@ def create_app() -> "Flask":
         if detail is None:
             return render_template("packs.html", packs=_packs(),
                                    error=f"pack not found: {sha}"), 404
-        return render_template("pack.html", pack=detail)
+        from winre.agentic import TOOL_NAMES
+        return render_template("pack.html", pack=detail,
+                               tools=sorted(TOOL_NAMES),
+                               tool_defaults=_TOOL_DEFAULT_ARGS)
 
     @app.route("/packs/<sha>/export")
     def pack_export(sha: str):

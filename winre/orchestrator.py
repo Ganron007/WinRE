@@ -102,11 +102,12 @@ def _post_pull_enrich(dyn_dir: Path, sha: str) -> dict:
     KB additions (2026-09-07): pcap beacon/HTTP schema (Wireshark course),
     Procmon persistence catalog + behavior timeline + spoof suspects (Maldev
     47/48 + Mandiant cheat sheet), post-mortem harvest + ntdll integrity
-    (Volatility Part3 / Maldev 83-89). All best-effort, never gating.
+    (Volatility Part3 / Maldev 83-89), emulation-vs-detonation diff
+    (speakeasy predicted vs Frida observed APIs). All best-effort, never gating.
     """
     notes: dict = {"enrich_pcap": None, "analyst_next": None,
                    "pcap_beacon": None, "procmon_post": None,
-                   "post_mortem": None}
+                   "post_mortem": None, "emu_diff": None}
     enrich = _local_tool("enrich_pcap_tshark.py")
     if enrich and (dyn_dir / "network_raw").is_dir():
         try:
@@ -155,6 +156,13 @@ def _post_pull_enrich(dyn_dir: Path, sha: str) -> dict:
         notes["post_mortem"] = _pm(dyn_dir, sample_pid)
     except Exception as e:
         notes["post_mortem"] = {"error": str(e)[:200]}
+
+    # emulation-vs-detonation diff: speakeasy predicted vs Frida observed
+    try:
+        from winre.emu_diff import compare as _emu_diff
+        notes["emu_diff"] = _emu_diff(dyn_dir)
+    except Exception as e:
+        notes["emu_diff"] = {"error": str(e)[:200]}
 
     emit = _local_tool("emit_analyst_next.py")
     if emit:

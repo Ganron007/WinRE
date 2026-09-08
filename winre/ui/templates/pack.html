@@ -75,11 +75,35 @@
       <span class="muted">(manual stages below write into the viewed section)</span>
     </span>
   </div>
+  <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-top:8px">
+    <span style="font-size:var(--tx-xs)">fire one tool:
+      <select id="toolSel" style="font-size:var(--tx-xs); max-width:220px">
+        {% for t in tools %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+      </select>
+      <input id="toolArgs" placeholder='args JSON (optional)'
+             style="font-size:var(--tx-xs); width:280px; font-family:var(--mono)">
+      <button class="btn ghost" style="font-size:var(--tx-xs)"
+              onclick="runTool()">▶ tool</button>
+    </span>
+    <span class="muted" style="font-size:var(--tx-xs)">static tools only
+      (x64dbg_* need a debugger session — use deep + agentic-dbg). result →
+      deep/01-manual-&lt;tool&gt;.json, logged in manual_runs.</span>
+  </div>
+  {% set _deepfiles = pack.stages.get('deep') or {} %}
+  {% set _mr = _deepfiles.get('manual_runs.json') or {} %}
+  {% if _mr.get('runs') %}
+  <p class="muted" style="font-size:var(--tx-xs); margin:8px 0 0">past manual runs:
+    {% for r in _mr.runs[-8:] %}
+    <span class="badge {{ 'up' if r.ok else 'down' }}" title="{{ r.at }} · {{ r.file }}{% if r.error %} · {{ r.error }}{% endif %}">{{ r.tool }}</span>
+    {% endfor %}
+  </p>
+  {% endif %}
   <pre id="stageOut" style="display:none"></pre>
 </div></div>
 
 <script>
 const PACK_MODE = '{{ pack.mode or "" }}';
+const TOOL_DEFAULTS = {{ tool_defaults|tojson }};
 async function hitl(action) {
   const r = await fetch('/api/hitl/snapshot', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -102,6 +126,38 @@ async function runStage(stage) {
   const j = await r.json();
   el.textContent = JSON.stringify(j, null, 2);
 }
+async function runTool() {
+  const tool = document.getElementById('toolSel').value;
+  const raw = document.getElementById('toolArgs').value.trim();
+  let args;
+  if (raw) {
+    try { args = JSON.parse(raw); }
+    catch (e) { alert('args is not valid JSON'); return; }
+    if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+      alert('args must be a JSON object'); return;
+    }
+  } else {
+    args = TOOL_DEFAULTS[tool] || {};
+  }
+  const el = document.getElementById('stageOut');
+  el.style.display = 'block';
+  el.textContent = 'firing ' + tool + '…';
+  const r = await fetch('/stages/{{ pack.sha }}/tool', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({mode: PACK_MODE, tool, args})});
+  const j = await r.json();
+  el.textContent = JSON.stringify(j, null, 2);
+}
+(function initToolArgs() {
+  const sel = document.getElementById('toolSel');
+  const upd = () => {
+    const d = TOOL_DEFAULTS[sel.value];
+    document.getElementById('toolArgs').placeholder =
+      d ? JSON.stringify(d) : 'args JSON (optional)';
+  };
+  sel.addEventListener('change', upd);
+  upd();
+})();
 </script>
 </div>
 {% endblock %}

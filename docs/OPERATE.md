@@ -8,7 +8,7 @@ Day-2 operation of the WinRE lab. Install first: [`INSTALL.md`](INSTALL.md).
 |---|---|---|
 | **Static, agentic engine (default)** | `python -m winre.pipeline C:\samples\s.exe` | intake → quick → deep (LangGraph ReAct, `llm_judge`) → yara → report → audit → `logs/<sha>/agentic/` |
 | **Static, deterministic engine** | `... --mode static` | same stages, deep = fixed 35-tool checklist (30 steps) + rules verdict + calibration gates, zero LLM (`static_deterministic`) → `logs/<sha>/static/` |
-| **Static + agentic debug** | `... --agentic-dbg` | static + the deep agent gets bounded x64dbg tools (OEP/unpack/decrypt) — **no detonation** |
+| **Static + agentic debug** | `... --agentic-dbg` | static + the deep agent gets bounded x64dbg tools (OEP/unpack/decrypt/write-BP) — **no detonation**. Local driver supported too: `python -m winre.pipeline C:\samples\s.exe --mode agentic --agentic-dbg` |
 | **Static + dynamic** | `... --dynamic --max-seconds 45` | static first, then segregated detonation (FakeNet + Procmon + Frida [+ pe-sieve]) into the run's mode section |
 | **Dry LLM** | add `--dry-llm` (agentic mode) | no LLM calls; deep stays `deterministic_fallback` (honest, not green) |
 | **Publish case** | add `--publish` | sanitized case → `docs/case-studies/<mode>/<sha>/` (no binaries) |
@@ -17,8 +17,11 @@ Environment equivalents: `WINRE_ENABLE_DYNAMIC=1`, `WINRE_AGENTIC_DBG=1`.
 The UI (`python -m winre.ui.app`, port 5001) drives the same engine: a
 deep-mode selector on the Run page (agentic/static + live engine preview),
 one row per `(sha, mode section)` in Cases with S/A badges, a section
-switcher on the pack page, and manual stage control that writes into the
-viewed section. Pack export zips the viewed section.
+switcher on the pack page, manual stage control that writes into the
+viewed section, and **fire-one-tool** on the pack page (any of the 35
+static tools, optional raw-JSON args; result → `deep/01-manual-<tool>.json`
++ `manual_runs.json` audit trail; x64dbg_* excluded — use deep +
+agentic-dbg). Pack export zips the viewed section.
 
 **Invariants:** dynamic is opt-in and always LAST; `static_yara_wins` —
 dynamic corroborates, never clears a static verdict; every run is audited

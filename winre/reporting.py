@@ -394,6 +394,22 @@ def build_report_v3(pack_root: Path) -> dict:
     if has_dynamic:
         A(f"- Detonation ran (frida_events={dyn.get('frida_events')}) — "
           "dynamic section expanded after detonation stage; see `dynamic/` artifacts.")
+        ed = _load(pack_root / "dynamic" / "emu_diff.json") or {}
+        if ed.get("ok"):
+            A(f"- **Emulation-vs-detonation:** speakeasy predicted "
+              f"{ed.get('predicted')} APIs, Frida observed {ed.get('observed')}; "
+              f"overlap {ed.get('overlap_count')}, divergence "
+              f"{ed.get('divergence_score')} (0 = identical, 1 = disjoint).")
+            if ed.get("only_predicted"):
+                A("- predicted-only: "
+                  + ", ".join(f"`{a}`" for a in ed["only_predicted"][:10])
+                  + " — emulation saw these, detonation didn't "
+                  "(env-gating/anti-emulation candidate — investigate).")
+            if ed.get("only_observed"):
+                A("- observed-only: "
+                  + ", ".join(f"`{a}`" for a in ed["only_observed"][:10])
+                  + " — detonation saw these, emulation missed "
+                  "(emulation coverage gap).")
     else:
         A("- Not run (static-only pack). Detonation is opt-in, segregated, "
           "runs LAST, snapshot-gated. Dynamic findings will append here: "
