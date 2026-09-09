@@ -202,7 +202,7 @@ MIT — see [LICENSE](LICENSE).
 
 * **idasql** — SQL interface for IDA Pro databases, by [Elias Bachaalany](https://github.com/allthingsida/idasql), used under the Human-Origin Source License v1.0.
 * **ghidrasql / LibGhidraHost** — SQL interface for Ghidra program databases, by [Elias Bachaalany](https://github.com/0xeb/ghidrasql), used under the Human-Origin Source License v1.0.
-* **x64dbg-MCP-Server** — native MCP plugin for x64dbg, by [duty1g](https://github.com/duty1g/x64dbg-mcp-server), MIT (vendored under `integrations/`; our one-line hardware-BP error fix in `tools/x64dbg-mcp-winre.patch`).
+* **x64dbg-MCP-Server** — native MCP plugin for x64dbg, by [duty1g](https://github.com/duty1g/x64dbg-mcp-server), MIT.
 * **mcp-windbg** — MCP server for WinDbg crash analysis, by [svnscha](https://github.com/svnscha/mcp-windbg), MIT.
 * **Malcat** — commercial binary analyzer (license required; binary not redistributed).
 * Derived from the **RevEng** research pipeline; the Linux-side sibling is **RevAI**.
