@@ -91,10 +91,13 @@ def scp_to(cfg: dict, local: Path, remote: str) -> None:
         raise RuntimeError(f"scp to flare failed: {r.stderr[:300]}")
 
 
-def scp_from(cfg: dict, remote: str, local: Path) -> None:
+def scp_from(cfg: dict, remote: str, local: Path,
+             *, recursive: bool = False) -> None:
     cmd = ["scp", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no",
-           "-o", "ConnectTimeout=15", "-P", str(cfg["port"]),
-           f"{cfg['user']}@{cfg['host']}:{remote}", str(local)]
+           "-o", "ConnectTimeout=15", "-P", str(cfg["port"])]
+    if recursive:
+        cmd.append("-r")
+    cmd += [f"{cfg['user']}@{cfg['host']}:{remote}", str(local)]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
     if r.returncode != 0:
         raise RuntimeError(f"scp from flare failed: {r.stderr[:300]}")
@@ -413,7 +416,11 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
         except Exception:
             pass
 
-    # pull dynamic dir back (from the run's mode section on the VM)
+    # pull dynamic dir back (from the run's mode section on the VM).
+    # Recursive: a wildcard pull (dir\*) only copies top-level files and
+    # silently drops subdirs (memory/, network_raw/) — the 7 pe-sieve dumps
+    # + raw pcap stayed on the VM exactly this way. scp -r onto the section
+    # root merges into the existing dynamic/ dir.
     local_dyn = pack.stages["dynamic"]
     local_dyn.mkdir(parents=True, exist_ok=True)
     ok = False
@@ -424,7 +431,7 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
         err = (f"detonation did not run: ssh rc={r.returncode} "
                f"helper_rc={helper_rc}; stderr={(r.stderr or '')[:200]}")
     try:
-        scp_from(cfg, rf"{remote_dyn}\*", local_dyn)
+        scp_from(cfg, remote_dyn, pack.root, recursive=True)
         ok = True
     except Exception as e:
         if err is None:
