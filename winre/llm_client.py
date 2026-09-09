@@ -4,9 +4,9 @@
 Reads configuration from the environment, which is loaded from <repo>/.env
 (gitignored) by winre/envfile.py on import. Keys (WINRE_LLM_*):
 
-    WINRE_LLM_BASE_URL   base URL (e.g. https://api.openai.com/v1 or your provider)
+    WINRE_LLM_BASE_URL   base URL (any OpenAI-compatible endpoint)
     WINRE_LLM_API_KEY    API key (leave blank for a local unauthed server)
-    WINRE_LLM_MODEL      model name (e.g. step-3.7-flash)
+    WINRE_LLM_MODEL      model name (whatever your provider exposes)
     WINRE_LLM_REASONING  reasoning effort: low|medium|high|max (optional)
 
 Deterministic-first: the pipeline never lets the LLM run tools or decide
@@ -52,7 +52,7 @@ def _post(path: str, payload: dict, timeout: int = 120) -> dict:
 def _reasoning_field() -> dict:
     """Map WINRE_LLM_REASONING to the provider field if set.
 
-    StepFun/OpenAI-compatible APIs accept either `reasoning_effort`
+    OpenAI-compatible APIs accept either `reasoning_effort`
     (low/medium/high) or a `reasoning_level`-style field. We send
     `reasoning_effort` only when a value is configured and the field is
     supported; otherwise omit (provider default applies).

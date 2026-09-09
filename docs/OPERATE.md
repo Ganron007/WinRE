@@ -34,11 +34,14 @@ negotiation with the VM. On import, `winre/envfile.py` loads *that box's*
 `<repo>/.env` (override path via `WINRE_ENV`), and `llm_client` reads:
 
 ```
-WINRE_LLM_BASE_URL=https://api.stepfun.ai/step_plan/v1
-WINRE_LLM_MODEL=step-3.7-flash
+WINRE_LLM_BASE_URL=https://<your-provider>/v1
+WINRE_LLM_MODEL=<model-name-your-provider-exposes>
 WINRE_LLM_API_KEY=<key>
 WINRE_LLM_REASONING=high
 ```
+
+WinRE is model-agnostic: any OpenAI-compatible endpoint works. Only the
+variable names above are contractual — never a specific model or provider.
 
 | Driver | LLM config lives on | VM needs |
 |---|---|---|

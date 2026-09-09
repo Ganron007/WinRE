@@ -43,7 +43,7 @@ Verify:
 curl http://127.0.0.1:9094/ -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq
 # expect 71 tools
 
-# MCP client (Claude/.mcp.json)
+# MCP client (.mcp.json)
 # {"mcpServers":{"x64dbg":{"type":"http","url":"http://<FLARE_HOST>:9094/"}}}
 ```
 
