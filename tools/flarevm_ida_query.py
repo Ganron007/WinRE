@@ -47,31 +47,59 @@ def _find_ida_exe(name: str) -> str | None:
 
 
 def _ida_edition_note() -> dict:
-    """License-flavor probe: IDA Free cannot drive headless idalib/idat -A,
-    so ida_query can never work on it. Report instantly instead of hanging."""
-    for d in _ida_candidates():
-        p = os.path.join(d, "idat.exe")
-        if not os.path.isfile(p):
-            continue
-        lic = os.path.join(os.environ.get("APPDATA", ""),
-                           "Hex-Rays", "IDA Pro")
-        free = False
+    """License-flavor probe. IDA resolves licenses in the user profile
+    (%APPDATA%) BEFORE the install dir — so a stale FREE license in AppData
+    shadows a real PRO license in the install dir (same trap users hit).
+    Only files ENDING in .hexlic count (backups like *.hexlic.bak* are
+    ignored). Checks the install dir first, then the profile."""
+    def _pro_in(d: str) -> str | None:
         try:
-            for f in os.listdir(lic):
-                if f.lower().startswith("idafree"):
-                    free = True
-                    break
+            for f in os.listdir(d):
+                if f.lower().endswith(".hexlic") and "pro" in f.lower():
+                    return f
         except OSError:
-            pass
-        if free:
-            return {"edition": "free", "dir": d,
-                    "detail": ("IDA Free license detected — headless "
-                               "ida_query/idalib is unsupported (GUI-only). "
-                               "Activate an IDA Professional license (GUI -> "
-                               "Help -> activate) or point IDASQL at a Pro "
-                               "install.")}
-        return {"edition": "pro", "dir": d}
-    return {"edition": "missing", "detail": "no idat.exe found"}
+            return None
+        return None
+
+    def _free_in(d: str) -> str | None:
+        try:
+            for f in os.listdir(d):
+                if f.lower().endswith(".hexlic") and f.lower().startswith("idafree"):
+                    return f
+        except OSError:
+            return None
+        return None
+
+    for d in _ida_candidates():
+        if not os.path.isdir(d):
+            continue
+        pro = _pro_in(d)
+        if pro:
+            appdata = os.path.join(os.environ.get("APPDATA", ""),
+                                   "Hex-Rays", "IDA Pro")
+            free = _free_in(appdata)
+            if free:
+                return {"edition": "shadowed", "dir": d, "pro": pro,
+                        "stale": free,
+                        "detail": ("A PRO license is installed but a stale "
+                                   "FREE license in the user profile shadows "
+                                   "it for headless runs (license resolution "
+                                   "checks the profile first). Move/rename "
+                                   f"'{free}' in the profile dir (keep a "
+                                   "backup) so idalib sees the Pro license. "
+                                   "Ghidra remains the canonical engine.")}
+            return {"edition": "pro", "dir": d, "pro": pro}
+    # no install-dir Pro license anywhere — check the profile alone
+    appdata = os.path.join(os.environ.get("APPDATA", ""),
+                           "Hex-Rays", "IDA Pro")
+    if _free_in(appdata):
+        return {"edition": "free", "dir": appdata,
+                "detail": ("IDA Free license detected — headless "
+                           "ida_query/idalib is unsupported (GUI-only). "
+                           "Activate an IDA Professional license (GUI -> "
+                           "Help -> activate) or point IDASQL at a Pro "
+                           "install.")}
+    return {"edition": "missing", "detail": "no IDA license found"}
 
 
 def _ensure_i64(db_path: str, timeout: int = 900) -> tuple[bool, str]:

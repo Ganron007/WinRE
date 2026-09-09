@@ -136,13 +136,19 @@ if ($idaResolved) {
     Ok "IDA -> $idaResolved"
     if (Test-Path (Join-Path $idaResolved "idasql.exe")) { Ok "idasql present" }
     else { Manual "Install idasql.exe into $idaResolved (id_query tool needs it)." }
-    # license flavor: IDA Free cannot drive headless ida_query (.i64/idalib)
-    $licDir = Join-Path $env:APPDATA "Hex-Rays\IDA Pro"
-    $freeLic = Get-ChildItem $licDir -Filter "idafree_*.hexlic" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($freeLic) {
-        Warn "IDA FREE license detected ($($freeLic.Name)) - headless ida_query/.i64 needs IDA Professional. Ghidra stays canonical; activate Pro to enable IDA participation."
+    # license-flavor resolution (same order IDA itself uses: profile first).
+    # A stale FREE license in AppData SHADOWS a real PRO license in the
+    # install dir for headless runs — the #1 user-side IDA integration trap.
+    $proLic = Get-ChildItem $idaResolved -Filter "idapro*.hexlic" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $freeLic = Get-ChildItem (Join-Path $env:APPDATA "Hex-Rays\IDA Pro") -Filter "idafree*.hexlic" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($proLic -and -not $freeLic) {
+        Ok "IDA PRO license present ($($proLic.Name)) - headless ida_query/.i64 fully supported"
+    } elseif ($proLic -and $freeLic) {
+        Manual "IDA license SHADOWING: PRO license ($($proLic.Name)) exists in the install dir, but a stale FREE license ($($freeLic.Name)) in the user profile shadows it for headless runs (profile is checked first). Move/rename the stale file (keep a backup) so idalib sees Pro."
+    } elseif ($freeLic) {
+        Warn "IDA FREE license only ($($freeLic.Name)) - headless ida_query/.i64 unsupported (GUI-only). Ghidra stays canonical; activate Pro to enable IDA participation."
     } else {
-        Ok "IDA license: no idafree marker (Pro assumed)"
+        Info "no *.hexlic found in install dir or profile - IDA will prompt/need activation; headless ida_query requires a Pro license."
     }
 } else {
     Warn "IDA not detected (optional - deep degrades to Ghidra+Malcat)."
