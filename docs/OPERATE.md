@@ -27,6 +27,28 @@ agentic-dbg). Pack export zips the viewed section.
 dynamic corroborates, never clears a static verdict; every run is audited
 (`audit.json`, `truly_green`).
 
+## Where the LLM lives (driver owns the LLM)
+
+The box that runs the driver owns the LLM calls — there is no LLM
+negotiation with the VM. On import, `winre/envfile.py` loads *that box's*
+`<repo>/.env` (override path via `WINRE_ENV`), and `llm_client` reads:
+
+```
+WINRE_LLM_BASE_URL=https://api.stepfun.ai/step_plan/v1
+WINRE_LLM_MODEL=step-3.7-flash
+WINRE_LLM_API_KEY=<key>
+WINRE_LLM_REASONING=high
+```
+
+| Driver | LLM config lives on | VM needs |
+|---|---|---|
+| **Remote** (`--driver remote`, UI, RevAI-driven) | Driving box (host `.env`, RevAI box `.env`, or exported env). That box needs internet to the provider. | Nothing LLM-related — tools + MCP + SSH + snapshot marker only. `C:\WinRE\.env` is never read. |
+| **Local** (`pipeline.py` on the VM, `--driver local`) | `C:\WinRE\.env` on the VM (NAT phase / VM-side testing only) | Internet to the provider (conflicts with air-gap — never combine with detonation) |
+
+This is deliberate (2026-09-01 split: LLM needs internet, detonation
+can't have it) and it keeps API keys off the malware VM. For anything
+RevAI-driven or detonation-adjacent, keys stay on the control plane.
+
 ## Evidence packs
 
 `logs/<sha256>/<static|agentic>/` per sample and engine: `intake/ quick/
