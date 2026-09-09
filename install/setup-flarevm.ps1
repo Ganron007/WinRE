@@ -144,7 +144,18 @@ if ($idaResolved) {
     if ($proLic -and -not $freeLic) {
         Ok "IDA PRO license present ($($proLic.Name)) - headless ida_query/.i64 fully supported"
     } elseif ($proLic -and $freeLic) {
-        Manual "IDA license SHADOWING: PRO license ($($proLic.Name)) exists in the install dir, but a stale FREE license ($($freeLic.Name)) in the user profile shadows it for headless runs (profile is checked first). Move/rename the stale file (keep a backup) so idalib sees Pro."
+        # AUTO-FIX (idempotent, reversible): a stale FREE license in the user
+        # profile shadows the PRO license for headless runs (profile is
+        # checked first) - idalib then fails and idasql hangs. Move it aside
+        # with a timestamped backup so Pro is visible.
+        $stamp = Get-Date -Format "yyyy-MM-dd"
+        $bak = "$($freeLic.FullName).bak.stale-$stamp"
+        Act "IDA license SHADOWING: PRO ($($proLic.Name)) shadowed by stale FREE ($($freeLic.Name)) - moving aside to $bak"
+        if (-not $CheckMode) {
+            Move-Item $freeLic.FullName $bak -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path $freeLic.FullName)) { Ok "stale free license moved aside (backup: $bak)" }
+            else { Manual "Could not move $($freeLic.FullName) - move/rename it manually (keep a backup) so idalib sees Pro." }
+        }
     } elseif ($freeLic) {
         Warn "IDA FREE license only ($($freeLic.Name)) - headless ida_query/.i64 unsupported (GUI-only). Ghidra stays canonical; activate Pro to enable IDA participation."
     } else {
