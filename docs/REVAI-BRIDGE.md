@@ -38,6 +38,35 @@ detonation.
 The FlareVM side needs none of the LLM variables. If a `C:\WinRE\.env`
 exists there from a previous NAT/testing phase, delete it.
 
+### 2.1 SSH key handling (FlareVM admin accounts)
+
+If the FlareVM account is in the Administrators group (usual on FlareVM),
+sshd authenticates it via `C:\ProgramData\ssh\administrators_authorized_keys`
+— **not** the user-profile `authorized_keys`. That file is SYSTEM-owned and
+read-only even for admins, so a new driver key cannot simply be appended:
+
+```powershell
+# on the FlareVM, once per new driver key
+$f = "$env:ProgramData\ssh\administrators_authorized_keys"
+takeown /f $f
+icacls $f /grant "BUILTIN\Administrators:F"
+Add-Content $f -Value (Get-Content C:\path\to\driver_key.pub)
+icacls $f /inheritance:r /grant "SYSTEM:F" /grant "BUILTIN\Administrators:F"
+Restart-Service sshd
+```
+
+Reusing a copy of an existing lab key also works, but every driver then
+shares one credential and cannot be revoked independently — prefer a
+per-driver keypair.
+
+### 2.2 Key hygiene
+
+- The VM must never hold LLM keys. Delete a leftover `C:\WinRE\.env` **and**
+  ensure it is not preserved inside the clean snapshot (delete, then
+  re-snapshot), otherwise a revert restores it.
+- If LLM keys were ever present on the VM while a detonation ran, treat them
+  as exposed: delete the file and **rotate the key at the provider**.
+
 ## 3. The 4 variables
 
 ```

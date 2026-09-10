@@ -122,6 +122,23 @@ print(json.dumps({"ghidra_decompile": out}, default=str))
 '''
 
 
+def _ps_py(py: str, code: str) -> str:
+    """Build a `powershell -EncodedCommand` command that runs a python
+    one-liner on the VM, with zero quoting hazards over SSH.
+
+    The encoded payload must be a POWERSHELL script (not the python code):
+    the python source rides inside a single-quoted PowerShell here-string
+    and is handed to `python -c $c`. This is the only nesting-safe form —
+    embedding python directly in -EncodedCommand parses as PowerShell, and
+    -Command "..." breaks on the inner quotes.
+    """
+    import base64 as _b64
+    ps = "$c = @'\n" + code + "\n'@\n& " + py + " -c $c\n"
+    enc = _b64.b64encode(ps.encode("utf-16-le")).decode("ascii")
+    return ("powershell -NoProfile -ExecutionPolicy Bypass "
+            f"-EncodedCommand {enc}")
+
+
 
 class ToolRegistry:
     """Deterministic tool calls the agent may make (static phase).
@@ -376,12 +393,6 @@ class ToolRegistry:
             except Exception as e:
                 return {"error": str(e)[:250]}
         py = r"C:\Python313\python.exe"
-        # No nested quoting: ship the python one-liner via -EncodedCommand
-        # (UTF-16LE base64), the same transport malcat_remote_call uses.
-        # The old -Command "..." form broke on PowerShell's quote parsing
-        # (Unexpected token ':' — the inner "..." terminated the outer
-        # string), failing every remote signature_match as a quality error.
-        import base64 as _b64
         _oneliner = (
             "import sys,json,base64; "
             "sys.path.insert(0, r'C:\\WinRE\\tools'); "
@@ -389,9 +400,7 @@ class ToolRegistry:
             f"kw = json.loads(base64.b64decode('{b64}').decode()); "
             "print(json.dumps({'signature_match': "
             "fst.signature_match(**kw)}))")
-        _enc = _b64.b64encode(_oneliner.encode("utf-16-le")).decode()
-        cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass '
-               f'-EncodedCommand {_enc} 2>&1')
+        cmd = _ps_py(py, _oneliner)
         r = remote_driver.ssh_run(self.cfg, cmd, timeout=300)
         try:
             return json.loads(r.stdout).get("signature_match") or {}
@@ -423,8 +432,6 @@ class ToolRegistry:
         import base64
         if function_addrs:
             b64 = base64.b64encode(json.dumps(function_addrs).encode()).decode()
-            # No nested quoting: -EncodedCommand (same as signature_match).
-            import base64 as _b64
             _oneliner = (
                 "import sys,json,base64; "
                 "sys.path.insert(0, r'C:\\WinRE\\tools'); "
@@ -432,9 +439,7 @@ class ToolRegistry:
                 f"fa = json.loads(base64.b64decode('{b64}').decode()); "
                 f"print(json.dumps({{'r2_decompile': fst.r2_decompile("
                 f"r'{self.remote_sample}', fa)}}))")
-            _enc = _b64.b64encode(_oneliner.encode("utf-16-le")).decode()
-            cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass '
-                   f'-EncodedCommand {_enc} 2>&1')
+            cmd = _ps_py(r"C:\Python313\python.exe", _oneliner)
             r = remote_driver.ssh_run(self.cfg, cmd, timeout=900)
             try:
                 return json.loads(r.stdout).get("r2_decompile") or {}
