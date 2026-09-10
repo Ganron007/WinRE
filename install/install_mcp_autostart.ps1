@@ -31,8 +31,11 @@ if ($Remove) {
 if (-not (Test-Path $script)) { Write-Error "start_servers.ps1 missing: $script"; exit 2 }
 if (-not (Test-Path $startup)) { New-Item -ItemType Directory -Path $startup -Force | Out-Null }
 
-# .cmd so it runs hidden-ish at logon without a console flash policy fuss
-$cmd = "@echo off`r`nrem WinRE MCP autostart (boot-safe, idempotent)`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"$script`" -NoX64dbg`r`n"
+# .cmd so it runs hidden at logon without a console flash policy fuss.
+# `start ""` DETACHES powershell immediately: cmd.exe exits in milliseconds,
+# so a fast logoff/shutdown can never catch the launcher mid-start (that
+# produced 'cmd.exe - Application Error 0xc0000142' popups at shutdown).
+$cmd = "@echo off`r`nrem WinRE MCP autostart (detached, boot-safe, idempotent)`r`nstart `"`" /min powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`" -NoX64dbg`r`n"
 Set-Content -Path $launcher -Value $cmd -Encoding ASCII
 Write-Host "installed: $launcher" -ForegroundColor Green
 

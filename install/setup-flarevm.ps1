@@ -166,6 +166,24 @@ if ($idaResolved) {
     # install dir for headless runs — the #1 user-side IDA integration trap.
     $proLic = Get-ChildItem $idaResolved -Filter "idapro*.hexlic" -ErrorAction SilentlyContinue | Select-Object -First 1
     $freeLic = Get-ChildItem (Join-Path $env:APPDATA "Hex-Rays\IDA Pro") -Filter "idafree*.hexlic" -ErrorAction SilentlyContinue | Select-Object -First 1
+    # hygiene: stale Free license backups (we move them aside on shadowing;
+    # once IDA Free is uninstalled they are dead weight + confusing)
+    if (-not $freeLic) {
+        Get-ChildItem (Join-Path $env:APPDATA "Hex-Rays\IDA Pro") -Filter "*.bak.stale-*" -ErrorAction SilentlyContinue |
+            ForEach-Object { Act "remove stale IDA license backup $($_.Name)"; if (-not $CheckMode) { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue } }
+    }
+    # hygiene: broken desktop shortcut to an uninstalled IDA Free
+    $idaLnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "Tools\Disassemblers\ida.lnk"
+    if (Test-Path $idaLnk) {
+        try {
+            $shc = New-Object -ComObject WScript.Shell
+            $tgt = $shc.CreateShortcut($idaLnk).TargetPath
+            if ($tgt -and -not (Test-Path $tgt)) {
+                Act "remove broken shortcut $idaLnk (points at $tgt)"
+                if (-not $CheckMode) { Remove-Item $idaLnk -Force -ErrorAction SilentlyContinue }
+            }
+        } catch {}
+    }
     if ($proLic -and -not $freeLic) {
         Ok "IDA PRO license present ($($proLic.Name)) - headless ida_query/.i64 fully supported"
     } elseif ($proLic -and $freeLic) {
@@ -259,6 +277,19 @@ if (Test-Path $autostart) {
 $task = Get-ScheduledTask -TaskName "WinRE-X64dbg-Once" -ErrorAction SilentlyContinue
 if ($task) { Ok "scheduled task WinRE-X64dbg-Once present" }
 else { Warn "scheduled task WinRE-X64dbg-Once absent - x64dbg MCP needs a console-session kick; create it per docs\X64DBG-MCP.md or let the on-demand manager launch x64dbg." }
+
+# --- 4b. logon hygiene (idempotent) -------------------------------------------
+# FlareVM's BinDiff installer leaves a machine Run entry (BinDiffPerUserSetup)
+# that HANGS at every logon (GUI-ish setup, observed >20s) and produces
+# "bindiff_config_setup.exe - Application Error 0xc0000142" popups when the
+# session ends during its init. Remove it; per-user setup can be re-run
+# manually if ever needed.
+$runKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+$bindiffRun = (Get-ItemProperty $runKey -ErrorAction SilentlyContinue).BinDiffPerUserSetup
+if ($bindiffRun) {
+    Act "remove stale BinDiff per-user setup Run entry (hangs at logon)"
+    if (-not $CheckMode) { Remove-ItemProperty -Path $runKey -Name "BinDiffPerUserSetup" -ErrorAction SilentlyContinue }
+} else { Ok "no stale BinDiff logon Run entry" }
 
 # --- 5. repo-owned: env template + gate marker ---------------------------------
 Write-Host ""
