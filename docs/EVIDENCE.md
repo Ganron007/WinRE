@@ -31,6 +31,8 @@ logs/<sha256>/<static|agentic>/         ← one self-contained case per engine
 │   ├── memory/                       pe-sieve dumps + suspended-process dumps
 │   │   / *.dmp                       procdump -ma harvest (post-mortem)
 │   ├── post_mortem.json              memory harvest + ntdll integrity + snapshot
+│   ├── windbg_analysis.json          mcp-windbg triage of in-run dumps
+│   │                                 (!analyze -v/.ecxr/k/lm; passive)
 │   ├── x64dbg/dump/                  OEP dumps (local-mode post step)
 │   └── process_snapshot.json         PPID/cmdline snapshot (spoof correlation)
 ├── case-<sha16>-<mode>.7z            DFIR-Nexus ingest pack (dynamic + static

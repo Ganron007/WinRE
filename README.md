@@ -35,7 +35,7 @@ It runs where Windows malware lives: on a [FlareVM](https://github.com/mandiant/
 
 - **Deterministic-first detonation** — a single PowerShell job stages FakeNet-NG (network sink), Procmon (file/reg/process events), Frida (API trace with string/sockaddr decode), and optional pe-sieve + hollows_hunter (injection/hollowing dumps). The LLM can only interpret what these tools emitted — it never runs the sample.
 - **SQL-first Windows RE** — Ghidra (`analyzeHeadless` + SQL post-script) is the primary engine and always present; IDA Pro (`idasql`) and Binary Ninja are optional upgrades that plug into the same SQL surface when installed.
-- **Debugger MCP** — a vendored 71-tool x64dbg MCP server (Zig, MIT) and a 12-tool WinDbg bridge speak JSON-RPC over HTTP, so an LLM agent can load a binary, find the OEP, dump modules, and step through unpackers.
+- **Debugger MCP** — the vendored 71-tool x64dbg MCP server (Zig, MIT) for live control, plus `mcp-windbg` (10-tool, MIT) for passive crash-dump/memory-image analysis over the same JSON-RPC HTTP plane — so an LLM agent can load a binary, find the OEP, dump modules, and triage the captured memory dumps.
 - **Honest artifact contract** — every run emits `META.json` (schema-versioned), Frida/Procmon/network/memory artifacts, and `ANALYST-NEXT.md` marking which next steps are **analyst-only**. Dynamic evidence corroborates but **never clears** high-signal static YARA (`static_yara_wins`).
 
 > **Reality check.** WinRE is an analyst assistant, not a finished autonomous product. Detonation results vary by sample; a green `META.json` means the tooling ran and produced artifacts — **not** that the sample is benign or fully understood. Unpacking, deep debugging, and full PCAP review are human work. Treat every pack as a starting point for analyst review, never as ground truth.
@@ -69,7 +69,7 @@ C:\samples\<sha>.exe  ◄──── analyst copies to both ──►  /opt/sam
 ```
 
 - **SQL services** — `idasql_server.py` (:19300) and `flare_ghidra_sql.py --serve` (:19301) expose `/query` so a remote agent can query Windows databases over HTTP.
-- **Debugger MCP** — `x64dbg-MCP` (:9094 x64 / :9095 x86), `windbg_bridge.py` (:9096). Same JSON-RPC shape on every port: `POST / {"jsonrpc":"2.0","method":"tools/call","params":{"name":...,"arguments":{...}}}`.
+- **Debugger MCP** — `x64dbg-MCP` (:9094 x64 / :9095 x86) and `mcp-windbg` (:9097). Same JSON-RPC shape on every port: `POST / {"jsonrpc":"2.0","method":"tools/call","params":{"name":...,"arguments":{...}}}`.
 - **Artifact contract** — `logs/<sha>/<mode>/dynamic/` is versioned (internal: `docs/internal/ARCHITECTURE.md`); RevAI reads it with `load_dynamic_pack()` and never writes into it.
 
 Full breakdown: `docs/internal/ARCHITECTURE.md` (internal) · transports + ports: `docs/internal/VM-ACCESS.md` (internal) · tool layout: `docs/internal/TOOL-INVENTORY.md` (internal).
@@ -109,7 +109,7 @@ ELF samples are rare on Windows; the orchestrator dispatches them to the Linux-s
 | **Honest `static_yara_wins`** | Dynamic packs can never clear high-signal YARA from the static stage — the verdict policy is written into every `META.json` |
 | **Fail-open debugger passes** | x64dbg MCP OEP/dump and Malcat triage are best-effort: MCP down or license missing degrades the pack, never fails the run |
 | **Analyst-only markers** | `ANALYST-NEXT.md` explicitly tags human work (PCAP deep-dive, snapshot restore, HITL unpacking) so an agent cannot claim it done |
-| **Vendored debugger MCP** | 71-tool x64dbg server (Zig, MIT) + 12-tool WinDbg bridge share one JSON-RPC shape for the agentic loop |
+| **Vendored debugger MCP** | 71-tool x64dbg server (Zig, MIT) for live debug control + mcp-windbg dump analysis (MIT) share one JSON-RPC shape for the agentic loop |
 | **Unique artifact names** | FakeNet sub-directory outputs (shared filenames like `capture.pcap`) are flattened with collision-free names — no silent capture loss |
 
 ---
@@ -173,7 +173,7 @@ Per-feature docs: `docs/PIPELINE.md` · `docs/SQL-GHIDRA.md` · `docs/SQL-IDA.md
 * Keep FlareVM on a host-only / isolated lab NIC — **no public internet**.
 * **Snapshot before every detonation run and restore after.** The VM is a detonation host; malware can persist via Run keys or services.
 * Never commit `.env` files, API keys (e.g. `MALCAT_KEY`), or malware samples.
-* MCP/SQL HTTP services are unauthenticated by design (lab-net only) — do not expose ports 9094–9096, 19300, 19301 outside the lab network.
+* MCP/SQL HTTP services are unauthenticated by design (lab-net only) — do not expose ports 9094–9097, 19300, 19301 outside the lab network.
 
 ---
 

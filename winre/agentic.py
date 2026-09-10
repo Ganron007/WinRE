@@ -122,6 +122,34 @@ print(json.dumps({"ghidra_decompile": out}, default=str))
 '''
 
 
+_REMOTE_WINDBG_HELPER = r'''
+"""Remote WinDbg dump-analysis helper — runs on FlareVM via scp.
+
+Usage: python _windbg_analyze.py <b64_dynamic_dir> <b64_dump>
+Prints JSON: the windbg_post.analyze_dump result. mcp-windbg binds
+127.0.0.1 on the VM, so the analysis must run there (control-plane callers
+use this helper instead of direct HTTP).
+"""
+import base64
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, r"C:\WinRE")
+from winre.windbg_post import analyze_dump  # noqa: E402
+
+dyn = Path(base64.b64decode(sys.argv[1]).decode())
+dump = base64.b64decode(sys.argv[2]).decode()
+if dump in ("", "-"):
+    dump = None
+if not (dyn / "memory").is_dir():
+    alt = dyn.parent.parent / "static" / "dynamic"
+    if (alt / "memory").is_dir():
+        dyn = alt
+print(json.dumps(analyze_dump(dyn, dump), default=str))
+'''
+
+
 def _ps_py(py: str, code: str) -> str:
     """Build a `powershell -EncodedCommand` command that runs a python
     one-liner on the VM, with zero quoting hazards over SSH.
@@ -694,6 +722,36 @@ class ToolRegistry:
         except Exception as e:
             return {"error": str(e)}
 
+    def windbg_analyze_dump(self, dump: str = "") -> dict:
+        """Passive WinDbg (mcp-windbg) analysis of a captured memory dump:
+        !analyze -v triage + exception/module/stack highlights. Reads a
+        dump — never attaches to a live target, so it is NOT gated by the
+        snapshot marker. dump: optional filename inside dynamic/memory/
+        (default: newest capture). Requires a detonation to have run first.
+        """
+        pipeline = self.cfg.get("remote_pipeline", r"C:\WinRE")
+        candidates = [
+            rf"{pipeline}\logs\{self.sha}\agentic\dynamic",
+            rf"{pipeline}\logs\{self.sha}\static\dynamic",
+        ]
+        if self.mode == "local":
+            try:
+                from pathlib import Path as _P
+                from winre import windbg_post
+                for c in candidates:
+                    if (_P(c) / "memory").is_dir():
+                        return windbg_post.analyze_dump(_P(c), dump or None)
+                return {"skipped": "no dynamic/memory in this pack yet",
+                        "hint": "dumps are produced by the detonation phase"}
+            except Exception as e:
+                return {"error": str(e)[:250]}
+        return self._run_remote_py("_remote_windbg_helper", candidates[0],
+                                   # "-" sentinel: an empty arg is dropped by
+                                   # the space-joined SSH command line
+                                   dump or "-",
+                                   timeout=420,
+                                   helper_src=_REMOTE_WINDBG_HELPER)
+
 
 # ---------------------------------------------------------------------------
 # LangGraph ReAct (static phase)
@@ -714,7 +772,7 @@ TOOL_NAMES = ("ghidra_query", "ida_query", "malcat_analyze",
 # primitives — the LLM composes them, never free-forms debugger commands.
 DYNAMIC_TOOL_NAMES = ("x64dbg_oep", "x64dbg_wpm_dump",
                       "x64dbg_crypt_dump", "x64dbg_unpack",
-                      "x64dbg_write_bp_trace")
+                      "x64dbg_write_bp_trace", "windbg_analyze_dump")
 
 
 class GhidraQueryArgs(BaseModel):
@@ -740,6 +798,11 @@ class MalcatDecompileArgs(BaseModel):
 
 class X64DbgHitsArgs(BaseModel):
     max_hits: int = Field(3, description="max BP hits to service (bounded)")
+
+
+class WindbgDumpArgs(BaseModel):
+    dump: str = Field("", description="dump filename inside dynamic/memory/ "
+                                      "(default: newest capture)")
 
 
 _ARG_MODELS: dict[str, type[BaseModel]] = {
@@ -783,6 +846,7 @@ _ARG_MODELS: dict[str, type[BaseModel]] = {
     "x64dbg_crypt_dump": X64DbgHitsArgs,
     "x64dbg_unpack": EmptyArgs,
     "x64dbg_write_bp_trace": EmptyArgs,
+    "windbg_analyze_dump": WindbgDumpArgs,
 }
 
 
@@ -920,7 +984,11 @@ x64dbg_write_bp_trace (HW write-BP on the module header -> who wrote it:
 memory-source of the unpacker write — use for multi-stage unpack where a
 single OEP is misleading),
 x64dbg_unpack (full OEP->dump->Malcat-compare in one call — prefer this for
-packed samples over composing primitives yourself).
+packed samples over composing primitives yourself),
+windbg_analyze_dump (PASSIVE WinDbg analysis of a captured memory dump:
+!analyze -v triage + exception/module/stack highlights; use it when a
+detonation already produced dynamic/memory/*.dmp — it never attaches to a
+live target).
 Debugger discipline: prefer x64dbg_unpack for packed binaries; keep hit
 counts small (<=3); every dynamic claim needs a dump/evidence field; if a
 dynamic tool errors, fall back to static — do not retry more than once.

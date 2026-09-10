@@ -17,8 +17,9 @@ host: scp sample → C:\samples\foo.exe + C:\WinRE\orchestrator.py --file C:\sam
      ├─ post-analysis (KB 2026-09-07): procmon_post (persistence catalog +
      │   behavior_timeline.csv + spoof suspects), pcap_beacon (cadence/UA/
      │   HTTP schema), post_mortem (procdump -ma harvest + ntdll integrity +
-     │   process snapshot) → procmon_summary.json extended, network_intel.json
-     │   +beacon_analysis, post_mortem.json
+     │   process snapshot), windbg_post (mcp-windbg !analyze -v/.ecxr/k/lm
+     │   over in-run dumps) → procmon_summary.json extended, network_intel.json
+     │   +beacon_analysis, post_mortem.json, windbg_analysis.json
      ├─ suspended-process monitor: pe-sieve dump of every new sample process
      │   instance (Early-Bird/APC capture incl. CREATE_SUSPENDED children)
      ├─ input jiggle: synthetic mouse movement during the run (interaction gates)
@@ -69,6 +70,7 @@ See `docs/internal/ARCHITECTURE.md:3` contract table. Key:
 | `memory/pe_sieve_report.json` | `C:\tools\pe-sieve\pe-sieve64.exe /pid <pid> /json` |
 | `malcat-triage.json` | `tools/malcat_win.py` (if licensed) |
 | `x64dbg/dump/*.dmp` | `DumpModule` via `http://127.0.0.1:9094/` |
+| `windbg_analysis.json` | `winre/windbg_post.py` via mcp-windbg (`http://127.0.0.1:9097/mcp/`) over `memory/*.dmp`; passive, honest skip when no dump/server |
 
 ## 4. Helpers (vendored `winre/`)
 
@@ -78,6 +80,7 @@ See `docs/internal/ARCHITECTURE.md:3` contract table. Key:
 | `procmon_post.py` | Procmon CSV → persistence catalog (Run key/service/task/WMI/sideload/drop), `behavior_timeline.csv`, spoofing suspects |
 | `pcap_beacon.py` | pcaps → `network_intel.json.beacon_analysis` (beacon cadence/jitter, HTTP URIs/UAs, DNS) |
 | `post_mortem.py` | procdump -ma harvest + ntdll-integrity (unhooking) + process snapshot → `post_mortem.json`, `memory/*.dmp` |
+| `windbg_post.py` | mcp-windbg dump triage (`!analyze -v`, `.ecxr`, `k`, `lm`, `vertarget` + exception/module highlights) → `windbg_analysis.json`; also exposed to the agent as `windbg_analyze_dump` |
 | `enrich_pcap_tshark.py` | `tshark -r packets.pcap -T json` → `network_intel.json` |
 | `emit_analyst_next.py` | `ANALYST-NEXT.md` template (next BPs, strings to chase) |
 | `doc_triage_v2.py` | Office doc triage (OLE/Macro) — not detonation |

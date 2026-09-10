@@ -42,15 +42,15 @@ the air-gapped VM.
 | procdump `[base]` | `C:\Tools\sysinternals\Procdump64.exe` | — | post-mortem memory harvest | harvest skips; DFIR-Nexus gets other artifacts |
 | Wireshark/tshark `[base]` | `C:\Program Files\Wireshark\tshark.exe` | — | pcap enrich + beacon analysis | network intel degrades |
 | 7-Zip `[base]` | `C:\Program Files\7-Zip\7z.exe` (or PATH) | `WINRE_7Z` | DFIR-Nexus case packs | case pack falls back to .zip |
-| WinDbg (Store/classic) `[base]` | — | — | windbg MCP (dump analysis) | windbg tools skip |
+| WinDbg (Store/classic) `[base]` | — | — | mcp-windbg dump analysis (`windbg_analysis.json` + `windbg_analyze_dump` agent tool) | windbg step skips honestly |
 | VMWare Tools / hypervisor `[user]` | — | `WINRE_HYPERVISOR`, `WINRE_VM_PATH`, `WINRE_SNAPSHOT` | L2 snapshot auto-restore | manual snapshot discipline (gate observe mode) |
 
 ## Python deps (VM, `C:\Python313`)
 
 Installed automatically by `setup-flarevm.ps1` (pip): `frida`, `flask`,
 `pefile`, `psutil`, `oletools`, `pypdf`, `dnfile`, `z3`, `angr`,
-`speakeasy`, plus `setuptools<81` (pinned — speakeasy imports
-`pkg_resources`, removed in setuptools 81+).
+`speakeasy`, `mcp-windbg` (dump-analysis MCP, :9097), plus `setuptools<81`
+(pinned — speakeasy imports `pkg_resources`, removed in setuptools 81+).
 
 Optional: `pyghidra` + `GHIDRA_INSTALL_DIR` → faster `ghidra_decompile`
 (in-process); headless fallback otherwise.

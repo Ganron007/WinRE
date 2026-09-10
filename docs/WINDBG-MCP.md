@@ -65,6 +65,20 @@ c.close_cdb_session(sid)
 - Kernel debugging needs a KDNET/pipe/serial target — not set up on the lab VM by default.
 - `--filter-script` can redact PII/secrets from tool output (use if dumps carry secrets).
 
+## 7. WinRE pipeline integration
+
+Two passive entry points (no live attach needed; `:9097` must be reachable):
+
+- **Post-detonation (automatic):** `winre/windbg_post.py` runs inside
+  `orchestrator._post_pull_enrich` on the VM right after a dynamic run. It picks
+  the largest `memory/*.dmp` (in-run procdump / pe-sieve captures) and writes
+  `windbg_analysis.json` next to it: `!analyze -v` (output-capped), `.ecxr`,
+  `k`, `lm`, `vertarget`, plus bugcheck/exception/module highlights. Honest skip
+  when there is no dump or the server is down.
+- **Agent tool:** `windbg_analyze_dump` in `winre/agentic.py` (member of
+  `DYNAMIC_TOOL_NAMES`, available under `--agentic-dbg`) runs the same helper
+  over SSH from the control plane and returns the JSON to the deep-dive LLM.
+
 ## References
 
 - https://github.com/svnscha/mcp-windbg (MIT) · docs https://svnscha.github.io/mcp-windbg/

@@ -85,9 +85,9 @@ if (Test-Path $py) {
     # network when the local wheel set does not satisfy the module.
     $wheelDir = "C:\Tools-staged\wheels"
     # import name -> PyPI package name (needed where they differ)
-    $pipNames = @{ "z3" = "z3-solver"; "speakeasy" = "speakeasy-emulator" }
+    $pipNames = @{ "z3" = "z3-solver"; "speakeasy" = "speakeasy-emulator"; "mcp_windbg" = "mcp-windbg" }
     foreach ($mod in @("frida", "flask", "pefile", "psutil", "oletools",
-                       "pypdf", "dnfile", "z3", "angr", "speakeasy")) {
+                       "pypdf", "dnfile", "z3", "angr", "speakeasy", "mcp_windbg")) {
         & $py -c "import $mod" 2>$null
         if ($LASTEXITCODE -eq 0) { Ok "module $mod present"; continue }
         $pipName = if ($pipNames.ContainsKey($mod)) { $pipNames[$mod] } else { $mod }

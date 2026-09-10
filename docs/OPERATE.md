@@ -8,7 +8,7 @@ Day-2 operation of the WinRE lab. Install first: [`INSTALL.md`](INSTALL.md).
 |---|---|---|
 | **Static, agentic engine (default)** | `python -m winre.pipeline C:\samples\s.exe` | intake → quick → deep (LangGraph ReAct, `llm_judge`) → yara → report → audit → `logs/<sha>/agentic/` |
 | **Static, deterministic engine** | `... --mode static` | same stages, deep = fixed 35-tool checklist (30 steps) + rules verdict + calibration gates, zero LLM (`static_deterministic`) → `logs/<sha>/static/` |
-| **Static + agentic debug** | `... --agentic-dbg` | static + the deep agent gets bounded x64dbg tools (OEP/unpack/decrypt/write-BP) — **no detonation**. Local driver supported too: `python -m winre.pipeline C:\samples\s.exe --mode agentic --agentic-dbg` |
+| **Static + agentic debug** | `... --agentic-dbg` | static + the deep agent gets bounded debugger tools — x64dbg (OEP/unpack/decrypt/write-BP) + WinDbg dump analysis (mcp-windbg) — **no detonation**. Local driver supported too: `python -m winre.pipeline C:\samples\s.exe --mode agentic --agentic-dbg` |
 | **Static + dynamic** | `... --dynamic --max-seconds 45` | static first, then segregated detonation (FakeNet + Procmon + Frida [+ pe-sieve]) into the run's mode section |
 | **Dry LLM** | add `--dry-llm` (agentic mode) | no LLM calls; deep stays `deterministic_fallback` (honest, not green) |
 | **Publish case** | add `--publish` | sanitized case → `docs/case-studies/<mode>/<sha>/` (no binaries) |

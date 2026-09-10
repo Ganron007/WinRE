@@ -40,7 +40,7 @@ if (Test-Path $py) {
     $v = & $py --version 2>&1
     Ok "python -> $py ($v)"
     foreach ($mod in @("frida", "flask", "pefile", "psutil", "oletools",
-                       "pypdf", "dnfile", "z3", "angr", "speakeasy")) {
+                       "pypdf", "dnfile", "z3", "angr", "speakeasy", "mcp_windbg")) {
         # version probe must tolerate modules without __version__
         $mv = & $py -c "import importlib; m = importlib.import_module('$mod'); print(getattr(m, '__version__', 'import-ok'))" 2>$null
         if ($LASTEXITCODE -eq 0 -and $mv) { Ok "python module $mod == $mv" }

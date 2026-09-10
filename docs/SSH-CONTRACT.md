@@ -146,7 +146,6 @@ Notes:
 | Server | Port | Bind | Reachable from caller VM? |
 |---|---|---|---|
 | x64dbg-MCP | 9094 | `0.0.0.0` | **Yes, direct** |
-| windbg_bridge | 9096 | `0.0.0.0` | **Yes, direct** |
 | idasql_server | 19300 | `127.0.0.1` | No — SSH-exec CLI or `ssh -L` tunnel |
 | ghidra serve | 19301 | `127.0.0.1` | No — SSH-exec CLI or `ssh -L` tunnel |
 | malcat serve | 9009 | `127.0.0.1` | No — SSH-exec CLI or `ssh -L` tunnel |
@@ -171,7 +170,7 @@ from the caller to bring it up on demand, or start it first:
 | `job_timeout` / SSH timeout | raise `--max-seconds`; budget is `max_seconds+300`; check hung tools via `taskkill` block |
 | `GhidraSql.java did not emit JSON` | usually a bad SQL string; verify against canonical `@funcs/@imports/@strings` first |
 | idasql query hangs | known flakiness on this build; retry once, else fail open and rely on Ghidra |
-| `tools/list` refused on :9094/9096 | MCP not running — start via `start_servers.ps1`, then retry |
+| `tools/list` refused on :9094/:9097 | MCP not running — start via `start_servers.ps1`, then retry |
 | `FROM was unexpected at this time` | SQL passed as bare argv to a `.bat` — always go through the wrappers |
 | `META.ok=false` with empty error | check `META.job.json` + `job.log` in the pack; then `frida.stderr.txt` |
 | Slow first Ghidra run | JVM cold start + `LibGhidraHost` absent (fallback walker used); set heap to 8G |

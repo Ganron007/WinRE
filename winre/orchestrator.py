@@ -167,6 +167,15 @@ def _post_pull_enrich(dyn_dir: Path, sha: str,
     except Exception as e:
         notes["emu_diff"] = {"error": str(e)[:200]}
 
+    # WinDbg dump analysis (mcp-windbg, PASSIVE): triage the in-run captures
+    # (!analyze -v + exception/module/stack highlights). Runs on the VM where
+    # the :9097 server is localhost-bound; honest skip elsewhere.
+    try:
+        from winre.windbg_post import analyze_dump as _wb
+        notes["windbg_dump"] = _wb(dyn_dir)
+    except Exception as e:
+        notes["windbg_dump"] = {"error": str(e)[:200]}
+
     emit = _local_tool("emit_analyst_next.py")
     if emit:
         try:
