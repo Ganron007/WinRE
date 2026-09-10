@@ -17,9 +17,9 @@ Spine (each stage writes logs/<sha>/<stage>/ + META.json):
     6. report   — source-tagged report + ANALYST-NEXT
     audit       — truly_green gate (audit.json)
 
-Usage (on FlareVM, fully local):
-    python winre/pipeline.py C:\samples\foo.exe --max-seconds 45
-    python winre/pipeline.py C:\samples\foo.exe --skip-dynamic --dry-llm
+Usage (on FlareVM, fully local) — run as a module from the repo root:
+    python -m winre.pipeline C:\samples\foo.exe --max-seconds 45
+    python -m winre.pipeline C:\samples\foo.exe --dry-llm
     # env: WINRE_LLM_BASE_URL / WINRE_LLM_API_KEY / WINRE_LLM_MODEL (local)
     #      GHIDRA_HEADLESS_MAXMEM=8G   (16GB host)
     #      WINRE_PIPELINE_LOGS=C:\WinRE\logs

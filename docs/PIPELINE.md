@@ -46,7 +46,7 @@ debugger control — then applies the same honest gates.
 ## Spine
 
 ```
-winre/pipeline.py <sample> [--mode agentic|static] [--dynamic] [--max-seconds 45]
+python -m winre.pipeline <sample> [--mode agentic|static] [--dynamic] [--max-seconds 45]
                    [--pesieve] [--dry-llm] [--agentic-dbg] [--driver remote] [--publish]
    │
    ├─ 1. intake   hash, format, magic            → logs/<sha>/<mode>/intake/
@@ -104,22 +104,25 @@ MCP servers run on the VM console (`winre/mcp/start_servers.ps1`) — Malcat
 ## Run
 
 ```powershell
+# Run all commands below as modules from C:\WinRE (WinRE is a package;
+# direct script paths like python winre\pipeline.py fail).
+
 # STATIC — deterministic engine, zero LLM calls (RevAI scripted)
-python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --mode static
+python -m winre.pipeline C:\samples\foo.exe --mode static
 
 # STATIC — agentic engine (default; needs the LLM endpoint for llm_judge)
-python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --mode agentic
+python -m winre.pipeline C:\samples\foo.exe --mode agentic
 # ... --dry-llm forces the honest deterministic_fallback (no LLM)
 
 # STATIC + SEGREGATED DYNAMIC (opt-in; needs restored VM, then snapshot revert)
-python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --mode static --dynamic --max-seconds 45
+python -m winre.pipeline C:\samples\foo.exe --mode static --dynamic --max-seconds 45
 # or env: $env:WINRE_ENABLE_DYNAMIC = "1"
 
 # control-plane driver (run from operator host, SSH to FlareVM)
-python winre\pipeline.py C:\samples\foo.exe --driver remote --mode static
+python -m winre.pipeline C:\samples\foo.exe --driver remote --mode static
 
 # publish a sanitized, mode-keyed case (report-level artifacts only, no binaries)
-python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --mode static --publish
+python -m winre.pipeline C:\samples\foo.exe --mode static --publish
 #    → docs/case-studies/static/<sha>/
 
 # env

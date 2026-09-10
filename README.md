@@ -152,8 +152,9 @@ curl http://127.0.0.1:9094/ -H "Content-Type: application/json" -d '{"jsonrpc":"
 # 6. Smoke + lab status
 python C:\WinRE\ops\smoke_flare.py
 
-# 7. Full pipeline (static + dynamic + report + audit)
-python C:\WinRE\winre\pipeline.py C:\samples\foo.exe --mode static --dynamic --max-seconds 45
+# 7. Full pipeline (static + dynamic + report + audit) — run from C:\WinRE
+python -m winre.pipeline C:\samples\foo.exe --mode static --dynamic --max-seconds 45
+#    invoke as a module from C:\WinRE (WinRE is a package; python winre\pipeline.py fails)
 #    --mode static|agentic selects the deep-dive engine (default agentic);
 #    --dynamic is the opt-in segregated detonation (omit for static-only);
 #    exit 0 only when truly_green; evidence pack under logs/<sha>/<mode>/
