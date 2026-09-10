@@ -3,6 +3,9 @@
 > **Audience:** sibling pipelines (e.g. RevEng, RevAI) invoking WinRE
 > (FlareVM) over SSH for static + dynamic analysis.
 > **Status:** verified live; the SSH-exec path is the most-tested surface.
+> **LLM / remote-driver wiring:** if the driver runs on a RevAI (Remnux)
+> box, the LLM variables and the `WINRE_LLM_*` → RevAI config mapping are
+> specified in [`REVAI-BRIDGE.md`](REVAI-BRIDGE.md).
 
 Conventions used below (no lab specifics committed — set these per lab):
 

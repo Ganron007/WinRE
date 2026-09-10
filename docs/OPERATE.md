@@ -51,6 +51,8 @@ variable names above are contractual — never a specific model or provider.
 This is deliberate (2026-09-01 split: LLM needs internet, detonation
 can't have it) and it keeps API keys off the malware VM. For anything
 RevAI-driven or detonation-adjacent, keys stay on the control plane.
+The RevAI-side mapping (its config → `WINRE_LLM_*`) is specified in
+[`REVAI-BRIDGE.md`](REVAI-BRIDGE.md).
 
 ## Evidence packs
 
