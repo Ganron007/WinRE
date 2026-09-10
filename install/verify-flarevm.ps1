@@ -41,7 +41,8 @@ if (Test-Path $py) {
     Ok "python -> $py ($v)"
     foreach ($mod in @("frida", "flask", "pefile", "psutil", "oletools",
                        "pypdf", "dnfile", "z3", "angr", "speakeasy")) {
-        $mv = & $py -c "import $mod; print($mod.__version__)" 2>$null
+        # version probe must tolerate modules without __version__
+        $mv = & $py -c "import importlib; m = importlib.import_module('$mod'); print(getattr(m, '__version__', 'import-ok'))" 2>$null
         if ($LASTEXITCODE -eq 0 -and $mv) { Ok "python module $mod == $mv" }
         else { Fail "python module $mod not importable (pip install $mod)" }
     }

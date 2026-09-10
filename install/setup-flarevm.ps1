@@ -84,19 +84,24 @@ if (Test-Path $py) {
     # C:\Tools-staged\wheels, try --no-index first; only fall back to the
     # network when the local wheel set does not satisfy the module.
     $wheelDir = "C:\Tools-staged\wheels"
-    function Install-Module([string]$mod) {
-        if (Test-Path $wheelDir) {
-            & $py -m pip install --quiet --no-index --find-links $wheelDir $mod 2>$null
-            & $py -c "import $mod" 2>$null
-            if ($LASTEXITCODE -eq 0) { return }
-        }
-        & $py -m pip install --quiet $mod
-    }
+    # import name -> PyPI package name (needed where they differ)
+    $pipNames = @{ "z3" = "z3-solver"; "speakeasy" = "speakeasy-emulator" }
     foreach ($mod in @("frida", "flask", "pefile", "psutil", "oletools",
                        "pypdf", "dnfile", "z3", "angr", "speakeasy")) {
         & $py -c "import $mod" 2>$null
-        if ($LASTEXITCODE -eq 0) { Ok "module $mod present" }
-        else { Act "pip install $mod"; if (-not $CheckMode) { Install-Module $mod } }
+        if ($LASTEXITCODE -eq 0) { Ok "module $mod present"; continue }
+        $pipName = if ($pipNames.ContainsKey($mod)) { $pipNames[$mod] } else { $mod }
+        Act "pip install $pipName"
+        if (-not $CheckMode) {
+            if (Test-Path $wheelDir) {
+                & $py -m pip install --quiet --no-index --find-links $wheelDir $pipName 2>$null
+                & $py -c "import $mod" 2>$null
+            }
+            if ($LASTEXITCODE -ne 0) { & $py -m pip install --quiet $pipName }
+            & $py -c "import $mod" 2>$null
+            if ($LASTEXITCODE -eq 0) { Ok "module $mod installed" }
+            else { Warn "module $mod still not importable - install manually (pip install $pipName)" }
+        }
     }
     # speakeasy imports setuptools.pkg_resources (removed in setuptools>=81)
     & $py -c "import setuptools" 2>$null
@@ -140,8 +145,9 @@ if ($malcatBin) {
     $malcatPy = Join-Path $malcatBin "python313\python.exe"
     if (-not (Test-Path $malcatPy)) { $malcatPy = "C:\Python313\python.exe" }
     $licOut = & $malcatPy -c "import sys; sys.path.insert(0, r'$malcatBin'); import malcat; print(malcat.env.flavor)" 2>$null
+    $licVal = if ($licOut) { $licOut.Trim() } else { "unknown" }
     if ($licOut -match "FULL|OEM|PRO") { Ok "Malcat license ACTIVE ($($licOut.Trim()))" }
-    else { Manual "Activate Malcat (GUI -> Preferences -> license). Headless API reports: $($licOut ?? 'unknown')." }
+    else { Manual "Activate Malcat (GUI -> Preferences -> license). Headless API reports: $licVal." }
 } else { Manual "Install Malcat (commercial) with bin\malcat.mcp.py reachable (docs\PREREQUISITES.md)." }
 
 $idaDir = if ($env:WINRE_IDA_DIR) { $env:WINRE_IDA_DIR } else { "C:\Program Files\IDA Professional 9.3" }
