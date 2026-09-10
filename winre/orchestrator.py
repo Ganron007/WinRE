@@ -95,7 +95,8 @@ def _sample_format(session: dict, sample: str) -> str:
     return "unknown"
 
 
-def _post_pull_enrich(dyn_dir: Path, sha: str) -> dict:
+def _post_pull_enrich(dyn_dir: Path, sha: str,
+                      sample_pid: int | None = None) -> dict:
     """tshark enrich + KB-derived post-analysis + ANALYST-NEXT after every
     dynamic pull (Win or ELF).
 
@@ -145,14 +146,16 @@ def _post_pull_enrich(dyn_dir: Path, sha: str) -> dict:
     # handoff: process-level dumps here; full-image is DFIR-Nexus-owned)
     try:
         from winre.post_mortem import run_all as _pm
-        sample_pid = None
-        meta_f = dyn_dir / "META.json"
-        if meta_f.is_file():
-            try:
-                meta_pm = json.loads(meta_f.read_text(encoding="utf-8")) or {}
-                sample_pid = meta_pm.get("sample_pid")
-            except Exception:
-                pass
+        # prefer the caller's live value (META.json may not be written yet
+        # when this runs — it is written AFTER enrichment)
+        if sample_pid is None:
+            meta_f = dyn_dir / "META.json"
+            if meta_f.is_file():
+                try:
+                    meta_pm = json.loads(meta_f.read_text(encoding="utf-8")) or {}
+                    sample_pid = meta_pm.get("sample_pid")
+                except Exception:
+                    pass
         notes["post_mortem"] = _pm(dyn_dir, sample_pid)
     except Exception as e:
         notes["post_mortem"] = {"error": str(e)[:200]}
@@ -662,8 +665,17 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
             rel = src.relative_to(out_dir)
             dst = dyn_dir / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
-            if dst.exists() and dst.stat().st_size == src.stat().st_size:
-                continue
+            # copy when NEWER (mtime) or different size — a size-only check
+            # silently kept stale files whose new content had equal length
+            # (e.g. "sample_pid": null -> 4708), stalling downstream evidence
+            if dst.exists():
+                try:
+                    st_src, st_dst = src.stat(), dst.stat()
+                    if (st_dst.st_mtime >= st_src.st_mtime
+                            and st_dst.st_size == st_src.st_size):
+                        continue
+                except OSError:
+                    pass
             try:
                 shutil.copy2(src, dst)
             except Exception:
@@ -698,6 +710,9 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
             meta["pe_sieve_ran"] = bool(jm.get("pe_sieve_ran"))
             meta["pe_sieve_pid"] = jm.get("pe_sieve_pid")
             meta["pe_sieve_rc"] = jm.get("pe_sieve_rc")
+            # sample pid (captured while alive) -> post-mortem harvest +
+            # ntdll integrity + DFIR-Nexus memory correlation
+            meta["sample_pid"] = jm.get("sample_pid")
         except Exception:
             pass
 
@@ -741,6 +756,12 @@ def run_dynamic(
     dyn_dir = Path(os.environ.get("WINRE_DYNAMIC_DIR")
                    or (LOGS_DIR / sha / "dynamic"))
     dyn_dir.mkdir(parents=True, exist_ok=True)
+    # freshness: drop the previous run's memory captures so stale evidence
+    # can never masquerade as this run's (recreated during the job)
+    try:
+        shutil.rmtree(dyn_dir / "memory", ignore_errors=True)
+    except Exception:
+        pass
     yara_lock = _yara_lock(sha)
     if enable_pesieve is None:
         enable_pesieve = _env_truthy("REVENG_DYNAMIC_PESIEVE")
@@ -894,7 +915,7 @@ def run_dynamic(
             except Exception as e:
                 meta["x64dbg_post_error"] = str(e)
             meta["elapsed_s"] = round(time.time() - t0, 1)
-            meta["post_pull"] = _post_pull_enrich(dyn_dir, sha)
+            meta["post_pull"] = _post_pull_enrich(dyn_dir, sha, meta.get("sample_pid"))
             meta["verdict_policy"] = {
                 "static_yara_wins": True,
                 "high_signal_yara": yara_lock.get("high_signal") or [],
@@ -919,7 +940,7 @@ def run_dynamic(
             meta["error"] = str(e)
             meta["ok"] = False
         meta["elapsed_s"] = round(time.time() - t0, 1)
-        meta["post_pull"] = _post_pull_enrich(dyn_dir, sha)
+        meta["post_pull"] = _post_pull_enrich(dyn_dir, sha, meta.get("sample_pid"))
         meta["finished_at"] = _utc()
         # Merge worker META if present
         worker_meta = dyn_dir / "META.json"
@@ -1084,6 +1105,7 @@ def run_dynamic(
                 meta["pe_sieve_ran"] = bool(job_meta.get("pe_sieve_ran"))
                 meta["pe_sieve_pid"] = job_meta.get("pe_sieve_pid")
                 meta["pe_sieve_rc"] = job_meta.get("pe_sieve_rc")
+                meta["sample_pid"] = job_meta.get("sample_pid")
             except Exception:
                 pass
 
@@ -1127,7 +1149,7 @@ def run_dynamic(
             encoding="utf-8",
         )
 
-    meta["post_pull"] = _post_pull_enrich(dyn_dir, sha)
+    meta["post_pull"] = _post_pull_enrich(dyn_dir, sha, meta.get("sample_pid"))
     meta["finished_at"] = _utc()
     _write_meta(dyn_dir, meta)
     print(

@@ -423,6 +423,12 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     # root merges into the existing dynamic/ dir.
     local_dyn = pack.stages["dynamic"]
     local_dyn.mkdir(parents=True, exist_ok=True)
+    # freshness: drop the previous run's memory captures before the pull so
+    # stale dumps can never masquerade as this run's evidence
+    try:
+        shutil.rmtree(local_dyn / "memory", ignore_errors=True)
+    except Exception:
+        pass
     ok = False
     err = None
     remote_dyn = (rf'{cfg["remote_pipeline"]}\logs\{sha}'

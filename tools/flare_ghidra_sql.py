@@ -156,7 +156,7 @@ def _loader_name() -> str:
     return ""
 
 
-def run_query_headless(sql: str, sample: Path, timeout: int = 180,
+def run_query_headless(sql: str, sample: Path, timeout: int = 420,
                        persist: bool = False) -> dict:
     """Run one SQL via analyzeHeadless + GhidraSql.java post-script.
 
@@ -417,7 +417,7 @@ def main() -> int:
     p_q.add_argument("--port", type=int, default=19301)
     p_q.add_argument("--persist", "-w", action="store_true",
                      help="persist renames/comments (LibGhidraHost only)")
-    p_q.add_argument("--timeout", type=int, default=180)
+    p_q.add_argument("--timeout", type=int, default=420)
 
     p_serve = sub.add_parser("serve", help="HTTP server (POST /query)")
     p_serve.add_argument("--port", type=int, default=19301)

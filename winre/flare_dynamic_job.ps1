@@ -10,6 +10,7 @@ param(
   [string]$ProcmonExe = "C:\Tools\sysinternals\Procmon64.exe",
   [string]$PeSieveExe = "C:\ProgramData\chocolatey\bin\pe-sieve.exe",
   [string]$HollowsHunterExe = "C:\Tools\hollows_hunter\hollows_hunter.exe",
+  [string]$ProcdumpExe = "C:\Tools\sysinternals\Procdump64.exe",
   [switch]$EnablePeSieve,
   [string]$Apis = "CreateFileW,WriteFile,ReadFile,DeleteFileW,RegOpenKeyExW,RegSetValueExW,VirtualAlloc,VirtualProtect,WriteProcessMemory,CreateRemoteThread,WinHttpOpen,InternetOpenW,connect,send,recv,LoadLibraryW,GetProcAddress,CreateProcessW"
 )
@@ -130,10 +131,19 @@ Log ("Procmon pid={0}" -f $pmProc.Id)
 
 $trace = Join-Path $OutDir "frida_trace.jsonl"
 $memDir = Join-Path $OutDir "memory"
+# Pack hygiene: drop dump dirs from PREVIOUS runs sharing this work root —
+# stale process_* evidence must never masquerade as this run's capture.
+if (Test-Path $memDir) {
+  Get-ChildItem $memDir -Directory -Filter "process_*" -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+  Get-ChildItem $memDir -File -Filter "sample_full*.dmp" -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+}
 $peSieveRan = $false
 $peSievePid = $null
 $peSieveRc = $null
 $psReportValid = $false
+$samplePid = $null
 Log ("Frida start EnablePeSieve={0}" -f [bool]$EnablePeSieve)
 $fridaExit = -1
 try {
@@ -149,17 +159,97 @@ try {
     -RedirectStandardError (Join-Path $OutDir "frida.stderr.txt") `
     -RedirectStandardOutput (Join-Path $OutDir "frida.stdout.txt")
 
+  # Capture the SAMPLE pid while it is ALIVE. (Previously the pid was only
+  # resolved at META-write time - after Kill-Image - so sample_pid was always
+  # null, which disabled the post-mortem memory harvest + ntdll integrity.)
+  $deadline = (Get-Date).AddSeconds([Math]::Min(20, [Math]::Max(5, $MaxSeconds / 2)))
+  while ((Get-Date) -lt $deadline) {
+    $sp = Get-Process -Name $SampleProcName -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($sp) {
+      $samplePid = $sp.Id
+      Log ("sample pid={0}" -f $samplePid)
+      break
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  if (-not $samplePid) { Log "WARN: sample process not observed (fast exit?)" }
+
+  # Full process dump while ALIVE: schedule it near the end of the window.
+  # A dump started after Frida exits is useless - the spawned sample is gone
+  # by then (observed: procdump ran on a dead pid -> 0 dumps).
+  $pdProc = $null
+  if ($samplePid -and (Test-Path $ProcdumpExe)) {
+    New-Item -ItemType Directory -Force -Path $memDir | Out-Null
+    $dumpDelay = [Math]::Max(5, [Math]::Floor($MaxSeconds * 0.7))
+    $dumpCmd = "Start-Sleep -Seconds $dumpDelay; & '$ProcdumpExe' -accepteula -ma $samplePid '$memDir\sample_full'; exit"
+    $pdProc = Start-Process powershell -ArgumentList @(
+      "-NoProfile", "-Command", $dumpCmd
+    ) -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
+    Log ("procdump scheduled in {0}s pid={1}" -f $dumpDelay, $samplePid)
+  }
+
+  # ---- KB: Early-Bird/APC-aware capture + sandbox input jiggle -----------
+  # Start CONCURRENT with Frida (not after the run) so the monitor can catch
+  # suspended/injected child processes during the live detonation window.
+  $monitor = Join-Path $OutDir "_monitor_suspended.ps1"
+  $jiggle = Join-Path $OutDir "_input_jiggle.ps1"
+  @"
+param(`$SampleName, `$PeSieveExe, `$MemDir, `$MaxSeconds)
+`$deadline = (Get-Date).AddSeconds(`$MaxSeconds)
+`$seen = @{}
+while ((Get-Date) -lt `$deadline) {
+  Get-Process -Name `$SampleName -ErrorAction SilentlyContinue | ForEach-Object {
+    if (-not `$seen.ContainsKey(`$_.Id)) {
+      `$seen[`$_.Id] = `$true
+      & `$PeSieveExe /pid `$_.Id /dir `$MemDir /quiet /minidmp /shellc A /dnet 4 /data 3 2>`$null | Out-Null
+    }
+  }
+  Start-Sleep -Seconds 3
+}
+"@ | Set-Content $monitor -Encoding ASCII
+  @"
+param(`$Seconds)
+`$sig = '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);'
+`$t = Add-Type -MemberDefinition `$sig -Name J -Namespace W -PassThru
+`$deadline = (Get-Date).AddSeconds(`$Seconds)
+`$r = New-Object System.Random
+while ((Get-Date) -lt `$deadline) {
+  `$t::SetCursorPos(`$r.Next(100, 1500), `$r.Next(100, 800)) | Out-Null
+  Start-Sleep -Milliseconds 400
+}
+"@ | Set-Content $jiggle -Encoding ASCII
+  $monProc = $null
+  $jigProc = $null
+  if ((Test-Path $PeSieveExe) -and (Test-Path $monitor)) {
+    New-Item -ItemType Directory -Force -Path $memDir | Out-Null
+    $monProc = Start-Process powershell -ArgumentList @(
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $monitor,
+      "$SampleProcName", $PeSieveExe, $memDir, "$MaxSeconds"
+    ) -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
+    Log ("suspended-process monitor started pid={0}" -f $monProc.Id)
+  }
+  if (Test-Path $jiggle) {
+    $jigProc = Start-Process powershell -ArgumentList @(
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $jiggle,
+      "$MaxSeconds"
+    ) -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
+    Log ("input jiggle started pid={0}" -f $jigProc.Id)
+  }
+
   if ($EnablePeSieve) {
     New-Item -ItemType Directory -Force -Path $memDir | Out-Null
     # Wait for the SAMPLE process to appear (name derived from SamplePath)
-    $deadline = (Get-Date).AddSeconds([Math]::Min(20, [Math]::Max(5, $MaxSeconds / 2)))
-    while ((Get-Date) -lt $deadline) {
-      $sp = Get-Process -Name $SampleProcName -ErrorAction SilentlyContinue | Select-Object -First 1
-      if ($sp) {
-        $peSievePid = $sp.Id
-        break
+    if ($samplePid) { $peSievePid = $samplePid }
+    else {
+      $deadline = (Get-Date).AddSeconds([Math]::Min(20, [Math]::Max(5, $MaxSeconds / 2)))
+      while ((Get-Date) -lt $deadline) {
+        $sp = Get-Process -Name $SampleProcName -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($sp) {
+          $peSievePid = $sp.Id
+          break
+        }
+        Start-Sleep -Seconds 1
       }
-      Start-Sleep -Seconds 1
     }
     if ($peSievePid -and (Test-Path $PeSieveExe)) {
       Log ("pe-sieve /pid {0} /dir {1}" -f $peSievePid, $memDir)
@@ -235,56 +325,17 @@ try {
 }
 Log ("Frida exit={0}" -f $fridaExit)
 
-# ---- KB: Early-Bird/APC-aware capture + sandbox input jiggle -------------
-# 1) suspended-process monitor: dump EVERY sample process instance as it
-#    appears (incl. CREATE_SUSPENDED children that never resume) so the
-#    pre-resume shellcode is captured before userland hooks would matter.
-# 2) input jiggle: synthetic mouse movement defeats WH_MOUSE_LL interaction
-#    gates (Maldev 73: <5 clicks in 20s => sandbox).
-$monitor = Join-Path $OutDir "_monitor_suspended.ps1"
-$jiggle = Join-Path $OutDir "_input_jiggle.ps1"
-@"
-param(`$SampleName, `$PeSieveExe, `$MemDir, `$MaxSeconds)
-`$deadline = (Get-Date).AddSeconds(`$MaxSeconds)
-`$seen = @{}
-while ((Get-Date) -lt `$deadline) {
-  Get-Process -Name `$SampleName -ErrorAction SilentlyContinue | ForEach-Object {
-    if (-not `$seen.ContainsKey(`$_.Id)) {
-      `$seen[`$_.Id] = `$true
-      & `$PeSieveExe /pid `$_.Id /dir `$MemDir /quiet /minidmp /shellc A /dnet 4 /data 3 2>`$null | Out-Null
-    }
+# The delayed in-run procdump (scheduled at capture time) should be done or
+# nearly done - bounded wait, then report how many dumps landed.
+if ($pdProc) {
+  if (-not ($pdProc | Wait-Process -Timeout 90 -ErrorAction SilentlyContinue)) {
+    Stop-Process -Id $pdProc.Id -Force -ErrorAction SilentlyContinue
   }
-  Start-Sleep -Seconds 3
+  Log ("procdump done ({0} dmp)" -f (Get-ChildItem $memDir -Filter "sample_full*.dmp" -ErrorAction SilentlyContinue | Measure-Object).Count)
 }
-"@ | Set-Content $monitor -Encoding ASCII
-@"
-param(`$Seconds)
-`$sig = '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);'
-`$t = Add-Type -MemberDefinition `$sig -Name J -Namespace W -PassThru
-`$deadline = (Get-Date).AddSeconds(`$Seconds)
-`$r = New-Object System.Random
-while ((Get-Date) -lt `$deadline) {
-  `$t::SetCursorPos(`$r.Next(100, 1500), `$r.Next(100, 800)) | Out-Null
-  Start-Sleep -Milliseconds 400
-}
-"@ | Set-Content $jiggle -Encoding ASCII
-$monProc = $null
-$jigProc = $null
-if ((Test-Path $PeSieveExe) -and (Test-Path $monitor)) {
-  New-Item -ItemType Directory -Force -Path $memDir | Out-Null
-  $monProc = Start-Process powershell -ArgumentList @(
-    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $monitor,
-    "$SampleProcName", $PeSieveExe, $memDir, "$MaxSeconds"
-  ) -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
-  Log ("suspended-process monitor started pid={0}" -f $monProc.Id)
-}
-if (Test-Path $jiggle) {
-  $jigProc = Start-Process powershell -ArgumentList @(
-    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $jiggle,
-    "$MaxSeconds"
-  ) -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
-  Log ("input jiggle started pid={0}" -f $jigProc.Id)
-}
+
+Kill-Image "$SampleProcName.exe"
+Kill-Image "frida-helper-64.exe"
 
 Log "stopping Procmon"
 Start-Process -FilePath $ProcmonExe -ArgumentList "/AcceptEula","/Terminate" -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
@@ -381,7 +432,7 @@ if (Test-Path $trace) {
   pe_sieve_pid = $peSievePid
   pe_sieve_rc = $peSieveRc
   pe_sieve_report_valid = $psReportValid
-  sample_pid = if ($peSievePid) { $peSievePid } else { (Get-Process -Name $SampleProcName -ErrorAction SilentlyContinue | Select-Object -First 1).Id }
+  sample_pid = if ($samplePid) { $samplePid } elseif ($peSievePid) { $peSievePid } else { $null }
   memory_dir = if (Test-Path $memDir) { $memDir } else { $null }
   snapshot_restore_required = $true
   finished_at = (Get-Date).ToUniversalTime().ToString("o")

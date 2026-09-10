@@ -162,7 +162,19 @@ def ntdll_integrity(dyn_dir: Path, sample_pid: int | None) -> dict:
         return {**out, "checked": False,
                 "note": "no sample pid — ntdll integrity needs a target process"}
     mem = _loaded_ntdll_hash(sample_pid)
-    tampered = bool(mem and mem != disk)
+    if mem is None:
+        # process already exited (spawned samples usually exit with Frida) —
+        # say so; never claim "hooks intact" without a memory hash
+        out["checked"] = True
+        out["readable"] = False
+        out["processes"].append({
+            "pid": sample_pid, "memory_ntdll_text_sha256": None,
+            "tampered": None,
+            "verdict": ("process no longer readable (exited before the check) "
+                        "- use the in-run pe-sieve dump for tamper analysis"),
+        })
+        return out
+    tampered = bool(mem != disk)
     out["processes"].append({
         "pid": sample_pid, "memory_ntdll_text_sha256": mem,
         "tampered": tampered,
@@ -175,22 +187,35 @@ def ntdll_integrity(dyn_dir: Path, sample_pid: int | None) -> dict:
 
 
 def memory_harvest(dyn_dir: Path, sample_pid: int | None) -> dict:
-    """procdump -ma of the sample process (+ children) into memory/."""
+    """Harvest dumps into memory/: in-run captures first (pe-sieve monitor
+    + delayed procdump written by the job while the sample was ALIVE), then
+    a post-run procdump fallback for still-running targets."""
     mem_dir = dyn_dir / "memory"
     mem_dir.mkdir(parents=True, exist_ok=True)
+
+    # in-run captures (the reliable ones — a dead pid cannot be dumped)
+    existing = sorted(str(p) for p in mem_dir.rglob("*.dmp"))
+    if existing:
+        return {"ok": True,
+                "dumps": existing[:20],
+                "dump_dir": str(mem_dir),
+                "count": len(existing),
+                "note": ("in-run capture (pe-sieve minidump / delayed procdump) "
+                         "- taken while the sample was alive. Full-image "
+                         "memory acquisition remains DFIR-Nexus territory.")}
+
     if not sample_pid:
-        return {"ok": False, "error": "no sample pid — nothing to harvest"}
+        return {"ok": False, "error": "no sample pid - nothing to harvest"}
     if not Path(PROCDUMP).is_file():
         return {"ok": False, "error": f"procdump missing at {PROCDUMP}"}
     rc, out, err = _run([PROCDUMP, "-accepteula", "-ma", str(sample_pid),
                          str(mem_dir / "sample")], 120)
-    dumped = list(mem_dir.glob("*.dmp"))
+    dumped = sorted(str(p) for p in mem_dir.rglob("*.dmp"))
     return {"ok": rc == 0 and bool(dumped),
-            "dumps": [str(p) for p in dumped],
+            "dumps": dumped[:20],
+            "count": len(dumped),
             "dump_dir": str(mem_dir),
-            "note": ("process-level memory (procdump -ma). Full-image memory "
-                     "acquisition is DFIR-Nexus territory (VM suspend/snapshot "
-                     "capture) — this harvest is the in-case process view."),
+            "note": ("post-run procdump (pid must still be alive)"),
             "error": None if dumped else (err or out)[-200:]}
 
 

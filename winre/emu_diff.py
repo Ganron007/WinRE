@@ -78,8 +78,15 @@ def compare(dyn_dir: Path) -> dict:
     predicted = _predicted_apis(section / "deep" / "deep.json")
     observed = _observed_apis(dyn_dir / "frida_summary.json")
     if not predicted and not observed:
-        return {"ok": False,
-                "error": "no speakeasy prediction and no frida observation"}
+        res = {"ok": False,
+               "error": "no speakeasy prediction and no frida observation",
+               "predicted": 0, "observed": 0}
+        try:
+            (dyn_dir / "emu_diff.json").write_text(
+                json.dumps(res, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        return res
     ps, ob = set(predicted), set(observed)
     inter = sorted(ps & ob)
     only_pred = sorted(ps - ob)
