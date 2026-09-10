@@ -89,6 +89,110 @@
     {% endfor %}
     {% endif %}
 
+    {% if dy.persistence or dy.spoofing_suspects or dy.timeline_events %}
+    <div class="page-section-title">Persistence &amp; behavior timeline</div>
+    {% if dy.persistence %}
+    <p style="font-size:var(--tx-sm); margin:2px 0">
+      {% for fam, val in dy.persistence.items() %}
+      <span class="badge warn">{{ fam }}{% if val is not string %} · {{ val|length }}{% endif %}</span>
+      {% endfor %}
+    </p>
+    {% endif %}
+    {% if dy.timeline_events is not none %}
+    <p class="muted" style="font-size:var(--tx-xs); margin:2px 0">
+      behavior timeline: <b>{{ dy.timeline_events }}</b> events (download
+      <span class="mono">behavior_timeline.csv</span> below)</p>
+    {% endif %}
+    {% if dy.spoofing_suspects %}
+    <p class="muted" style="font-size:var(--tx-xs); margin:4px 0 2px">spoofing suspects:</p>
+    {% for s in dy.spoofing_suspects %}<div class="mono">{{ s }}</div>{% endfor %}
+    {% endif %}
+    {% endif %}
+
+    {% if dy.beacon %}
+    <div class="page-section-title">Beacon analysis</div>
+    <p style="font-size:var(--tx-sm); margin:2px 0">
+      <span class="badge {{ 'warn' if dy.beacon.beacon_count else 'flat' }}">
+        {{ dy.beacon.beacon_count or 0 }} beacon{{ '' if dy.beacon.beacon_count == 1 else 's' }}</span>
+      {% if dy.beacon.get('http') %}
+      <span class="muted" style="font-size:var(--tx-xs)">·
+        HTTP schema captured</span>
+      {% endif %}
+    </p>
+    {% if dy.beacon.get('beacons') %}
+    <details><summary style="font-size:var(--tx-xs)">beacon candidates</summary>
+      <pre>{{ dy.beacon.beacons[:5] | tojson(indent=1) }}</pre></details>
+    {% endif %}
+    {% endif %}
+
+    {% if dy.windbg %}
+    <div class="page-section-title">WinDbg dump analysis (passive)</div>
+    <p style="font-size:var(--tx-sm); margin:2px 0">
+      {% if dy.windbg.ok %}
+        <span class="badge up">analyzed</span>
+        <span class="mono" style="margin-left:6px">{{ dy.windbg.dump }}</span>
+        {% if dy.windbg.dump_size %}<span class="muted">
+          {{ (dy.windbg.dump_size / 1048576) | round(1) }} MB</span>{% endif %}
+      {% elif dy.windbg.skipped %}
+        <span class="badge flat">skipped</span>
+        <span class="muted" style="margin-left:6px">{{ dy.windbg.skipped }}</span>
+      {% else %}
+        <span class="badge down">not run</span>
+        <span class="muted" style="margin-left:6px">{{ dy.windbg.note or dy.windbg.error or '' }}</span>
+      {% endif %}
+      {% if dy.windbg.ok %}
+      <a class="btn ghost" style="margin-left:8px; padding:2px 10px; font-size:var(--tx-xs)"
+         href="/packs/{{ pack.sha }}/dynamic/windbg_analysis.json?download=1">download JSON</a>
+      {% endif %}
+    </p>
+    {% if dy.windbg.highlights %}
+    <p style="font-size:var(--tx-xs); margin:2px 0">
+      {% for k, val in dy.windbg.highlights.items() %}
+      <span class="badge warn">{{ k }}: {{ val }}</span>
+      {% endfor %}
+    </p>
+    {% endif %}
+    {% if dy.windbg.vertarget %}
+    <details><summary style="font-size:var(--tx-xs)">vertarget</summary>
+      <pre>{{ dy.windbg.vertarget }}</pre></details>
+    {% endif %}
+    {% if dy.windbg.analyze %}
+    <details><summary style="font-size:var(--tx-xs)">!analyze -v</summary>
+      <pre style="max-height:300px; overflow:auto">{{ dy.windbg.analyze }}</pre></details>
+    {% endif %}
+    {% endif %}
+
+    {% if dy.post_mortem %}
+    <div class="page-section-title">Post-mortem harvest</div>
+    <p style="font-size:var(--tx-sm); margin:2px 0">
+      <span class="badge {{ 'up' if dy.post_mortem.readable else 'warn' }}">
+        ntdll {{ 'readable' if dy.post_mortem.readable else 'not readable' }}</span>
+      <span class="muted" style="margin-left:6px; font-size:var(--tx-xs)">
+        memory dumps <b>{{ dy.post_mortem.dumps or 0 }}</b> ·
+        processes snapshotted <b>{{ dy.post_mortem.processes or 0 }}</b></span>
+    </p>
+    {% if dy.post_mortem.note %}
+    <p class="muted" style="font-size:var(--tx-xs); margin:2px 0">{{ dy.post_mortem.note }}</p>
+    {% endif %}
+    {% endif %}
+
+    {% if dy.emu_diff %}
+    <div class="page-section-title">Emulation vs detonation</div>
+    <p style="font-size:var(--tx-sm); margin:2px 0">
+      <span class="badge flat">predicted {{ dy.emu_diff.predicted or 0 }}</span>
+      <span class="badge flat">observed {{ dy.emu_diff.observed or 0 }}</span>
+      <span class="badge flat">overlap {{ dy.emu_diff.overlap or 0 }}</span>
+      {% if dy.emu_diff.anti_emulation %}
+      <span class="badge warn">anti-emulation suspect</span>
+      {% endif %}
+      <span class="muted" style="font-size:var(--tx-xs); margin-left:6px">
+        divergence {{ dy.emu_diff.divergence }}</span>
+    </p>
+    {% if dy.emu_diff.note %}
+    <p class="muted" style="font-size:var(--tx-xs); margin:2px 0">{{ dy.emu_diff.note }}</p>
+    {% endif %}
+    {% endif %}
+
     {% if dy.artifacts %}
     <div class="page-section-title">Artifacts (download)</div>
     <div class="table-wrap"><table>

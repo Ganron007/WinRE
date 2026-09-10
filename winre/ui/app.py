@@ -49,10 +49,18 @@ _run_state: dict = {"running": False, "last": None, "pid": None,
 
 def _section_root(sha: str, mode: str | None) -> Path:
     """Pack section root: logs/<sha>/<mode>/, falling back to the legacy
-    flat layout logs/<sha>/ for pre-sectioning packs."""
+    flat layout logs/<sha>/ for pre-sectioning packs. With no mode given,
+    auto-pick the section when the pack only has sectioned layouts."""
     if mode in ("agentic", "static") and (LOGS_DIR / sha / mode).is_dir():
         return LOGS_DIR / sha / mode
-    return LOGS_DIR / sha
+    flat = LOGS_DIR / sha
+    if mode is None and flat.is_dir():
+        stages = ("intake", "quick", "deep", "dynamic", "yara", "report")
+        if not any((flat / s).is_dir() for s in stages):
+            for sec in ("agentic", "static"):
+                if (flat / sec).is_dir():
+                    return flat / sec
+    return flat
 
 
 def _run_log_tail(n: int = 60) -> list[str]:
@@ -221,6 +229,51 @@ def _pack_views(root: Path, files: dict) -> dict:
     pm = get("dynamic", "procmon_summary.json") or {}
     net = get("dynamic", "network.json") or {}
     ni = get("dynamic", "network_intel.json") or {}
+    wb = get("dynamic", "windbg_analysis.json") or {}
+    pmx = get("dynamic", "post_mortem.json") or {}
+    ed = get("dynamic", "emu_diff.json") or {}
+    wb_view = None
+    if isinstance(wb, dict) and wb:
+        cmds = wb.get("commands") or {}
+        wb_view = {
+            "ok": wb.get("ok"),
+            "skipped": wb.get("skipped"),
+            "note": wb.get("note"),
+            "dump": (str(wb.get("dump") or "").replace("\\", "/").split("/")[-1]
+                     or None),
+            "dump_size": wb.get("dump_size"),
+            "highlights": wb.get("highlights") or {},
+            "vertarget": (cmds.get("vertarget") or "").strip()[:400],
+            "analyze": (cmds.get("!analyze -v") or "").strip()[:2000],
+        }
+    pm_view = None
+    if isinstance(pmx, dict) and pmx:
+        ntd = pmx.get("ntdll_integrity") or {}
+        har = pmx.get("memory_harvest") or {}
+        snap = pmx.get("process_snapshot") or {}
+        pm_view = {
+            "checked": ntd.get("checked"),
+            "readable": ntd.get("readable"),
+            "dumps": har.get("count"),
+            "processes": snap.get("process_count"),
+            "note": pmx.get("note") or har.get("note") or snap.get("note"),
+        }
+    ed_view = None
+    if isinstance(ed, dict) and ed:
+        ed_view = {
+            "ok": ed.get("ok"),
+            "predicted": ed.get("predicted"),
+            "observed": ed.get("observed"),
+            "overlap": ed.get("overlap_count"),
+            "only_predicted": ed.get("only_predicted_count"),
+            "only_observed": ed.get("only_observed_count"),
+            "divergence": ed.get("divergence_score"),
+            "anti_emulation": ed.get("anti_emulation_suspect"),
+            "note": ed.get("note"),
+        }
+    pers = pm.get("persistence") if isinstance(pm, dict) else None
+    pers_hits = {k: v for k, v in (pers or {}).items()
+                 if v} if isinstance(pers, dict) else {}
     caps = []
     if isinstance(ni, dict):
         for cap in (ni.get("captures") or [])[:4]:
@@ -254,6 +307,16 @@ def _pack_views(root: Path, files: dict) -> dict:
         "network": {"pcaps": net.get("pcaps") or [],
                     "domains": (net.get("domains_guess") or [])[:20],
                     "captures": caps} if net else None,
+        "beacon": (ni.get("beacon_analysis") if isinstance(ni, dict)
+                   else None),
+        "persistence": pers_hits,
+        "spoofing_suspects": (pm.get("spoofing_suspects") or [])[:10]
+        if isinstance(pm, dict) else [],
+        "timeline_events": (pm.get("behavior_timeline_events")
+                            if isinstance(pm, dict) else None),
+        "windbg": wb_view,
+        "post_mortem": pm_view,
+        "emu_diff": ed_view,
         "artifacts": arts,
         "sha": root.name,
     }
@@ -315,11 +378,9 @@ _VM_HEALTH_TTL = 20.0  # seconds — reloads are instant; health refreshes slowl
 _llm_cache: dict = {"t": 0.0, "value": False}
 _LLM_TTL = 120.0  # LLM endpoint rarely changes mid-session; avoid a chat call per refresh
 
-# (name, url, timeout_s): LAN servers answer in ms; dead ports cost one
-# TCP retransmit (~2s) as the SYN is dropped — keep the cap tight.
-_MCP_ENDPOINTS = (("x64dbg", "http://{}:9094/", 1.5),
-                  ("malcat", "http://{}:9009/mcp", 1.5),
-                  ("windbg", "http://{}:9097/mcp/", 1.5))
+# MCP endpoint probes: x64dbg binds 0.0.0.0 (direct); Malcat :9009 and
+# mcp-windbg :9097 bind 127.0.0.1 on the VM, so those go over SSH (a direct
+# HTTP probe from the UI host can never reach a loopback bind).
 
 
 def _llm_cached() -> bool:
@@ -375,25 +436,34 @@ def _vm_health() -> dict:
         mcp: dict = {}
         lock = threading.Lock()
 
-        def _one(name: str, url: str, timeout_s: float):
+        def _one(name: str, fn):
             try:
-                req = urllib.request.Request(url.format(cfg["host"]), data=b"{}",
-                                             method="POST")
-                with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-                    ok = resp.status == 200
+                ok = bool(fn())
             except Exception:
                 ok = False
             with lock:
                 mcp[name] = ok
 
-        ts = [threading.Thread(target=_one, args=(n, u, t), daemon=True)
-              for n, u, t in _MCP_ENDPOINTS]
+        def _x64dbg() -> bool:
+            req = urllib.request.Request(f"http://{cfg['host']}:9094/",
+                                         data=b"{}", method="POST")
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                return resp.status == 200
+
+        checks = (
+            ("x64dbg", _x64dbg),
+            ("malcat", lambda: remote_driver.malcat_remote_is_up(timeout=15)),
+            ("windbg", lambda: remote_driver.vm_port_listening(9097, cfg,
+                                                               timeout=30)),
+        )
+        ts = [threading.Thread(target=_one, args=(n, f), daemon=True)
+              for n, f in checks]
         for t in ts:
             t.start()
         for t in ts:
-            t.join(timeout=3)
+            t.join(timeout=8)
         # anything still missing after the cap counts as down
-        for n, _, _ in _MCP_ENDPOINTS:
+        for n, _ in checks:
             mcp.setdefault(n, False)
         results["mcp"] = mcp
 

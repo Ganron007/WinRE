@@ -140,11 +140,13 @@
         </div>
 
         <div style="margin-top:10px">
-          <label class="check"><input type="checkbox" name="dry_llm" id="dryChk" checked>
-            dry-LLM — no LLM call (deep stays deterministic)</label>
+          {% set llm_ok = health and health.llm %}
+          <label class="check"><input type="checkbox" name="dry_llm" id="dryChk" {% if not llm_ok %}checked{% endif %}>
+            dry-LLM — no LLM call (deep stays deterministic)
+            {%- if not llm_ok %} <span class="muted" style="font-size:var(--tx-xs)">(LLM not reachable — see Settings)</span>{% endif %}</label>
           <label class="check"><input type="checkbox" name="agentic_dbg" id="dbgChk">
             <span style="color:var(--warn)">Agentic debugging</span>
-            <span class="muted" style="font-size:var(--tx-xs)">(deep agent gets bounded x64dbg tools — OEP/dump/decrypt; no detonation)</span></label>
+            <span class="muted" style="font-size:var(--tx-xs)">(deep agent gets bounded debugger tools — x64dbg OEP/dump/decrypt + WinDbg dump analysis; no detonation)</span></label>
           <label class="check"><input type="checkbox" id="dynChk" name="dynamic">
             <span style="color:var(--warn)">Enable dynamic detonation</span>
             <span class="muted" style="font-size:var(--tx-xs)">(opt-in, last phase)</span></label>
@@ -174,7 +176,7 @@
   <p style="font-size:var(--tx-sm); color:var(--tx-2); margin:6px 0 0">
     <span class="badge flat">static</span>
     intake → quick → deep (LangGraph agent) → yara → report → audit
-    &nbsp;&nbsp;<span class="badge warn">+agentic_dbg</span> agent gets x64dbg tools (debug, no detonation)
+    &nbsp;&nbsp;<span class="badge warn">+agentic_dbg</span> agent gets x64dbg + WinDbg dump tools (debug, no detonation)
     &nbsp;&nbsp;<span class="badge warn">+dynamic</span> detonation, segregated last phase
   </p>
 

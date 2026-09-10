@@ -571,6 +571,21 @@ def malcat_installed(cfg: dict | None = None, timeout: int = 30) -> bool:
     return bool((r.stdout or "").strip())
 
 
+def vm_port_listening(port: int, cfg: dict | None = None,
+                      timeout: int = 60) -> bool:
+    """SSH port probe for VM services bound to 127.0.0.1 (Malcat :9009,
+    mcp-windbg :9097). A direct HTTP probe from the control plane can never
+    reach a loopback bind — always go through SSH."""
+    try:
+        r = ssh_ps(cfg or flare_cfg(),
+                   f"if (Get-NetTCPConnection -LocalPort {int(port)} -State "
+                   "Listen -ErrorAction SilentlyContinue) { 'listening' } "
+                   "else { 'down' }", timeout=timeout)
+        return (r.stdout or "").strip() == "listening"
+    except Exception:
+        return False
+
+
 def remote_mcp_health(cfg: dict) -> dict:
     """Probe the VM's MCP servers.
 
@@ -592,8 +607,7 @@ def remote_mcp_health(cfg: dict) -> dict:
     except Exception:
         out["malcat"] = False
     try:
-        from winre.mcp import WinDbgMCPClient
-        out["windbg"] = WinDbgMCPClient(base=f"http://{cfg['host']}:9097/mcp/").is_up()
+        out["windbg"] = vm_port_listening(9097, cfg, timeout=30)
     except Exception:
         out["windbg"] = False
     return out

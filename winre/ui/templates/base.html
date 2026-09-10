@@ -60,7 +60,7 @@
     const ql = (q || '').toLowerCase();
     const rows = packs.filter(p => p.sha.toLowerCase().startsWith(ql)).slice(0, 12);
     document.getElementById('paletteList').innerHTML = rows.length
-      ? rows.map(p => `<a href="/packs/${p.sha}" style="display:flex; gap:8px; align-items:center;
+      ? rows.map(p => `<a href="/packs/${p.sha}${p.mode ? '?mode=' + p.mode : ''}" style="display:flex; gap:8px; align-items:center;
            padding:8px 12px; color:var(--tx-1)">
            <span class="mono" style="flex:1">${p.short}…</span>
            <span style="font-size:var(--tx-xs); color:var(--tx-2)">${p.source || ''} · ${p.phase || ''}</span>

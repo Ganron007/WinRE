@@ -162,6 +162,9 @@ python -m winre.pipeline C:\samples\foo.exe --mode static --dynamic --max-second
 # 8. UI console (control plane — operator host, drives FlareVM over SSH)
 python winre\ui\app.py --port 5001
 #    open http://127.0.0.1:5001  → Dashboard / Run Pipeline / Evidence / MCP
+#    UI-only mode: with FLARE_* (+ WINRE_LLM_* for agentic) in .env this is
+#    all you need — one FlareVM is enough, no CLI steps required. dry-LLM
+#    defaults off when the LLM endpoint answers, on when it doesn't.
 ```
 
 Per-feature docs: `docs/PIPELINE.md` · `docs/SQL-GHIDRA.md` · `docs/SQL-IDA.md` · `docs/X64DBG-MCP.md` · `docs/WINDBG-MCP.md` · `docs/DYNAMIC-ORCHESTRATOR.md`. Malcat-specific notes live in [`docs/PREREQUISITES.md`](docs/PREREQUISITES.md) (optional-commercial section).

@@ -14,14 +14,26 @@ Day-2 operation of the WinRE lab. Install first: [`INSTALL.md`](INSTALL.md).
 | **Publish case** | add `--publish` | sanitized case → `docs/case-studies/<mode>/<sha>/` (no binaries) |
 
 Environment equivalents: `WINRE_ENABLE_DYNAMIC=1`, `WINRE_AGENTIC_DBG=1`.
-The UI (`python -m winre.ui.app`, port 5001) drives the same engine: a
-deep-mode selector on the Run page (agentic/static + live engine preview),
-one row per `(sha, mode section)` in Cases with S/A badges, a section
-switcher on the pack page, manual stage control that writes into the
-viewed section, and **fire-one-tool** on the pack page (any of the 35
-static tools, optional raw-JSON args; result → `deep/01-manual-<tool>.json`
-+ `manual_runs.json` audit trail; x64dbg_* excluded — use deep +
-agentic-dbg). Pack export zips the viewed section.
+The UI (`python -m winre.ui.app` → `winre\ui\start_ui.ps1`, port 5001)
+drives the same engine: a deep-mode selector on the Run page
+(agentic/static + live engine preview), one row per `(sha, mode section)`
+in Cases with S/A badges, a section switcher on the pack page, manual
+stage control that writes into the viewed section, and **fire-one-tool** on
+the pack page (any of the 35 static tools, optional raw-JSON args;
+result → `deep/01-manual-<tool>.json` + `manual_runs.json` audit trail;
+x64dbg_* excluded — use deep + agentic-dbg). Pack export zips the viewed
+section.
+
+**UI-only mode (single VM).** The console is self-sufficient — no CLI
+needed. Put `FLARE_*` + `WINRE_LLM_*` in the console host's repo `.env`,
+start the console, open `http://127.0.0.1:5001`. From there: run the
+pipeline (agentic/static, optional agentic-dbg, optional dynamic), watch
+the live stage board, browse packs, rerun single stages, fire single
+tools, attest the snapshot gate. Dry-LLM defaults to **off** when the LLM
+endpoint answers (`/settings` shows reachability); it stays on when no
+LLM is configured so the spine never stalls on timeouts. MCP badges: x64dbg
+is probed directly (`:9094` binds `0.0.0.0`), Malcat `:9009` and mcp-windbg
+`:9097` are localhost-bound on the VM and probed over SSH.
 
 **Invariants:** dynamic is opt-in and always LAST; `static_yara_wins` —
 dynamic corroborates, never clears a static verdict; every run is audited
@@ -63,7 +75,9 @@ deep/ dynamic/ yara/ report/` + `audit.json` + pack-level `META.json`
 per section) — verdicts, deep tool-call timeline (agentic) or checklist +
 fired rules (static), dynamic artifacts (Frida traces, Procmon summaries +
 persistence catalog + behavior timeline, beacon analysis, post-mortem
-dumps, pcaps, pe-sieve dumps), YARA rules, analyst-next report.
+harvest + ntdll integrity, WinDbg dump analysis, emulation-vs-detonation
+diff, pcaps, pe-sieve dumps), YARA rules, analyst-next report. The pack
+view surfaces all of those in-page (not just raw JSON downloads).
 
 ## Sandbox realism (run BEFORE the first detonation)
 
