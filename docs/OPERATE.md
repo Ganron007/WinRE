@@ -105,6 +105,21 @@ clean-snapshot marker on the VM and a global run ledger
   restore in between are impossible.
 - `off`: gate inert.
 
+### After a snapshot revert (baseline recovery)
+
+A revert rolls the VM back to the snapshot's older state. Re-apply the
+current repo + VM-side assets in one command from the control plane:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ops\reapply_after_revert.ps1
+```
+
+It syncs the repo, re-stages the gitignored `integrations/`, offline pip
+wheels and rule-set backups (`internal\reapply\`), runs `setup-flarevm.ps1`
+(which also auto-fixes the IDA license-shadowing trap) and the verify
+battery, then prints the remaining operator steps (samples from the RevAI
+box, `.env` removal/rotation, new snapshot).
+
 CLI:
 
 ```powershell

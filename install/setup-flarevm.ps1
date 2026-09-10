@@ -79,19 +79,38 @@ else {
     Manual "Install Python 3.13 for ALL USERS to C:\Python313 (python.org), then re-run."
 }
 if (Test-Path $py) {
-    # static-analysis python deps (KB-derived tools + revai-parity wrappers)
+    # static-analysis python deps (KB-derived tools + revai-parity wrappers).
+    # Air-gapped friendly: when the host staged wheels under
+    # C:\Tools-staged\wheels, try --no-index first; only fall back to the
+    # network when the local wheel set does not satisfy the module.
+    $wheelDir = "C:\Tools-staged\wheels"
+    function Install-Module([string]$mod) {
+        if (Test-Path $wheelDir) {
+            & $py -m pip install --quiet --no-index --find-links $wheelDir $mod 2>$null
+            & $py -c "import $mod" 2>$null
+            if ($LASTEXITCODE -eq 0) { return }
+        }
+        & $py -m pip install --quiet $mod
+    }
     foreach ($mod in @("frida", "flask", "pefile", "psutil", "oletools",
                        "pypdf", "dnfile", "z3", "angr", "speakeasy")) {
         & $py -c "import $mod" 2>$null
         if ($LASTEXITCODE -eq 0) { Ok "module $mod present" }
-        else { Act "pip install $mod"; if (-not $CheckMode) { & $py -m pip install --quiet $mod } }
+        else { Act "pip install $mod"; if (-not $CheckMode) { Install-Module $mod } }
     }
     # speakeasy imports setuptools.pkg_resources (removed in setuptools>=81)
     & $py -c "import setuptools" 2>$null
     if ($LASTEXITCODE -eq 0) {
         $stv = & $py -c "import setuptools; print(setuptools.__version__)"
         if ([version]$stv -ge [version]"81.0.0") {
-            Act "pin setuptools<81 (speakeasy pkg_resources)"; if (-not $CheckMode) { & $py -m pip install --quiet "setuptools<81" }
+            Act "pin setuptools<81 (speakeasy pkg_resources)"
+            if (-not $CheckMode) {
+                if (Test-Path $wheelDir) {
+                    & $py -m pip install --quiet --no-index --find-links $wheelDir "setuptools<81" 2>$null
+                }
+                $stv2 = & $py -c "import setuptools; print(setuptools.__version__)"
+                if ([version]$stv2 -ge [version]"81.0.0") { & $py -m pip install --quiet "setuptools<81" }
+            }
         } else { Ok "setuptools $($stv.Trim()) (<81)" }
     }
 }
