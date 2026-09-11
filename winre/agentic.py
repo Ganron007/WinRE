@@ -186,6 +186,8 @@ class ToolRegistry:
         self.cfg = cfg or remote_driver.flare_cfg()
         self.mode = mode  # "local" = VM-side subprocess; "remote" = SSH
         self.remote_sample = rf"C:\samples\{sample_name}"
+        self._dbg_ensured = False
+        self._dbg_ensure_error: dict | None = None
 
     def call(self, name: str, args: dict) -> dict:
         fn = getattr(self, name, None)
@@ -633,18 +635,34 @@ class ToolRegistry:
         return X64DbgClient(base=f"http://{self.cfg['host']}:9094")
 
     def _dbg_gate(self) -> dict | None:
-        """Snapshot-gate check before ANY debugger execution on the VM.
+        """Preflight before ANY debugger execution on the VM: snapshot gate
+        plus a one-time x64dbg MCP heal.
 
         enforce: the FIRST debug call consumes the marker (same-sha calls
         later in this agent run pass via session scope); blocked -> tools
         return an error, agent falls back to static. observe (default):
-        advisory only — never blocks testing.
+        advisory only — never blocks testing. If :9094 is down, bring x64dbg
+        up once via the scheduled-task launcher (interactive session).
         """
         from winre import snapshot_gate
         g = snapshot_gate.preflight("debug", sha=self.sha, cfg=self.cfg)
-        if g.get("allowed"):
-            return None
-        return {"error": f"{g.get('error')} — falling back to static analysis"}
+        if not g.get("allowed"):
+            return {"error": f"{g.get('error')} — falling back to static analysis"}
+        if self.mode == "remote" and not self._dbg_ensured:
+            self._dbg_ensured = True
+            if remote_driver.mcp_autostart_enabled():
+                try:
+                    from winre.mcp.x64dbg_manager import ensure_mcp
+                    ok, info = ensure_mcp(wait_s=45)
+                    if not ok:
+                        self._dbg_ensure_error = info
+                except Exception as e:
+                    self._dbg_ensure_error = {"error": str(e)[:150]}
+            if self._dbg_ensure_error:
+                return {"error": "x64dbg MCP :9094 unavailable: "
+                                 + str(self._dbg_ensure_error.get("error")
+                                       or self._dbg_ensure_error)[:200]}
+        return None
 
     def x64dbg_oep(self) -> dict:
         """Find the unpack OEP via memory-execute BP (verified method)."""

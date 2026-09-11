@@ -116,6 +116,31 @@ def _highlights(analyze_text: str) -> dict:
     return out
 
 
+def _ensure_mcp_server() -> dict | None:
+    """Heal :9097 locally when analyze_dump runs ON the VM (session-0 safe).
+
+    The boot launcher is the primary path; this covers a failed logon launcher.
+    Returns None when not on the VM (no local launcher script) or opted out
+    via WINRE_MCP_AUTOSTART=0.
+    """
+    import os
+    import subprocess
+    flag = os.environ.get("WINRE_MCP_AUTOSTART", "1").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        return None
+    script = Path(r"C:\WinRE\winre\mcp\start_servers.ps1")
+    if not script.is_file():
+        return None  # not the VM (control-plane local testing) — no-op
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-File", str(script), "-NoX64dbg", "-Detach"],
+            capture_output=True, text=True, timeout=60)
+        return {"exit": r.returncode}
+    except Exception as e:
+        return {"error": str(e)[:150]}
+
+
 def analyze_dump(dyn_dir: Path, dump: str | None = None,
                  base: str | None = None, timeout: int = 300) -> dict:
     """Analyze the pack's captured dump with mcp-windbg (passive)."""
@@ -132,11 +157,23 @@ def analyze_dump(dyn_dir: Path, dump: str | None = None,
         return _write(dyn_dir, {"ok": False, "dump": str(target),
                                 "error": f"client import: {str(e)[:150]}"})
     cli = WinDbgMCPClient(base=base, default_timeout=timeout)
+    heal = None
     if not cli.is_up():
-        return _write(dyn_dir, {
-            "ok": False, "dump": str(target),
-            "skipped": "windbg MCP :9097 not reachable",
-            "elapsed_s": round(time.time() - t0, 1)})
+        # one local heal attempt (idempotent launcher), then re-probe
+        heal = _ensure_mcp_server()
+        if heal is not None:
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                time.sleep(3)
+                if cli.is_up():
+                    break
+    if not cli.is_up():
+        payload = {"ok": False, "dump": str(target),
+                   "skipped": "windbg MCP :9097 not reachable",
+                   "elapsed_s": round(time.time() - t0, 1)}
+        if heal is not None:
+            payload["heal"] = heal
+        return _write(dyn_dir, payload)
 
     opened = cli.open_cdb_dump(str(target))
     sid = _session_id(opened)

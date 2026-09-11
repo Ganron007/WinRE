@@ -16,6 +16,12 @@
       powershell -ExecutionPolicy Bypass -File C:\WinRE\winre\mcp\start_servers.ps1
       powershell ... -NoX64dbg        # skip launching x64dbg GUI
       powershell ... -Foreground      # show server windows (debugging)
+      powershell ... -NoX64dbg -Detach
+          # re-run self via a one-shot scheduled task, then exit. Required
+          # when launched over SSH: Win32-OpenSSH kills the connection's
+          # process tree on disconnect, so servers started directly would die.
+          # Task-launched processes are owned by the Task Scheduler service
+          # and survive (same mechanism as x64dbg_manager).
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File C:\WinRE\winre\mcp\start_servers.ps1 -NoX64dbg
 #>
@@ -24,10 +30,27 @@ param(
     [int]$WinDbgPort = 9097,
     [int]$X64dbgPort = 9094,
     [switch]$NoX64dbg,
-    [switch]$Foreground
+    [switch]$Foreground,
+    [switch]$Detach
 )
 
 $ErrorActionPreference = "Continue"
+
+# --- Detached re-exec (SSH-safe): run under Task Scheduler, then exit ------
+if ($Detach) {
+    $task = "WinRE-MCP-Heal"
+    $arg = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File " +
+           "`"$PSCommandPath`" -NoX64dbg"
+    $a = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg
+    $p = New-ScheduledTaskPrincipal -UserId $env:USERNAME `
+        -LogonType Interactive -RunLevel Limited
+    $s = New-ScheduledTaskSettingsSet
+    Register-ScheduledTask -TaskName $task -Action $a -Principal $p `
+        -Settings $s -Force | Out-Null
+    Start-ScheduledTask -TaskName $task
+    Write-Host "[winre-mcp] detached via scheduled task '$task'"
+    exit 0
+}
 $WinRE = "C:\WinRE"
 $LogDir = "$WinRE\logs\mcp"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null

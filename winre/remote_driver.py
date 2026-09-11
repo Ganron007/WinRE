@@ -254,6 +254,7 @@ def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict) -> dict:
     Uses a remote helper .py (scp'd) instead of nested inline quoting — the
     nested powershell -Command string mangles @ and quotes over SSH.
     """
+    ensure_mcp_servers(cfg, only=("malcat",))  # Malcat serves this stage
     t0 = time.time()
     py = _remote_py(cfg)
     remote_sample = rf"C:\samples\{sample_name}"
@@ -586,6 +587,78 @@ def vm_port_listening(port: int, cfg: dict | None = None,
         return False
 
 
+def mcp_autostart_enabled() -> bool:
+    """Driver-side MCP healing switch (WINRE_MCP_AUTOSTART=0 disables)."""
+    return os.environ.get("WINRE_MCP_AUTOSTART", "1").strip().lower() not in (
+        "0", "false", "no", "off")
+
+
+def ensure_mcp_servers(cfg: dict | None = None, *,
+                       only: tuple[str, ...] = ("malcat", "windbg"),
+                       wait_s: int = 60) -> dict:
+    """Heal the VM's headless MCP servers (boot launcher is the primary path).
+
+    Malcat :9009 and mcp-windbg :9097 run headless, so the driver can start
+    them over SSH in session 0 via the idempotent
+    winre\\mcp\\start_servers.ps1 -NoX64dbg. x64dbg :9094 needs the interactive
+    session — that path is winre.mcp.x64dbg_manager.ensure_mcp (agentic-dbg).
+
+    Opt out with WINRE_MCP_AUTOSTART=0. Never raises; returns probe results.
+    """
+    out: dict = {"enabled": mcp_autostart_enabled(), "healed": False,
+                 "malcat": None, "windbg": None}
+    if not out["enabled"]:
+        return out
+    cfg = cfg or flare_cfg()
+
+    def _probe(name: str, timeout: int) -> bool:
+        if name == "malcat":
+            return bool(malcat_remote_is_up(timeout=timeout))
+        return bool(vm_port_listening(9097, cfg, timeout=timeout))
+
+    for name in only:
+        if name == "malcat":
+            # commercial-optional: nothing to heal when not installed
+            try:
+                if not malcat_installed(cfg, timeout=30):
+                    out["malcat"] = "not-installed"
+                    continue
+            except Exception:
+                pass
+        try:
+            out[name] = _probe(name, 15 if name == "malcat" else 30)
+        except Exception:
+            out[name] = False
+    if all(out.get(n) for n in only):
+        return out
+
+    # one idempotent heal attempt. -Detach re-runs the launcher via a
+    # scheduled task: Win32-OpenSSH kills this connection's process tree on
+    # disconnect, so servers started directly from the SSH shell would die
+    # with it (same reason x64dbg_manager uses a task).
+    try:
+        r = ssh_run(cfg, "powershell -NoProfile -ExecutionPolicy Bypass "
+                         r"-File C:\WinRE\winre\mcp\start_servers.ps1 "
+                         "-NoX64dbg -Detach", timeout=60)
+        out["heal_exit"] = r.returncode
+    except Exception as e:
+        out["error"] = f"heal failed: {str(e)[:200]}"
+        return out
+    out["healed"] = True
+
+    deadline = time.time() + max(0, wait_s)
+    while not all(out.get(n) for n in only) and time.time() < deadline:
+        time.sleep(3)
+        for name in only:
+            if out.get(name):
+                continue
+            try:
+                out[name] = _probe(name, 10 if name == "malcat" else 15)
+            except Exception:
+                pass
+    return out
+
+
 def remote_mcp_health(cfg: dict) -> dict:
     """Probe the VM's MCP servers.
 
@@ -629,6 +702,7 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
     """
     from . import llm_client
     t0 = time.time()
+    heal = ensure_mcp_servers(cfg)  # headless MCP self-heal (boot launcher is primary)
     mcp = remote_mcp_health(cfg)
     # commercial-optional: strip Malcat agent tools when Malcat is not
     # installed on the VM (honest degradation, no failures for absence)
@@ -637,7 +711,7 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
         mcp["malcat"] = "not-installed"
     engine = "static_deterministic" if mode == "static" else (
         "langgraph+dbg" if dynamic else "langgraph")
-    out: dict = {"mcp": mcp, "remote": True, "engine": engine}
+    out: dict = {"mcp": mcp, "mcp_heal": heal, "remote": True, "engine": engine}
     fallback = False
     failures: list[str] = []
 
