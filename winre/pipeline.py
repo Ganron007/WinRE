@@ -383,6 +383,8 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
             "llm_analysis": agent_result.get("llm_analysis"),
             "tool_calls": len(agent_result.get("history") or []),
             "history": history,
+            "packed_signal": agent_result.get("packed_signal"),
+            "unpack_prepass": agent_result.get("unpack_prepass"),
         }
     except Exception as e:
         failures.append(f"agent:{e}")

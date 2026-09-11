@@ -11,7 +11,9 @@ Mode plumbing: mode="local" (VM-side subprocess) or "remote" (SSH-exec),
 via ToolRegistry — same as the agent.
 
 Verdict rules (conservative, evidence-cited):
-  malicious/high   — curated YARA hit OR malcat yara_hits
+  malicious/high   — high-signal YARA hit (family-distinctive strings) OR
+                     malcat yara_hits; generic/common-string YARA matches
+                     are evidence-only and never drive the verdict
   malicious/medium — ransomware-family capa cluster OR
                      (packed + XOR-encoded strings + forged metadata)
   suspicious       — packed/high-entropy + anomalies, or forged metadata,
@@ -79,17 +81,24 @@ def _rules_verdict(ev: dict) -> dict:
             f"imports={dg.get('import_count')} strings sparse — "
             f"capa/string evidence unreliable")
 
-    # 1. YARA (curated ruleset scan OR malcat yara engine) — decisive even
-    #    when packed (family-level match on staged curated rules)
+    # 1. YARA — only FAMILY-DISTINCTIVE matches are decisive. Auto-generated
+    #    rules often fire on generic features (DOS stub, KERNEL32.DLL, common
+    #    APIs) — those stay as evidence but never drive the verdict.
     yh = _dict_of(ev.get("yarascan"))
     hits = _as_hit_names(yh.get("hits"))
+    if "high_signal" in yh:
+        high = _as_hit_names(yh.get("high_signal"))
+    else:
+        high = hits  # legacy output (no specificity classifier)
     my = _as_hit_names(ev.get("malcat_yara"))
-    if hits or my:
-        names = [str(h).split()[0][:60] for h in (hits[:3] + my[:3])]
+    if high or my:
+        names = [str(h).split()[0][:60] for h in (high[:3] + my[:3])]
         reasons.append("yara hits: " + ", ".join(names))
         return {"verdict": "malicious", "confidence": "high",
-                "summary": "Curated YARA rule match on the sample.",
+                "summary": "High-signal YARA rule match on the sample.",
                 "key_evidence": reasons, "rules_fired": ["yara-hit"]}
+    # generic matches (hits on common strings) stay evidence-only: no verdict
+    # impact, no suspicion — the tool output carries them for transparency
 
     # 2. ransomware/exfil capa clusters — SUPPRESSED when the decrypt gate
     #    says the code we analyzed isn't the real (decrypted) code
@@ -220,7 +229,9 @@ def _evidence_text(ev: dict) -> str:
     for k in ("yarascan", "malcat_yara"):
         v = ev.get(k)
         if isinstance(v, dict):
-            for h in (v.get("hits") or [])[:10]:
+            hits = v.get("high_signal") if isinstance(v.get("high_signal"), list) \
+                else v.get("hits")
+            for h in (hits or [])[:10]:
                 parts.append(str(h))
     for k in ("strings_tool", "floss"):
         v = ev.get(k)

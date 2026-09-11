@@ -83,7 +83,7 @@ python -m winre.pipeline <sample> [--mode agentic|static] [--dynamic] [--max-sec
 | intake | file magic, sha256 | `intake.json` (+ filename-policy note) |
 | quick | Malcat MCP (:9009) anomalies/yara/strings, IDA SQL funcs (if .i64), Ghidra SQL funcs, static-tools layer (capa/floss/lief/diec/yarascan/strings/import-signals/xor/api-hash-resolver/crypto/mitigations/iocs) | `quick.json` + `verdict` |
 | dynamic | FakeNet-NG, Procmon→CSV, Frida trace, pe-sieve (opt) + suspended-process dump monitor, hollows_hunter, input jiggle, x64dbg OEP/dump; post-analysis: procmon persistence catalog + behavior timeline + spoof suspects, pcap beacon/HTTP-schema, post-mortem (procdump -ma harvest, ntdll integrity, process snapshot), WinDbg dump analysis (`!analyze -v`/.ecxr/k/lm via mcp-windbg) | `META.json` (ok, frida_events, sample_pid), `STAGE.json` (audit wrapper + gate evidence), `frida_trace.jsonl`, `procmon.csv`, `procmon_summary.json` (+persistence/timeline/spoof), `behavior_timeline.csv`, `network_intel.json` (+beacon_analysis), `post_mortem.json`, `memory/*.dmp`, `windbg_analysis.json`, `process_snapshot.json` |
-| deep | engine by `--mode`: `agentic` = LangGraph ReAct (x64dbg-MCP LoadBinary/DetectOEP/DumpModule + write-BP trace, Malcat-MCP fns/decompile, WinDbg-MCP dump analysis, 35 static tools); `static` = fixed 35-tool checklist (30 steps), no LLM | `deep.json` + verdict (`llm_judge` / `static_deterministic`), full history, `llm_analysis` (null in static mode), step-level `tool_failures` surfaced into audit |
+| deep | engine by `--mode`: `agentic` = LangGraph ReAct (x64dbg-MCP LoadBinary/DetectOEP/DumpModule + write-BP trace, Malcat-MCP fns/decompile, WinDbg-MCP dump analysis, 35 static tools), with **packer-signal routing** (quick-evidence diec/entropy → deterministic `x64dbg_unpack` prepass when `--agentic-dbg`) and a **curated-YARA verdict floor** (family-distinctive `yarascan.high_signal` hits can never be contradicted by a below-malicious verdict); `static` = fixed 35-tool checklist (30 steps), no LLM | `deep.json` + verdict (`llm_judge` / `static_deterministic`), full history, `llm_analysis` (null in static mode), `packed_signal`/`unpack_prepass`, step-level `tool_failures` surfaced into audit |
 | yara | deterministic YARA (`CADRE_<sha8>.yar`) + Sigma (`CADRE_<sha8>.yml`), curation lint (soundness/dupes/noise warnings in rule_report) | `rule_report.json` |
 | report | source-tagged `report.json` + `ANALYST-NEXT.md`; sections incl. behavior-context (kill-switch/CLI/artifact catalog) + crypto-identified tags | — |
 
@@ -140,3 +140,32 @@ required for green — it is optional corroboration.
 (`load_dynamic_pack()`) — WinRE is now also the writer for the full pack;
 RevAI can read any stage. The pipeline layout mirrors RevAI's
 `{intake,quick,deep,publish}` naming so reports are portable.
+
+## RevAI-driven runs (remote driver) — measured 4-mode approach
+
+All four modes can be driven from the Linux control plane (or any host with the
+WinRE package): `python3 -m winre.pipeline <sample> --driver remote --mode
+static|agentic [--agentic-dbg] [--dynamic]`. The driver hosts the LLM config;
+the FlareVM stays tools-only and air-gapped.
+
+**Per-sample snapshot cadence** (one gated execution per clean restore):
+
+```
+restore → static + agentic          (same boot; neither executes the sample)
+restore → dynamic detonation        (--dynamic; pull the pack, then restore)
+restore → agentic-dbg               (debugger pass; pull any dumps)
+restore → VM clean
+```
+
+Order rationale: detonation runs on the freshest VM (a resident debugger can
+alter behavior); the debugger pass is last because unpack results are
+independent of runtime observation.
+
+Notes:
+
+- `--agentic-dbg` writes into the same `agentic/` mode section — back up an
+  earlier agentic pack first if both are needed for comparison.
+- Dynamic packs are large (hundreds of MB with full dumps); the driver pulls
+  them recursively.
+- Verify each gated step against the snapshot marker before running: a second
+  gated run off one restore must be blocked/reset first.

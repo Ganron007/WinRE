@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -202,6 +203,95 @@ def ilspy(sample: str, timeout: int = 600) -> dict:
             "length": len(text)}
 
 
+# ── YARA hit specificity ─────────────────────────────────────────────────────
+# Auto-generated rules (yara_gen_v2-style) often use conditions like
+# `uint16(0) == 0x5A4D and 2 of them or pe.imphash() == ...` over generic
+# strings (DOS stub, KERNEL32.DLL, ExitProcess, ...) — which fire on almost
+# every Windows PE (benign notepad matched 4 malware-family rules). Only a
+# FAMILY-DISTINCTIVE matched pattern may drive verdicts; generic matches stay
+# as evidence but are non-decisive.
+_YARA_GENERIC_LITERALS = {
+    "this program cannot be run in dos mode",
+    "!this program cannot be run in dos mode.",
+    "mz", "pe", "rich", ".text", ".data", ".rdata", ".rsrc", ".reloc",
+    "software\\microsoft", "microsoft corporation", "microsoft windows",
+    "software", "software\\", "oftware", "oftware\\", "microsoft",
+    "unknown exception", "bad allocation", "out of memory",
+    "invalid parameter", "assertion failed", "abnormal program termination",
+}
+_YARA_GENERIC_PREFIXES = (
+    "<?xml", "<assembly", "<dependency", "<dependentassembly", "<trustinfo",
+    "<compatibility", "<requestedexecutionlevel", "<description",
+    "version=", "type=", "manifestversion=",
+)
+_YARA_GENERIC_DLLS = {
+    "kernel32.dll", "user32.dll", "advapi32.dll", "shell32.dll", "ole32.dll",
+    "oleaut32.dll", "ntdll.dll", "msvcrt.dll", "gdi32.dll", "ws2_32.dll",
+    "wininet.dll", "urlmon.dll", "winhttp.dll", "psapi.dll", "shlwapi.dll",
+    "comctl32.dll", "comdlg32.dll", "version.dll", "crypt32.dll",
+    "bcrypt.dll", "sechost.dll", "rpcrt4.dll", "ucrtbase.dll",
+    "vcruntime140.dll", "msvcp140.dll", "imm32.dll", "mpr.dll",
+    "netapi32.dll", "wtsapi32.dll", "dnsapi.dll", "iphlpapi.dll",
+}
+# CamelCase WinAPI-shaped identifiers (verb + noun) are behavioral, not
+# family-level evidence. Family markers (mutexes, config keys, tags) rarely
+# look like API calls.
+_YARA_API_SHAPE = re.compile(
+    r"^(?:Nt|Zw|Rtl|WSA|Get|Set|Create|Open|Close|Read|Write|Load|Free|Alloc|"
+    r"Virtual|Heap|File|Find|Enum|Reg|Query|Delete|Remove|Initialize|"
+    r"Uninitialize|Is|Has|Can|Wait|Sleep|Exit|Terminate|Start|Stop|Send|Recv|"
+    r"Receive|Connect|Socket|Execute|Shell|Register|Unregister|Crypt|BCrypt|"
+    r"Adjust|Change|Move|Copy|Compare|Convert|Format|Message|Dialog|Show|"
+    r"Update|Draw|Paint|Peek|Translate|Dispatch|End|Begin|Destroy|Replace|"
+    r"Enable|Disable|Insert|Append|Cancel|Release|Reset|Select|Parse|Print|"
+    r"Refresh|Validate|Verify|Call|Commit|Flush|Map|Unmap|Track)[A-Za-z0-9_]{0,30}$")
+_YARA_SECTION_RE = re.compile(r"^\.[a-z0-9_$]+$", re.IGNORECASE)
+_YARA_HEX_ESC_RE = re.compile(r"\\x([0-9a-fA-F]{2})")
+
+
+def _generic_literal(text: str) -> bool:
+    """True when a matched YARA pattern is non-distinctive (common noise).
+
+    yara-x escapes matched bytes as literal \\xNN in JSON — unescape first so
+    wide API names and header bytes classify correctly.
+    """
+    s = _YARA_HEX_ESC_RE.sub(lambda m: chr(int(m.group(1), 16)), text or "")
+    s = s.replace("\x00", "").strip()
+    if not s:
+        return True
+    low = s.lower()
+    if low in _YARA_GENERIC_LITERALS or low in _YARA_GENERIC_DLLS:
+        return True
+    if low.startswith(_YARA_GENERIC_PREFIXES):
+        return True  # XML/manifest boilerplate present in every modern PE
+    if low.startswith("mz") or low.startswith("pe") or _YARA_SECTION_RE.match(low):
+        return True  # DOS/PE headers, section names (incl. .idata$5 style)
+    if re.fullmatch(r"[A-Z]{8,}", s):
+        return True  # all-caps opcode soup ("WATAUAVAWH")
+    if s.startswith("_") and len(s) >= 8:
+        return True  # CRT internals (_register_thread_local_exe_atexit_callback)
+    base = low.strip("\\")
+    if base in ("software", "oftware", "microsoft"):
+        return True
+    alnum_runs = re.findall(r"[A-Za-z0-9]{8,}", s)
+    if any(ord(ch) < 9 or ord(ch) > 126 for ch in s):
+        # raw binary/opcode pattern: specific only with a printable payload
+        return not alnum_runs
+    longest = max((len(r) for r in re.findall(r"[A-Za-z0-9]+", s)), default=0)
+    if longest < 7 and len(s) < 24:
+        return True  # symbol soup / compiler opcode bytes ("L$ SUVWH")
+    if not re.search(r"[a-z]", s) and re.search(r"[\$^\]]", s):
+        return True  # uppercase opcode soup with symbols ("\\$ UVWAVAWH")
+    if _YARA_API_SHAPE.match(s) and len(s) < 48:
+        return True  # CamelCase WinAPI-shaped identifier
+    return False
+
+
+def _specific_match(matches: list[str]) -> bool:
+    """At least one matched pattern is family-distinctive."""
+    return any(not _generic_literal(m) for m in matches)
+
+
 def yarascan(sample: str, timeout: int = 600) -> dict:
     yr = None
     for cand in (r"C:\Tools\yr\yr.exe", "yr"):
@@ -222,25 +312,58 @@ def yarascan(sample: str, timeout: int = 600) -> dict:
         return {"ok": True, "tool": "yarascan", "hits": [],
                 "skipped": "no rules staged in C:\\Tools\\yara-rules (operator adds curated sets)"}
     # Scan per-file: one bad rule must never kill the whole batch.
-    # Self-matches (rule generated from this sample) are reported as-is;
-    # the campaign report notes the circularity.
+    # JSON + matched patterns: classify each match as high-signal
+    # (family-distinctive) or generic (common API/DLL/DOS-stub noise).
     hits: list[str] = []
+    high: list[str] = []
+    generic: list[str] = []
+    detail: dict = {}
     bad = 0
     for rf in yar_files:
-        rc, out, err = _run([yr, "scan", str(rf), sample],
-                            min(120, timeout))
+        rc, out, err = _run([yr, "scan", "-o", "json", "-s=120",
+                             str(rf), sample], min(120, timeout))
         if rc != 0:
             bad += 1
             continue
-        for line in (out or "").splitlines():
-            line = line.strip()
-            if line and line not in hits:
-                hits.append(line)
+        parsed = None
+        try:
+            parsed = json.loads(out or "")
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict) and isinstance(parsed.get("matches"), list):
+            for m in parsed["matches"]:
+                if not isinstance(m, dict):
+                    continue
+                rule = str(m.get("rule") or "").strip()
+                if not rule or rule in hits:
+                    continue
+                hits.append(f"{rule} {sample}")
+                matched = [str(s.get("match") or "")
+                           for s in (m.get("strings") or [])
+                           if isinstance(s, dict)]
+                if matched:
+                    detail[rule] = [t[:60] for t in matched[:4]]
+                if not matched or _specific_match(matched):
+                    high.append(rule)   # no printed strings (hex/imphash/pe) = specific
+                else:
+                    generic.append(rule)
+                if len(hits) >= 40:
+                    break
+        else:
+            # text fallback (older yr builds) — names only, treated as
+            # evidence-only until specificity can be classified
+            for line in (out or "").splitlines():
+                line = line.strip()
+                if line and line not in hits:
+                    hits.append(line)
+                    generic.append(line.split()[0])
                 if len(hits) >= 40:
                     break
         if len(hits) >= 40:
             break
     return {"ok": True, "tool": "yarascan", "hits": hits[:40],
+            "high_signal": high[:40], "generic": generic[:40],
+            "match_detail": detail,
             "total": len(hits), "rules_scanned": len(yar_files),
             "rules_failed": bad}
 

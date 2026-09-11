@@ -578,13 +578,27 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
             meta["x64dbg_mcp_ensure_error"] = str(e)[:200]
             meta["x64dbg_mcp_unreachable"] = True
             return
+    # x64dbg resolves module names through its expression parser (hyphens =
+    # subtraction, hex stems = numbers) — stage an expression-safe copy
+    dbg_sample = sample
     try:
-        load_out = cli.load_binary(str(sample))
+        from winre.mcp.x64dbg_client import (module_name_is_safe,
+                                             safe_module_filename)
+        if not module_name_is_safe(sample.stem):
+            safe = sample.with_name(safe_module_filename(sample.name, "x64dbg"))
+            if not safe.exists():
+                shutil.copy2(sample, safe)
+            dbg_sample = safe
+            meta["x64dbg_staged_sample"] = str(safe)
+    except Exception:
+        pass
+    try:
+        load_out = cli.load_binary(str(dbg_sample))
         if not load_out.get("ok"):
             meta["x64dbg_load_error"] = load_out.get("error")
             return
         # module name is sample stem
-        module = sample.stem
+        module = dbg_sample.stem
         analyze = cli.analyze_module(module)
         detect = cli.detect_oep(module)
         oep = None
@@ -594,7 +608,7 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
                 oep = r.get("oep") or r.get("OEP")
         dump_dir = dyn_dir / "x64dbg" / "dump"
         dump_dir.mkdir(parents=True, exist_ok=True)
-        dump_path = dump_dir / f"{sample.stem}.dmp"
+        dump_path = dump_dir / f"{dbg_sample.stem}.dmp"
         dump = cli.dump_module(module, str(dump_path))
         meta["x64dbg_mcp"] = {
             "loaded": True,

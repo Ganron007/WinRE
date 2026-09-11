@@ -21,15 +21,43 @@ from a non-interactive SSH process).
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 
 from winre import remote_driver
 from winre.mcp import X64DbgClient
+from winre.mcp.x64dbg_client import module_name_is_safe, safe_module_filename
 
 # serialize ensure/teardown: two concurrent callers (pipeline + manual stage)
 # must not double-launch or race the kill
 _lock = threading.Lock()
+
+
+def stage_safe_sample(cfg: dict, remote_sample: str,
+                      tag: str = "") -> str:
+    """Return an x64dbg-expression-safe VM path for the sample.
+
+    x64dbg module lookups parse names as expressions — a hyphenated sample
+    (`notepad-sys32.exe`) never resolves (`Module "notepad-sys32" not found`,
+    verified live), so DetectOEP/DumpModule/AnalyzeModule silently fail.
+    Unsafe names are copied once to C:\\samples\\x64_<name>_<tag><ext>.
+    Safe names are returned unchanged (no copy).
+    """
+    name = remote_sample.replace("/", "\\").rsplit("\\", 1)[-1]
+    stem = os.path.splitext(name)[0]
+    if module_name_is_safe(stem):
+        return remote_sample
+    safe_name = safe_module_filename(name, tag)
+    safe_path = rf"C:\samples\{safe_name}"
+    try:
+        remote_driver.ssh_ps(
+            cfg,
+            f"if (-not (Test-Path '{safe_path}')) {{ "
+            f"Copy-Item -Force '{remote_sample}' '{safe_path}' }}")
+    except Exception:
+        return remote_sample  # fall through; caller reports the real error
+    return safe_path
 
 
 def keep_debugger() -> bool:

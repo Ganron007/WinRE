@@ -20,9 +20,32 @@ So callers can safely do:
 from __future__ import annotations
 
 import json
+import os
+import re
 import urllib.error
 import urllib.request
 from typing import Any
+
+# x64dbg resolves module names through its expression parser: hyphens become
+# subtraction (`notepad-sys32:0` -> not found) and hex-looking stems parse as
+# numbers. Debugger tools (DetectOEP/DumpModule/AnalyzeModule) therefore need
+# an expression-safe staged name.
+_SAFE_STEM_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_HEX_STEM_RE = re.compile(r"^[0-9a-fA-F]+$")
+
+
+def module_name_is_safe(stem: str) -> bool:
+    """True when x64dbg's expression parser resolves the stem as a symbol."""
+    return bool(_SAFE_STEM_RE.match(stem)) and not _HEX_STEM_RE.match(stem)
+
+
+def safe_module_filename(original: str, tag: str = "") -> str:
+    """Deterministic expression-safe filename for a staged debug copy."""
+    stem = os.path.splitext(os.path.basename(original))[0]
+    ext = os.path.splitext(os.path.basename(original))[1] or ".exe"
+    base = re.sub(r"[^A-Za-z0-9_]", "_", stem)[:24] or "sample"
+    suffix = f"_{tag}" if tag else ""
+    return f"x64_{base}{suffix}{ext}"
 
 
 class X64DbgError(RuntimeError):

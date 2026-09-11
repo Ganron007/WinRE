@@ -188,6 +188,7 @@ class ToolRegistry:
         self.remote_sample = rf"C:\samples\{sample_name}"
         self._dbg_ensured = False
         self._dbg_ensure_error: dict | None = None
+        self._dbg_sample_path: str | None = None
 
     def call(self, name: str, args: dict) -> dict:
         fn = getattr(self, name, None)
@@ -634,6 +635,22 @@ class ToolRegistry:
         from winre.mcp import X64DbgClient
         return X64DbgClient(base=f"http://{self.cfg['host']}:9094")
 
+    def _dbg_sample(self) -> str:
+        """Expression-safe VM sample path for x64dbg tools (staged once).
+
+        x64dbg resolves module names via its expression parser: hyphens become
+        subtraction and hex-looking stems become numbers, so DumpModule /
+        DetectOEP / AnalyzeModule fail on names like `notepad-sys32.exe`.
+        """
+        if self._dbg_sample_path is None:
+            try:
+                from winre.mcp.x64dbg_manager import stage_safe_sample
+                self._dbg_sample_path = stage_safe_sample(
+                    self.cfg, self.remote_sample, tag=(self.sha or "")[:12])
+            except Exception:
+                self._dbg_sample_path = self.remote_sample
+        return self._dbg_sample_path
+
     def _dbg_gate(self) -> dict | None:
         """Preflight before ANY debugger execution on the VM: snapshot gate
         plus a one-time x64dbg MCP heal.
@@ -671,7 +688,7 @@ class ToolRegistry:
             return gate
         try:
             from winre import debug_loops
-            r = debug_loops.oep_by_section(self.remote_sample,
+            r = debug_loops.oep_by_section(self._dbg_sample(),
                                            xc=self._dbg_client())
             return {"ok": r.get("ok"), "oep": r.get("oep"),
                     "error": r.get("error")}
@@ -685,7 +702,7 @@ class ToolRegistry:
             return gate
         try:
             from winre import debug_loops
-            r = debug_loops.wpm_dump(self.remote_sample,
+            r = debug_loops.wpm_dump(self._dbg_sample(),
                                      xc=self._dbg_client(),
                                      max_hits=max(1, min(int(max_hits), 5)))
             return {"ok": r.get("ok"), "hits": r.get("hits"),
@@ -700,7 +717,7 @@ class ToolRegistry:
             return gate
         try:
             from winre import debug_loops
-            r = debug_loops.crypt_dump(self.remote_sample,
+            r = debug_loops.crypt_dump(self._dbg_sample(),
                                        xc=self._dbg_client(),
                                        max_hits=max(1, min(int(max_hits), 3)))
             return {"ok": r.get("ok"), "hits": r.get("hits"),
@@ -715,7 +732,7 @@ class ToolRegistry:
             return gate
         try:
             from winre import debug_loops
-            r = debug_loops.agentic_unpack(self.remote_sample,
+            r = debug_loops.agentic_unpack(self._dbg_sample(),
                                            xc=self._dbg_client())
             return {"ok": r.get("ok"), "oep": r.get("oep"),
                     "dump_path": r.get("dump_path"),
@@ -733,7 +750,7 @@ class ToolRegistry:
             return gate
         try:
             from winre import debug_loops
-            r = debug_loops.write_bp_trace(self.remote_sample,
+            r = debug_loops.write_bp_trace(self._dbg_sample(),
                                            xc=self._dbg_client())
             return {"ok": r.get("ok"), "hit": r.get("hit"),
                     "summary": r.get("summary"), "error": r.get("error")}
@@ -914,9 +931,144 @@ def _quick_brief(quick: dict | None) -> str:
     dc = ev.get("diec") or {}
     if dc.get("detects"):
         parts.append("diec: " + ", ".join(str(d) for d in dc["detects"][:3]))
+    ys = ev.get("yarascan") or {}
+    if isinstance(ys, dict):
+        hs = [str(h).split()[0] for h in (ys.get("high_signal") or []) if str(h).strip()]
+        if hs:
+            parts.append("yarascan high-signal: " + ", ".join(hs[:3]))
     if not parts:
         return ""
     return "Quick triage already found: " + "; ".join(parts) + ". "
+
+
+# ── Packer-signal routing (W1) ──────────────────────────────────────────────
+_PACKER_WORDS = (
+    "upx", "aspack", "fsg", "mew", "mpress", "pecompact", "petite", "upack",
+    "nspack", "armadillo", "themida", "vmprotect", "enigma", "obsidium",
+    "protector", "protect", "packer", "packed", "custom virtual", "spaghetti",
+    "crypter",
+)
+
+
+def _packer_signal(quick: dict | None) -> dict | None:
+    """Deterministic packer indicators from quick evidence (no tool calls).
+
+    Returns None when nothing fires, else a compact dict that (a) routes the
+    agent to the debugger unpack primitive and (b) is recorded in deep.json.
+    """
+    ev = (quick or {}).get("evidence") or {}
+    if not isinstance(ev, dict):
+        return None
+    sig: dict = {}
+    dc = ev.get("diec") or {}
+    detects = [str(d) for d in (dc.get("detects") or [])]
+    hits = [d for d in detects
+            if any(w in d.lower() for w in _PACKER_WORDS)]
+    if hits:
+        sig["diec"] = hits[:3]
+    mc = ev.get("malcat") or {}
+    f = mc.get("file") or {}
+    ent = f.get("entropy")
+    if isinstance(ent, (int, float)) and ent >= 7.0:
+        sig["entropy"] = ent
+    an = mc.get("anomalies") or []
+    if isinstance(an, list):
+        ahits = [str(a.get("name")) for a in an if isinstance(a, dict)
+                 and any(w in str(a.get("name", "")).lower()
+                         for w in ("pack", "entrop", "overlay", "section"))]
+        if ahits:
+            sig["anomalies"] = ahits[:4]
+    return sig or None
+
+
+def _packer_note(sig: dict | None, prepass: dict | None,
+                 dynamic: bool) -> str:
+    if not sig:
+        return ""
+    txt = ", ".join(f"{k}={v}" for k, v in sig.items())
+    if not dynamic:
+        return (f"\nPACKER SIGNAL: {txt}. Static evidence on packed bytes is "
+                "UNRELIABLE (see decrypt_gate) — do not lean malicious on "
+                "packed-byte strings alone; say what still holds.")
+    if prepass and prepass.get("ok"):
+        return (
+            f"\nPACKER SIGNAL: {txt}. A deterministic unpack prepass ALREADY "
+            "ran x64dbg_unpack (do NOT repeat it): "
+            f"OEP={prepass.get('oep')}, dump={prepass.get('dump_path')}, "
+            f"compare={json.dumps(prepass.get('comparison'), default=str)[:200]}. "
+            "The unpacked image is the real analysis target — use SQL/floss on "
+            "the unpacked code; x64dbg_write_bp_trace can chase staged unpackers.")
+    err = (prepass or {}).get("error") or (prepass or {}).get("note")
+    if prepass and not prepass.get("ok") and err:
+        return (f"\nPACKER SIGNAL: {txt}. The deterministic x64dbg_unpack prepass "
+                f"produced no usable dump ({str(err)[:160]}). Prefer x64dbg_oep "
+                "or x64dbg_write_bp_trace early; packed-byte static evidence is "
+                "unreliable.")
+    return (f"\nPACKER SIGNAL: {txt}. Prefer the debugger pathway "
+            "(x64dbg_unpack first) over static-only conclusions on packed bytes.")
+
+
+# ── Curated-YARA verdict floor (W2) ─────────────────────────────────────────
+
+def _yara_rule_names(payload) -> list[str]:
+    """Rule names from a yarascan result: high_signal when the classifier is
+    present, else all hits (legacy)."""
+    if not isinstance(payload, dict):
+        return []
+    src = payload.get("high_signal")
+    if not isinstance(src, list):
+        src = payload.get("hits")
+    out = []
+    for x in (src or []):
+        name = str(x).split()[0].strip()
+        if name:
+            out.append(name)
+    return out
+
+
+def _curated_yara_hits(quick: dict | None, findings: dict) -> list[str]:
+    """Family-distinctive curated YARA rule names from quick evidence + the
+    tools the agent itself ran. Deterministic; no extra tool calls."""
+    names: list[str] = []
+    ev = (quick or {}).get("evidence") or {}
+    if isinstance(ev, dict):
+        names += _yara_rule_names(ev.get("yarascan"))
+    for k, v in (findings or {}).items():
+        if str(k).startswith("yarascan"):
+            names += _yara_rule_names(v)
+    seen: set = set()
+    out: list[str] = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def _apply_verdict_floor(verdict: dict | None, rules: list[str]) -> dict | None:
+    """Curated-YARA verdict floor: a below-malicious verdict cannot contradict
+    a family-distinctive rule match (fixes malicious<->legit flapping across
+    runs). Recorded, auditable — never silent."""
+    if not isinstance(verdict, dict) or not rules:
+        return verdict
+    label = str(verdict.get("verdict") or "").strip().lower()
+    if label == "malicious":
+        return verdict
+    out = dict(verdict)
+    out["verdict"] = "malicious"
+    out["confidence"] = "high"
+    out["verdict_floored"] = True
+    out["floor_source"] = "curated-yara"
+    out["floor_rules"] = rules[:6]
+    out["original_verdict"] = verdict.get("verdict")
+    out["original_confidence"] = verdict.get("confidence")
+    summary = str(verdict.get("summary") or "").strip()
+    out["summary"] = ("Floored to malicious by high-signal curated YARA: "
+                      + ", ".join(rules[:4])
+                      + (". " + summary if summary else ""))
+    out["rules_fired"] = list(verdict.get("rules_fired") or []) + \
+        ["verdict-floor:curated-yara"]
+    return out
 
 
 def run_langgraph_deep_dive(sample_name: str, sha: str, *,
@@ -1012,10 +1164,33 @@ counts small (<=3); every dynamic claim needs a dump/evidence field; if a
 dynamic tool errors, fall back to static — do not retry more than once.
 """
 
+    # packer-signal routing (W1): deterministic-first — when quick evidence
+    # says packed, run the unpack primitive BEFORE the agent instead of
+    # hoping the LLM picks it (0/14 calls on a packed sample happened).
+    packed_sig = _packer_signal(quick)
+    unpack_prepass: dict | None = None
+    if dynamic and packed_sig:
+        try:
+            r = registry.call("x64dbg_unpack", {})
+        except Exception as e:
+            r = {"error": str(e)[:200]}
+        history.append({"step": len(history) + 1, "tool": "x64dbg_unpack",
+                        "args": {}, "result": r,
+                        "reason": "packer-signal deterministic route"})
+        findings[f"x64dbg_unpack_{len(history)}"] = r
+        state["calls"] += 1
+        state["seen"].add(json.dumps(("x64dbg_unpack", {}), sort_keys=True))
+        unpack_prepass = {k: r.get(k) for k in
+                          ("ok", "oep", "dump_path", "comparison", "note",
+                           "error") if k in r}
+    packer_note = _packer_note(packed_sig, unpack_prepass, dynamic)
+
     if dry:
-        # no LLM — deterministic fallback stub
+        # no LLM — deterministic fallback stub (the unpack prepass, if any,
+        # still ran and is recorded in the history)
         return {"verdict": "unknown", "source": "deterministic_fallback",
-                "history": history, "llm_analysis": None, "dry": True}
+                "history": history, "llm_analysis": None, "dry": True,
+                "packed_signal": packed_sig, "unpack_prepass": unpack_prepass}
 
     api_key = os.environ.get("WINRE_LLM_API_KEY", "")
     api_url = (os.environ.get("WINRE_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
@@ -1026,7 +1201,8 @@ dynamic tool errors, fall back to static — do not retry more than once.
     if not api_key and "127.0.0.1" not in api_url:
         return {"verdict": "unknown", "source": "deterministic_fallback",
                 "history": history,
-                "llm_analysis": "WINRE_LLM_API_KEY not set for remote endpoint"}
+                "llm_analysis": "WINRE_LLM_API_KEY not set for remote endpoint",
+                "packed_signal": packed_sig, "unpack_prepass": unpack_prepass}
 
     llm = ChatOpenAI(model=model, api_key=api_key or "none",
                      base_url=api_url, temperature=0.0, max_tokens=4096)
@@ -1055,7 +1231,9 @@ pe_parse: imports (per-DLL function lists), sections + entropy, digital
   signature (signed true/false) — packing = few imports + high entropy.
 diec: packer/protector/compiler identification.
 strings_tool: raw ASCII strings (may be garbage if packed).
-yarascan: curated-ruleset scan — any hit is a strong family indicator.
+yarascan: curated-ruleset scan. `high_signal` hits are family-distinctive
+  (the verdict floor applies); `generic` hits matched only common API/DLL/DOS
+  strings — evidence-only, never lean on them.
 xor_string_search: XOR/ROL/ADD encoded-string brute force — finds hidden
   config/URLs when plain strings are garbage.
 speakeasy_emulate: Windows-native emulation — API calls/events WITHOUT
@@ -1112,20 +1290,21 @@ Malcat anomalies/YARA/high-signal imports fire, verdict must be malicious
 even if strings look legitimate.
 BUDGET DISCIPLINE: limited tool calls; when a [BUDGET] note appears, converge
 to your final answer immediately.
-{dyn_note}"""
+{dyn_note}{packer_note}"""
     agent = create_react_agent(llm, tools=tools, prompt=system_prompt)
     recursion_limit = max(16, int(max_steps) * 2 + 6)
     try:
         brief = _quick_brief(quick)
         result = agent.invoke(
             {"messages": [HumanMessage(content=(
-                f"Analyze sample {sha}. {brief}Use SQL + Malcat to deepen, "
-                "then produce the final flat JSON verdict."))]},
+                f"Analyze sample {sha}. {brief}{packer_note}Use SQL + Malcat to "
+                "deepen, then produce the final flat JSON verdict."))]},
             config={"recursion_limit": recursion_limit},
         )
     except Exception as e:
         return {"verdict": "unknown", "source": "deterministic_fallback",
-                "history": history, "llm_analysis": f"agent error: {e}"}
+                "history": history, "llm_analysis": f"agent error: {e}",
+                "packed_signal": packed_sig, "unpack_prepass": unpack_prepass}
 
     # parse final flat JSON from AI messages (newest first). Models wrap
     # verdicts in prose/fences, so try every {...} candidate, not just the
@@ -1172,11 +1351,16 @@ to your final answer immediately.
                     break
         except Exception:
             continue
+    # curated-YARA verdict floor (W2): never let a below-malicious verdict
+    # contradict a family-distinctive rule match
+    verdict = _apply_verdict_floor(verdict, _curated_yara_hits(quick, findings))
     if verdict is None:
         return {"verdict": "unknown", "source": "deterministic_fallback",
-                "history": history, "llm_analysis": llm_text[:4000]}
+                "history": history, "llm_analysis": llm_text[:4000],
+                "packed_signal": packed_sig, "unpack_prepass": unpack_prepass}
     return {"verdict": verdict, "source": "llm_judge",
-            "history": history, "llm_analysis": llm_text[:8000]}
+            "history": history, "llm_analysis": llm_text[:8000],
+            "packed_signal": packed_sig, "unpack_prepass": unpack_prepass}
 
 
 if __name__ == "__main__":

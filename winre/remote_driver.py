@@ -720,13 +720,17 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
     fallback = False
     failures: list[str] = []
 
-    # x64dbg MCP (HTTP from here) — probe only in static phase
+    # x64dbg MCP (HTTP from here) — probe only in static phase. Use the
+    # expression-safe staged name (hyphens break x64dbg module lookups).
     if mcp.get("x64dbg"):
         try:
             from winre.mcp import X64DbgClient
+            from winre.mcp.x64dbg_manager import stage_safe_sample
             xc = X64DbgClient(base=f"http://{cfg['host']}:9094")
-            lb = xc.load_binary(rf"C:\samples\{sample_name}")
-            out["x64dbg"] = {"loaded": lb.get("ok")}
+            staged = stage_safe_sample(cfg, rf"C:\samples\{sample_name}",
+                                       tag=(sha or "")[:12])
+            lb = xc.load_binary(staged)
+            out["x64dbg"] = {"loaded": lb.get("ok"), "staged": staged}
         except Exception as e:
             failures.append(f"x64dbg:{e}")
 
@@ -766,6 +770,8 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
             "llm_analysis": agent_result.get("llm_analysis"),
             "tool_calls": len(agent_result.get("history") or []),
             "history": history,
+            "packed_signal": agent_result.get("packed_signal"),
+            "unpack_prepass": agent_result.get("unpack_prepass"),
         }
     except Exception as e:
         failures.append(f"agent:{e}")
