@@ -135,6 +135,11 @@ ssh -i $KEY <FLARE_USER>@<FLARE_HOST> \
 Notes:
 - Ghidra SQL **must** go through `flare_ghidra_sql.py` (it passes SQL via
   `GHIDRA_SQL_QUERY` env; bare `-postScript` argv mangles `(`, `*`, `FROM`).
+- `scp` remote paths must use **forward slashes** (`C:/samples/...`): Windows
+  OpenSSH accepts them, but a Linux scp client (e.g. RevAI on .43) mangles
+  backslashes in the remote path → "No such file or directory".
+  `remote_driver.scp_from()` normalizes centrally (downloads); pass forward
+  slashes at new call sites anyway.
 - `analyzeHeadless.bat` must be invoked via Python `subprocess.run` arg array —
   never PowerShell `Start-Process`/`cmd /c` (breaks quoting).
 - IDA one-shot `-q` hangs on this idasql build for some queries; if a query

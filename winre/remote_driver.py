@@ -93,6 +93,11 @@ def scp_to(cfg: dict, local: Path, remote: str) -> None:
 
 def scp_from(cfg: dict, remote: str, local: Path,
              *, recursive: bool = False) -> None:
+    # scp remote paths MUST use forward slashes: Windows OpenSSH accepts
+    # them, but a Linux scp client (e.g. RevAI on .43) mangles backslashes
+    # in the remote path -> "No such file or directory". Normalize here so
+    # every download call site is safe (uploads are left as-is).
+    remote = remote.replace("\\", "/")
     cmd = ["scp", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no",
            "-o", "ConnectTimeout=15", "-P", str(cfg["port"])]
     if recursive:
