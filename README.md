@@ -4,12 +4,10 @@
   <img src="assets/winre-logo.svg" alt="WinRE Logo" width="620">
 </p>
 
-> [!IMPORTANT]
-> **⚠️ WORK IN PROGRESS — PUBLIC BETA (pre-v1.0).** This repository is
-> published early as a project in progress. The pipeline is actively being
-> hardened and tested; expect breaking changes, rough edges, and incomplete
-> documentation until the v1.0 tag. Use it, break it, tell us — but pin a
-> commit if you depend on anything.
+> [!NOTE]
+> **Status: beta (pre-v1.0).** Tested end-to-end on the live lab and
+> hardened against known breakage, but interfaces can still change — pin a
+> commit if you depend on anything, and report what breaks.
 
 <p align="center">
   <a href="https://github.com/Ganron007/WinRE"><img src="https://img.shields.io/badge/Status-LLM--assisted-blue.svg" alt="Status"></a>
