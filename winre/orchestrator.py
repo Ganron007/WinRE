@@ -560,8 +560,24 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
         return
     cli = X64DbgClient()
     if not cli.is_up():
-        meta["x64dbg_mcp_unreachable"] = True
-        return
+        # on-demand heal: the boot launcher starts with -NoX64dbg, so a
+        # dynamic run must launch the GUI/plugin itself instead of silently
+        # skipping the OEP/dump pass
+        flag = os.environ.get("WINRE_MCP_AUTOSTART", "1").strip().lower()
+        if flag in ("0", "false", "no", "off"):
+            meta["x64dbg_mcp_unreachable"] = True
+            return
+        try:
+            from winre.mcp.x64dbg_manager import ensure_mcp_local
+            ok, info = ensure_mcp_local(wait_s=45)
+            if not ok:
+                meta["x64dbg_mcp_ensure_failed"] = info
+                meta["x64dbg_mcp_unreachable"] = True
+                return
+        except Exception as e:
+            meta["x64dbg_mcp_ensure_error"] = str(e)[:200]
+            meta["x64dbg_mcp_unreachable"] = True
+            return
     try:
         load_out = cli.load_binary(str(sample))
         if not load_out.get("ok"):

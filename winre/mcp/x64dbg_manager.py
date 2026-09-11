@@ -53,6 +53,56 @@ def _launch_on_vm(cfg: dict) -> bool:
     return r.returncode == 0
 
 
+def _launch_local() -> bool:
+    """Start x64dbg via scheduled task from a process already ON the VM
+    (orchestrator local mode) — no SSH hop. $env:USERNAME is the autologon
+    user; the task runs x64dbg in the interactive console session."""
+    import subprocess
+    task = "WinRE-X64dbg-Once"
+    ps = (
+        "$a = New-ScheduledTaskAction -Execute "
+        "'C:\\tools\\x64dbg\\release\\x64\\x64dbg.exe'; "
+        "$p = New-ScheduledTaskPrincipal -UserId $env:USERNAME "
+        "-LogonType Interactive -RunLevel Limited; "
+        "$s = New-ScheduledTaskSettingsSet; "
+        f"Register-ScheduledTask -TaskName '{task}' -Action $a -Principal $p "
+        f"-Settings $s -Force | Out-Null; Start-ScheduledTask -TaskName '{task}'"
+    )
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy",
+                            "Bypass", "-Command", ps],
+                           capture_output=True, text=True, timeout=60)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def ensure_mcp_local(base: str | None = None,
+                     wait_s: int = 45) -> tuple[bool, dict]:
+    """Ensure :9094 for callers already running ON the VM (dynamic OEP/dump).
+
+    Same scheduled-task launch as ensure_mcp(), minus the SSH hop. Keeps
+    dynamic runs honest: heal x64dbg instead of silently skipping the
+    OEP/dump pass because the GUI isn't open.
+    """
+    with _lock:
+        xc = X64DbgClient(base=base or "http://127.0.0.1:9094",
+                          default_timeout=10)
+        info: dict = {"local": True, "already_up": False, "launched": False}
+        if xc.is_up():
+            info["already_up"] = True
+            return True, info
+        if not _launch_local():
+            return False, {**info, "error": "scheduled-task launch failed"}
+        deadline = time.time() + wait_s
+        while time.time() < deadline:
+            time.sleep(3)
+            if xc.is_up():
+                info["launched"] = True
+                return True, info
+        return False, {**info, "error": f":9094 not up after {wait_s}s"}
+
+
 def ensure_mcp(base: str | None = None, wait_s: int = 90) -> tuple[bool, dict]:
     """Ensure x64dbg MCP :9094 is up. Launch on VM if down. Returns (ok, info)."""
     with _lock:

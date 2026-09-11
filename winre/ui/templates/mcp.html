@@ -58,9 +58,10 @@
 
   <div class="notice ok" style="max-width:840px">
     <b>Auto-start at boot.</b> The FlareVM auto-logs-on and its Startup launcher
-    runs <span class="mono">winre\mcp\start_servers.ps1</span> — Malcat &amp; WinDbg
-    come up automatically; x64dbg starts minimized for :9094. The dynamic phase
-    can also bring x64dbg up on demand (<span class="mono">x64dbg_manager</span>).
+    runs <span class="mono">winre\mcp\start_servers.ps1 -NoX64dbg</span> — Malcat
+    &amp; WinDbg come up automatically. x64dbg (GUI + plugin) is on demand only:
+    the agentic-dbg tools and the dynamic OEP/dump step launch it via a
+    scheduled task (<span class="mono">x64dbg_manager</span>), then tear it down.
   </div>
 </div>
 {% endblock %}

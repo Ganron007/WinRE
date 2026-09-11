@@ -153,7 +153,7 @@ each detonation.
 |---|---|---|---|
 | Malcat | 9009 | boot autostart (`WinRE-MCP.cmd`) + driver self-heal | localhost-bound; control plane uses the SSH-exec bridge |
 | WinDbg | 9097 | boot autostart + self-heal (`windbg_post`) | localhost-bound; SSH port probe for health |
-| x64dbg | 9094 | on demand (`x64dbg_manager`) / scheduled task, plus lazy heal before agentic-dbg tool calls | binds all interfaces |
+| x64dbg | 9094 | on demand only — scheduled-task launch via `x64dbg_manager` (agentic-dbg gate + dynamic OEP/dump heal); **not** auto-started at boot | binds all interfaces; GUI + plugin |
 
 Restart everything on the VM console:
 `powershell -File C:\WinRE\winre\mcp\start_servers.ps1` (idempotent).
@@ -165,9 +165,10 @@ is down, run `start_servers.ps1 -NoX64dbg -Detach`. `-Detach` re-launches
 the launcher via a one-shot scheduled task because Win32-OpenSSH kills the
 connection's process tree on disconnect (servers started directly from the
 SSH shell would die with it). Agentic-dbg heals x64dbg the same way through
-`x64dbg_manager.ensure_mcp()` on the first debugger tool call. Disable all
-driver-side healing with `WINRE_MCP_AUTOSTART=0` (driver box). RevAI inherits
-this automatically — it runs the same `winre.remote_driver` code.
+`x64dbg_manager.ensure_mcp()` on the first debugger tool call, and the dynamic
+OEP/dump step heals it VM-side via `ensure_mcp_local()` before it would skip.
+Disable all driver-side healing with `WINRE_MCP_AUTOSTART=0` (driver box).
+RevAI inherits this automatically — it runs the same `winre.remote_driver` code.
 
 ## Health & diagnostics
 
