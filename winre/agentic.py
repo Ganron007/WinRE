@@ -737,7 +737,12 @@ class ToolRegistry:
             return {"ok": r.get("ok"), "oep": r.get("oep"),
                     "dump_path": r.get("dump_path"),
                     "comparison": r.get("comparison"),
-                    "error": r.get("error")}
+                    "error": r.get("error"),
+                    "method": r.get("method"),
+                    "attempts": r.get("attempts"),
+                    "diagnostics": r.get("diagnostics"),
+                    "fallback_trace": r.get("fallback_trace"),
+                    "fallback_summary": r.get("fallback_summary")}
         except Exception as e:
             return {"error": str(e)}
 
@@ -1000,10 +1005,15 @@ def _packer_note(sig: dict | None, prepass: dict | None,
             "the unpacked code; x64dbg_write_bp_trace can chase staged unpackers.")
     err = (prepass or {}).get("error") or (prepass or {}).get("note")
     if prepass and not prepass.get("ok") and err:
+        trace = prepass.get("fallback_trace") or {}
+        trace_note = ""
+        if isinstance(trace, dict) and trace.get("rip"):
+            trace_note = (f" A write-BP memory-source trace was captured instead: "
+                          f"header written by {trace.get('module')} @ {trace.get('rip')}.")
         return (f"\nPACKER SIGNAL: {txt}. The deterministic x64dbg_unpack prepass "
-                f"produced no usable dump ({str(err)[:160]}). Prefer x64dbg_oep "
-                "or x64dbg_write_bp_trace early; packed-byte static evidence is "
-                "unreliable.")
+                f"produced no usable dump ({str(err)[:160]}).{trace_note} "
+                "Prefer x64dbg_oep or x64dbg_write_bp_trace early; packed-byte "
+                "static evidence is unreliable.")
     return (f"\nPACKER SIGNAL: {txt}. Prefer the debugger pathway "
             "(x64dbg_unpack first) over static-only conclusions on packed bytes.")
 
@@ -1182,7 +1192,9 @@ dynamic tool errors, fall back to static — do not retry more than once.
         state["seen"].add(json.dumps(("x64dbg_unpack", {}), sort_keys=True))
         unpack_prepass = {k: r.get(k) for k in
                           ("ok", "oep", "dump_path", "comparison", "note",
-                           "error") if k in r}
+                           "error", "method", "attempts", "diagnostics",
+                           "fallback_trace", "fallback_summary")
+                          if k in r}
     packer_note = _packer_note(packed_sig, unpack_prepass, dynamic)
 
     if dry:

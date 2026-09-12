@@ -28,6 +28,7 @@ record of every pause (rip, regs, disasm).
 """
 from __future__ import annotations
 
+import os
 import re
 import time
 from typing import Any
@@ -101,12 +102,94 @@ def _pause_evidence(xc: X64DbgClient, label: str, rip: int | None) -> dict:
     }
 
 
+def _debugger_diagnostics(xc: X64DbgClient) -> dict:
+    """Best-effort debugger state capture for failure forensics.
+
+    x64dbg is torn down after a run, so a failed pause with no state is
+    undebuggable. Capture state + event log + breakpoints + modules while
+    the session is still alive and attach it to the error.
+    """
+    diag: dict = {}
+    try:
+        diag["state"] = _state_text(xc.get_state())[:400]
+    except Exception as e:
+        diag["state_error"] = str(e)[:120]
+    try:
+        ev = xc.get_event_log()
+        res = ev.get("result") if isinstance(ev, dict) else None
+        if isinstance(res, dict) and isinstance(res.get("content"), list) \
+                and res["content"]:
+            diag["event_log"] = str(res["content"][0].get("text", ""))[-1500:]
+        else:
+            diag["event_log"] = str(res)[:1000]
+    except Exception as e:
+        diag["event_error"] = str(e)[:120]
+    try:
+        diag["breakpoints"] = _bp_text(xc)[:400]
+    except Exception:
+        pass
+    try:
+        lm = xc.list_modules()
+        res = lm.get("result") if isinstance(lm, dict) else None
+        if isinstance(res, dict) and isinstance(res.get("content"), list) \
+                and res["content"]:
+            mods = str(res["content"][0].get("text", ""))
+            diag["module_count"] = max(0, len(mods.splitlines()) - 1)
+            diag["modules"] = mods[:800]
+    except Exception:
+        pass
+    return diag
+
+
+def _set_entry_bp(xc: X64DbgClient, stem: str) -> dict:
+    """Explicit EP breakpoint (settings-independent).
+
+    x64dbg's auto entry-break depends on user settings and packed samples
+    can slip past a plain `run` — set the EP breakpoint ourselves, verify it
+    registered, and fall back to eval+bp when the expression form differs.
+    """
+    out: dict = {"tried": []}
+    try:
+        cmd = f"bp mod.entry({stem}:0)"
+        xc.execute_command(cmd)
+        bps = _bp_text(xc)
+        out["tried"].append({"cmd": cmd,
+                             "registered": "entry" in bps.lower()})
+    except Exception as e:
+        out["tried"].append({"cmd": "bp mod.entry", "error": str(e)[:120]})
+    if not any(t.get("registered") for t in out["tried"]):
+        try:
+            ev = xc.eval(f"mod.entry({stem}:0)")
+            res = ev.get("result") if isinstance(ev, dict) else None
+            txt = ""
+            if isinstance(res, dict) and isinstance(res.get("content"), list) \
+                    and res["content"]:
+                txt = str(res["content"][0].get("text", ""))
+            m = re.search(r"0x[0-9A-Fa-f]+", txt)
+            if m:
+                addr = int(m.group(0), 16)
+                xc.execute_command(f"bp {hex(addr)}")
+                bps = _bp_text(xc)
+                out["tried"].append({"cmd": f"bp {hex(addr)}",
+                                     "registered": hex(addr).lower() in bps.lower()})
+        except Exception as e:
+            out["tried"].append({"cmd": "eval+bp", "error": str(e)[:120]})
+    out["registered"] = any(t.get("registered") for t in out["tried"])
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Scenario 1 — EP break smoke
 # ---------------------------------------------------------------------------
 def ep_break(sample: str, xc: X64DbgClient | None = None,
              max_wait_s: int = 40) -> dict:
-    """LoadBinary -> run -> pause at EP (x64dbg auto-EP-breaks)."""
+    """LoadBinary -> explicit EP bp -> run -> pause at EP.
+
+    Settings-independent: we set the entry breakpoint ourselves instead of
+    relying on x64dbg's entry-break option (packed samples / cold sessions
+    can slip past a plain run). Any load/pause failure captures debugger
+    state for post-mortem (the GUI is torn down afterwards).
+    """
     xc = xc or X64DbgClient()
     evidence: list[dict] = []
     # x64dbg persists breakpoints across LoadBinary sessions — always start clean
@@ -117,8 +200,14 @@ def ep_break(sample: str, xc: X64DbgClient | None = None,
     r = xc.load_binary(sample)
     if not r.get("ok"):
         return {"ok": False, "error": f"load failed: {r.get('error')}",
+                "diagnostics": _debugger_diagnostics(xc),
                 "evidence": evidence}
     time.sleep(2)
+    try:
+        ep = _set_entry_bp(xc, os.path.splitext(os.path.basename(sample))[0])
+        evidence.append({"label": "ep_bp", **ep})
+    except Exception as e:
+        evidence.append({"label": "ep_bp_error", "error": str(e)[:120]})
     xc.run()
     deadline = time.time() + max_wait_s
     rip = None
@@ -132,8 +221,15 @@ def ep_break(sample: str, xc: X64DbgClient | None = None,
             rip = _rip(xc)
             paused = True
             break
+        if st.get("isDebugging") == "false":
+            return {"ok": False,
+                    "error": "debug session ended before EP pause "
+                             "(debuggee exited/crashed?)",
+                    "diagnostics": _debugger_diagnostics(xc),
+                    "evidence": evidence}
     if not paused or rip is None:
         return {"ok": False, "error": "never paused (timeout without LOCKED state)",
+                "diagnostics": _debugger_diagnostics(xc),
                 "evidence": evidence}
     evidence.append(_pause_evidence(xc, "ep_break", rip))
     return {"ok": True, "oep": rip, "evidence": evidence,
@@ -236,12 +332,15 @@ def oep_by_section(sample: str, xc: X64DbgClient | None = None,
     rip = None
     while time.time() < deadline:
         time.sleep(2)
-        rip = _rip(xc)
         st = _parse_state(xc.get_state())
-        if st.get("isRunning") == "false":
+        if st.get("isRunning") == "false" and st.get("status") == "LOCKED":
+            rip = _rip(xc)
+            break
+        if st.get("isDebugging") == "false":
             break
     if rip is None:
         return {"ok": False, "error": "never paused after membp run",
+                "diagnostics": _debugger_diagnostics(xc),
                 "evidence": evidence}
     evidence.append(_pause_evidence(xc, "oep_membp_hit", rip))
     return {"ok": True, "oep": rip, "module_base": hex(base),
@@ -296,11 +395,14 @@ def oep_by_esp(sample: str, xc: X64DbgClient | None = None,
     while time.time() < deadline:
         time.sleep(2)
         st = _parse_state(xc.get_state())
-        if st.get("isRunning") == "false":
+        if st.get("isRunning") == "false" and st.get("status") == "LOCKED":
             rip = _rip(xc)
+            break
+        if st.get("isDebugging") == "false":
             break
     if rip is None:
         return {"ok": False, "error": "never paused after ESP-bp run",
+                "diagnostics": _debugger_diagnostics(xc),
                 "evidence": evidence}
     evidence.append(_pause_evidence(xc, "oep_esp_hit", rip))
     return {"ok": True, "oep": rip, "evidence": evidence,
@@ -754,28 +856,113 @@ def write_bp_trace(sample: str, xc: X64DbgClient | None = None,
             "evidence": evidence}
 
 
+def _pause_failure(r: dict) -> bool:
+    """True when the failure is pause/session-related (restart may fix it)."""
+    err = str((r or {}).get("error") or "").lower()
+    return any(k in err for k in ("never paused", "session ended", "timeout"))
+
+
+def _resolve_oep(sample: str, xc: X64DbgClient) -> dict:
+    """OEP fallback chain: section mem-BP -> classic ESP trick.
+
+    Returns the first success (with method + per-attempt record), or a
+    combined failure carrying diagnostics from both attempts.
+    """
+    attempts: list[dict] = []
+    r1 = oep_by_section(sample, xc)
+    attempts.append({"method": "oep_by_section", "ok": bool(r1.get("ok")),
+                     "error": r1.get("error")})
+    if r1.get("ok"):
+        r1["method"] = "oep_by_section"
+        r1["attempts"] = attempts
+        return r1
+    r2 = oep_by_esp(sample, xc)
+    attempts.append({"method": "oep_by_esp", "ok": bool(r2.get("ok")),
+                     "error": r2.get("error")})
+    if r2.get("ok"):
+        r2["method"] = "oep_by_esp"
+        r2["attempts"] = attempts
+        return r2
+    return {"ok": False,
+            "error": (f"OEP unresolved: section={r1.get('error')}; "
+                      f"esp={r2.get('error')}"),
+            "attempts": attempts,
+            "diagnostics": r2.get("diagnostics") or r1.get("diagnostics"),
+            "evidence": ((r1.get("evidence") or []) + (r2.get("evidence") or []))}
+
+
+def _restart_debugger(xc: X64DbgClient) -> dict:
+    """Fresh x64dbg session (cold-start sessions can be broken).
+
+    Remote (control plane): x64dbg_manager.restart_mcp() via SSH.
+    Local (on the VM): taskkill + ensure_mcp_local().
+    """
+    info: dict = {}
+    try:
+        from winre.mcp.x64dbg_manager import restart_mcp
+        ok, meta = restart_mcp()
+        return {"ok": bool(ok), "method": "remote", **(meta or {})}
+    except Exception as e:
+        info["remote_error"] = str(e)[:150]
+    try:
+        import subprocess
+        from winre.mcp import x64dbg_manager as mgr
+        subprocess.run(["taskkill", "/F", "/IM", "x64dbg.exe", "/T"],
+                       capture_output=True, timeout=30)
+        ok, meta = mgr.ensure_mcp_local(wait_s=60)
+        info.update({"ok": bool(ok), "method": "local", **(meta or {})})
+    except Exception as e:
+        info["local_error"] = str(e)[:150]
+        info.setdefault("ok", False)
+    return info
+
+
 def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
                    dump_suffix: str = "_unpacked.exe") -> dict:
     """OEP -> DumpModule -> static re-analysis of the dump -> compare.
 
-    Deterministic fixed sequence (no LLM decisions): find the OEP with
-    oep_by_section, dump the module from the live session, re-analyze the
-    dumped image with Malcat, and compare original-vs-unpacked verdicts.
-    The LangGraph agent drives strategy around this (when to unpack, what
-    the comparison means); this function is the reliable tactic.
+    Deterministic fixed sequence (no LLM decisions): find the OEP with the
+    fallback chain (section mem-BP -> ESP trick), dump the module from the
+    live session, re-analyze the dumped image with Malcat, and compare
+    original-vs-unpacked verdicts. A pause/session failure triggers ONE
+    fresh-x64dbg retry (cold-start sessions + antidebug); if OEP still
+    fails, a write-BP memory-source trace is captured as the artifact and
+    debugger diagnostics ride along in the result.
     """
-    import os
     xc = xc or X64DbgClient()
     evidence: list[dict] = []
 
-    # 1. OEP
-    oep_res = oep_by_section(sample, xc)
+    # 1. OEP — chain + one restart retry on pause/session failure
+    oep_res = _resolve_oep(sample, xc)
     evidence.extend(oep_res.get("evidence") or [])
+    if not oep_res.get("ok") and _pause_failure(oep_res):
+        restart = _restart_debugger(xc)
+        evidence.append({"label": "debugger_restart", **restart})
+        if restart.get("ok"):
+            oep_res = _resolve_oep(sample, xc)
+            evidence.extend(oep_res.get("evidence") or [])
     if not oep_res.get("ok"):
-        return {"ok": False, "error": f"OEP failed: {oep_res.get('error')}",
+        # last resort: write-BP memory-source trace (no OEP -> no dump)
+        trace: dict = {}
+        try:
+            trace = write_bp_trace(sample, xc)
+            evidence.append({"label": "write_bp_trace_fallback",
+                             "ok": trace.get("ok"),
+                             "hit": trace.get("hit"),
+                             "summary": trace.get("summary")})
+        except Exception as e:
+            evidence.append({"label": "write_bp_trace_fallback",
+                             "error": str(e)[:150]})
+        return {"ok": False,
+                "error": f"OEP failed: {oep_res.get('error')}",
+                "attempts": oep_res.get("attempts"),
+                "diagnostics": oep_res.get("diagnostics"),
+                "fallback_trace": trace.get("hit") if trace else None,
+                "fallback_summary": trace.get("summary") if trace else None,
                 "evidence": evidence}
     oep = oep_res["oep"]
-    evidence.append({"label": "oep_found", "oep": hex(oep)})
+    evidence.append({"label": "oep_found", "oep": hex(oep),
+                     "method": oep_res.get("method", "oep_by_section")})
 
     # 2. DumpModule from the live session (VM-side path)
     stem = os.path.splitext(os.path.basename(sample))[0]
@@ -841,14 +1028,17 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
         "unpacked_anomalies": len(new.get("anomalies") or []),
     }
     evidence.append({"label": "compare", **comparison})
+    common = {"ok": True, "oep": hex(oep), "dump_path": dump_path,
+              "comparison": comparison,
+              "method": oep_res.get("method", "oep_by_section"),
+              "attempts": oep_res.get("attempts"),
+              "evidence": evidence}
     if vacuous:
         # unpack mechanics succeeded (OEP + dump), but the compare proved
         # nothing - record it honestly so the agent can't cite corroboration
-        return {"ok": True, "oep": hex(oep), "dump_path": dump_path,
-                "comparison": comparison, "evidence": evidence,
+        return {**common,
                 "note": "unpack ok; compare vacuous (both analyses empty/unknown)"}
-    return {"ok": True, "oep": hex(oep), "dump_path": dump_path,
-            "comparison": comparison, "evidence": evidence}
+    return common
 
 
 if __name__ == "__main__":

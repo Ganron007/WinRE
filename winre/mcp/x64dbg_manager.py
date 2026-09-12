@@ -157,6 +157,22 @@ def ensure_mcp(base: str | None = None, wait_s: int = 90) -> tuple[bool, dict]:
         return False, {**info, "error": f":9094 not up after {wait_s}s"}
 
 
+def restart_mcp(wait_s: int = 90) -> tuple[bool, dict]:
+    """Kill + relaunch x64dbg for a clean debug session.
+
+    Cold-start sessions can be broken (first run after a scheduled-task
+    launch) — a fresh instance fixes the "never paused" failure class.
+    """
+    teardown_info: dict = {}
+    try:
+        teardown_info = teardown(kill_vm=True)
+    except Exception as e:
+        teardown_info = {"error": str(e)[:150]}
+    time.sleep(2)
+    ok, info = ensure_mcp(wait_s=wait_s)
+    return ok, {"teardown": teardown_info, "ensure": info}
+
+
 def health(base: str | None = None) -> dict:
     cfg = remote_driver.flare_cfg()
     host = cfg["host"]
