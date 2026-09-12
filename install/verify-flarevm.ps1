@@ -172,8 +172,18 @@ $startup = [Environment]::GetFolderPath("Startup")
 if (Test-Path (Join-Path $startup "WinRE-MCP.cmd")) { Ok "Startup launcher -> WinRE-MCP.cmd" }
 else { Warn "Startup launcher missing (run install\install_mcp_autostart.ps1)" }
 $task = Get-ScheduledTask -TaskName "WinRE-X64dbg-Once" -ErrorAction SilentlyContinue
-if ($task) { Ok "scheduled task WinRE-X64dbg-Once present" }
-else { Warn "scheduled task WinRE-X64dbg-Once missing (x64dbg MCP needs a console-session kick)" }
+if ($task) {
+    $rl = "$($task.Principal.RunLevel)"
+    if ($rl -eq "Highest") { Ok "scheduled task WinRE-X64dbg-Once present (RunLevel=Highest - elevated, no UAC prompt)" }
+    else { Warn "WinRE-X64dbg-Once RunLevel=$rl (re-register via x64dbg_manager for elevation without prompts)" }
+}
+else { Info "scheduled task WinRE-X64dbg-Once absent (created on demand by the x64dbg manager, RunLevel=Highest)" }
+
+Write-Host ""
+Write-Host "--- UAC / debugger elevation ---"
+$lua = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name EnableLUA -ErrorAction SilentlyContinue).EnableLUA
+if ($lua -eq 0) { Ok "UAC disabled (EnableLUA=0) - x64dbg manual launches run elevated silently" }
+else { Warn "UAC enabled - task launches are elevated silently; manual x64dbg launches may prompt (setup -DisableUAC + reboot to silence)" }
 
 Write-Host ""
 Write-Host "--- Snapshot gate ---"

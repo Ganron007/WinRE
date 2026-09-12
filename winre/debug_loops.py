@@ -178,6 +178,42 @@ def _set_entry_bp(xc: X64DbgClient, stem: str) -> dict:
     return out
 
 
+_ENDED_POLLS = 2  # consecutive no-target polls (~4s) before "session ended"
+
+
+def _await_pause(xc: X64DbgClient, max_wait_s: int) -> dict:
+    """Poll for a REAL pause (not a transient state).
+
+    Success requires isRunning=false + a target-present status + a readable
+    RIP: a transient missing currentAddress must NOT be read as failure —
+    that false negative previously triggered the restart-retry on a valid
+    pause. "Session ended" is declared only after _ENDED_POLLS consecutive
+    NO_TARGET/no-debug polls (a 1-poll glitch during a pause transition is
+    not proof the debuggee is gone).
+    """
+    deadline = time.time() + max_wait_s
+    no_target = 0
+    last_state: dict = {}
+    while time.time() < deadline:
+        time.sleep(2)
+        st = _parse_state(xc.get_state())
+        last_state = st
+        status = (st.get("status") or "").upper()
+        if st.get("isRunning") == "false" and status and status != "NO_TARGET":
+            rip = _rip(xc)
+            if rip is not None:
+                return {"paused": True, "rip": rip, "state": st}
+            no_target = 0  # paused but RIP not readable yet — keep polling
+            continue
+        if st.get("isDebugging") == "false" or status == "NO_TARGET":
+            no_target += 1
+            if no_target >= _ENDED_POLLS:
+                return {"paused": False, "ended": True, "state": st}
+        else:
+            no_target = 0
+    return {"paused": False, "ended": False, "state": last_state}
+
+
 # ---------------------------------------------------------------------------
 # Scenario 1 — EP break smoke
 # ---------------------------------------------------------------------------
@@ -209,28 +245,17 @@ def ep_break(sample: str, xc: X64DbgClient | None = None,
     except Exception as e:
         evidence.append({"label": "ep_bp_error", "error": str(e)[:120]})
     xc.run()
-    deadline = time.time() + max_wait_s
-    rip = None
-    paused = False
-    while time.time() < deadline:
-        time.sleep(2)
-        st = _parse_state(xc.get_state())
-        # capture RIP only when the target actually paused - a stale
-        # currentAddress must never masquerade as the EP/OEP
-        if st.get("isRunning") == "false" and st.get("status") == "LOCKED":
-            rip = _rip(xc)
-            paused = True
-            break
-        if st.get("isDebugging") == "false":
-            return {"ok": False,
-                    "error": "debug session ended before EP pause "
-                             "(debuggee exited/crashed?)",
-                    "diagnostics": _debugger_diagnostics(xc),
-                    "evidence": evidence}
-    if not paused or rip is None:
-        return {"ok": False, "error": "never paused (timeout without LOCKED state)",
+    w = _await_pause(xc, max_wait_s)
+    if not w.get("paused"):
+        ended = bool(w.get("ended"))
+        return {"ok": False,
+                "error": ("debug session ended before EP pause "
+                          "(debuggee exited/crashed?)" if ended
+                          else "never paused (timeout without LOCKED state)"),
+                "session_ended": ended,
                 "diagnostics": _debugger_diagnostics(xc),
                 "evidence": evidence}
+    rip = w["rip"]
     evidence.append(_pause_evidence(xc, "ep_break", rip))
     return {"ok": True, "oep": rip, "evidence": evidence,
             "module": _parse_state(xc.get_state()).get("currentModule")}
@@ -240,32 +265,107 @@ def ep_break(sample: str, xc: X64DbgClient | None = None,
 # Scenario 2/3 — OEP via execute-BP on the original .text region (UPX etc)
 # ---------------------------------------------------------------------------
 def _module_base_and_sections(xc: X64DbgClient, sample_stem: str) -> tuple[int | None, list[dict]]:
-    """Module base + sections from GetMemoryMap (format: start|size|perm|name).
+    """Module base + sections, bounded by the module's ListModules range.
 
-    UPX-packed modules show UPX0/UPX1 sections — the original .text is
-    decompressed into UPX0 (usually base+0x1000)."""
+    GetMemoryMap format: `start | size | perm | name` (name quoted for
+    sections, e.g. `"UPX0"`, `".text"`, `".reloc"`; unquoted for the header
+    page/module file). Perms are x64dbg codes: R--/RW-/RC-/--X/R-X/RWX/RCX
+    (RCX = execute+writecopy — UPX0 shows this). Sections are attributed to
+    the module by ADDRESS RANGE, not by name: packed sections like UPX0 do
+    not contain the module stem, and `.reloc` is the decompression target
+    for non-UPX packers."""
     mm = xc.get_memory_map()
     res = mm.get("result") or {}
     text = ""
     if isinstance(res.get("content"), list) and res.get("content"):
         text = res["content"][0].get("text", "")
-    base = None
+
+    # module base + size from ListModules (`0xBASE | 0xSIZE | name.exe`)
+    mod_base = mod_size = None
+    lm = xc.list_modules()
+    lres = lm.get("result") or {}
+    if isinstance(lres.get("content"), list) and lres.get("content"):
+        for line in str(lres["content"][0].get("text", "")).splitlines():
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) >= 3 and sample_stem.lower() in parts[2].lower():
+                try:
+                    mod_base = int(parts[0], 16)
+                    mod_size = int(parts[1], 16)
+                except ValueError:
+                    mod_base = mod_size = None
+                break
+
     sections: list[dict] = []
+    base = mod_base
     for line in text.splitlines():
         parts = [p.strip() for p in line.split("|")]
-        if len(parts) < 4:
+        if len(parts) < 3:
             continue
         try:
             start = int(parts[0], 16)
+            size = int(parts[1], 16)
         except ValueError:
             continue
-        owner = parts[3]
-        if sample_stem.lower() in owner.lower():
-            if base is None:
-                base = start  # header page (R--)
-            sections.append({"start": start, "size": parts[1],
-                             "perm": parts[2], "owner": owner})
+        perm = parts[2].upper()
+        name = parts[3].strip().strip('"') if len(parts) >= 4 else ""
+        if base is None:
+            # no ListModules range — fall back to name matching
+            if sample_stem.lower() not in name.lower():
+                continue
+            base = start
+        elif not (base <= start < base + (mod_size or 0)):
+            continue
+        sections.append({"start": start, "size": size, "perm": perm,
+                         "name": name,
+                         "va": start - base,
+                         "owner": name})
     return base, sections
+
+
+def _pick_oep_target(sections: list[dict], base: int, rcx: int | None,
+                     text_offset: int = 0x1000) -> tuple[int, int, str]:
+    """Pack-destination preference (returns start, size, why):
+
+      1. UPX0-style section (classic UPX)
+      2. section containing RCX at the stub EP — packers decompress into
+         .reloc-style sections and hand the destination in RCX (do NOT
+         require it to be executable yet; the stub VirtualProtects it)
+      3. writable+executable non-.text section (RCX/RWX, largest)
+      4. first executable non-.text section
+      5. first executable section
+      6. base+text_offset
+    """
+    def _exec(s: dict) -> bool:
+        return "X" in (s.get("perm") or "").upper()
+
+    def _writable(s: dict) -> bool:
+        p = (s.get("perm") or "").upper()
+        return "W" in p or "C" in p  # RCX = execute+writecopy
+
+    def _name(s: dict) -> str:
+        return (s.get("name") or "").lower()
+
+    upx0 = next((s for s in sections if "upx0" in _name(s)), None)
+    if upx0:
+        return upx0["start"], upx0["size"], "upx0"
+    if rcx is not None:
+        cont = next((s for s in sections
+                     if s["start"] <= rcx < s["start"] + s["size"]), None)
+        if cont and "upx" not in _name(cont):
+            return cont["start"], cont["size"], "rcx-section"
+    wx = [s for s in sections if _exec(s) and _writable(s)
+          and ".text" not in _name(s) and s["start"] > base]
+    if wx:
+        best = max(wx, key=lambda s: s["size"])
+        return best["start"], best["size"], "wx-section"
+    execs = [s for s in sections if _exec(s) and s["start"] > base
+             and ".text" not in _name(s)]
+    if execs:
+        return execs[0]["start"], execs[0]["size"], "exec-section"
+    execs = [s for s in sections if _exec(s) and s["start"] > base]
+    if execs:
+        return execs[0]["start"], execs[0]["size"], "exec-any"
+    return base + text_offset, 0x10000, "fallback"
 
 
 def oep_by_section(sample: str, xc: X64DbgClient | None = None,
@@ -291,30 +391,15 @@ def oep_by_section(sample: str, xc: X64DbgClient | None = None,
     if base is None:
         return {"ok": False, "error": "module base not found", "evidence": evidence}
 
-    def _sz(s: dict) -> int:
-        try:
-            return int(str(s.get("size", "0")), 16)
-        except ValueError:
-            return 0
-
-    # unpack target = UPX0-style section (RWX, after header) else first
-    # executable section after the header page
-    target, tsize = None, 0
-    for s in sections:
-        if s["start"] <= base:
-            continue
-        if "UPX0" in (s.get("owner") or "").upper():
-            target, tsize = s["start"], _sz(s) or 0x10000
-            break
-    if target is None:
-        execs = [s for s in sections if s["start"] > base
-                 and "x" in (s.get("perm") or "").lower()]
-        if execs:
-            target, tsize = execs[0]["start"], _sz(execs[0]) or 0x10000
-    if target is None:
-        target, tsize = base + text_offset, 0x10000
+    # packer-destination preference (see _pick_oep_target)
+    rcx = _parse_reg(_regs(xc), "rcx")
+    target, tsize, why = _pick_oep_target(sections, base, rcx, text_offset)
+    tsize = tsize or 0x10000
     evidence.append({"label": "oep_membp_target",
-                     "target": hex(target), "size": hex(tsize)})
+                     "target": hex(target), "size": hex(tsize),
+                     "why": why, "rcx": hex(rcx) if rcx else None,
+                     "sections": [{k: s[k] for k in ("start", "size", "perm", "name")}
+                                  for s in sections[:10]]})
 
     # memory-execute bp via raw debugger command (no HW-BP DR dependence)
     cmd = f"bpm {hex(target)}, {hex(tsize)}, x"
@@ -328,20 +413,16 @@ def oep_by_section(sample: str, xc: X64DbgClient | None = None,
                 "evidence": evidence}
 
     xc.run()
-    deadline = time.time() + max_wait_s
-    rip = None
-    while time.time() < deadline:
-        time.sleep(2)
-        st = _parse_state(xc.get_state())
-        if st.get("isRunning") == "false" and st.get("status") == "LOCKED":
-            rip = _rip(xc)
-            break
-        if st.get("isDebugging") == "false":
-            break
-    if rip is None:
-        return {"ok": False, "error": "never paused after membp run",
+    w = _await_pause(xc, max_wait_s)
+    if not w.get("paused"):
+        ended = bool(w.get("ended"))
+        return {"ok": False,
+                "error": ("session ended after membp run" if ended
+                          else "never paused after membp run"),
+                "session_ended": ended,
                 "diagnostics": _debugger_diagnostics(xc),
                 "evidence": evidence}
+    rip = w["rip"]
     evidence.append(_pause_evidence(xc, "oep_membp_hit", rip))
     return {"ok": True, "oep": rip, "module_base": hex(base),
             "evidence": evidence}
@@ -390,20 +471,16 @@ def oep_by_esp(sample: str, xc: X64DbgClient | None = None,
                 "evidence": evidence}
 
     xc.run()
-    deadline = time.time() + max_wait_s
-    rip = None
-    while time.time() < deadline:
-        time.sleep(2)
-        st = _parse_state(xc.get_state())
-        if st.get("isRunning") == "false" and st.get("status") == "LOCKED":
-            rip = _rip(xc)
-            break
-        if st.get("isDebugging") == "false":
-            break
-    if rip is None:
-        return {"ok": False, "error": "never paused after ESP-bp run",
+    w = _await_pause(xc, max_wait_s)
+    if not w.get("paused"):
+        ended = bool(w.get("ended"))
+        return {"ok": False,
+                "error": ("session ended after ESP-bp run" if ended
+                          else "never paused after ESP-bp run"),
+                "session_ended": ended,
                 "diagnostics": _debugger_diagnostics(xc),
                 "evidence": evidence}
+    rip = w["rip"]
     evidence.append(_pause_evidence(xc, "oep_esp_hit", rip))
     return {"ok": True, "oep": rip, "evidence": evidence,
             "module": _parse_state(xc.get_state()).get("currentModule")}
@@ -857,9 +934,12 @@ def write_bp_trace(sample: str, xc: X64DbgClient | None = None,
 
 
 def _pause_failure(r: dict) -> bool:
-    """True when the failure is pause/session-related (restart may fix it)."""
-    err = str((r or {}).get("error") or "").lower()
-    return any(k in err for k in ("never paused", "session ended", "timeout"))
+    """True ONLY on a stable session end (restart may fix a dead session).
+
+    Timeouts and transient no-target reads are NOT restart-worthy: the
+    restart-retry previously fired on a valid pause and killed the session.
+    """
+    return bool((r or {}).get("session_ended"))
 
 
 def _resolve_oep(sample: str, xc: X64DbgClient) -> dict:
@@ -886,22 +966,27 @@ def _resolve_oep(sample: str, xc: X64DbgClient) -> dict:
     return {"ok": False,
             "error": (f"OEP unresolved: section={r1.get('error')}; "
                       f"esp={r2.get('error')}"),
+            "session_ended": bool(r1.get("session_ended")
+                                  or r2.get("session_ended")),
             "attempts": attempts,
             "diagnostics": r2.get("diagnostics") or r1.get("diagnostics"),
             "evidence": ((r1.get("evidence") or []) + (r2.get("evidence") or []))}
 
 
 def _restart_debugger(xc: X64DbgClient) -> dict:
-    """Fresh x64dbg session (cold-start sessions can be broken).
+    """Fresh x64dbg session (only for a stable session end).
 
     Remote (control plane): x64dbg_manager.restart_mcp() via SSH.
     Local (on the VM): taskkill + ensure_mcp_local().
+    Diagnostics are captured BEFORE teardown — once the GUI is killed,
+    GetDebugState can only ever show NO_TARGET.
     """
-    info: dict = {}
+    info: dict = {"pre_restart_diagnostics": _debugger_diagnostics(xc)}
     try:
         from winre.mcp.x64dbg_manager import restart_mcp
         ok, meta = restart_mcp()
-        return {"ok": bool(ok), "method": "remote", **(meta or {})}
+        info.update({"ok": bool(ok), "method": "remote", **(meta or {})})
+        return info
     except Exception as e:
         info["remote_error"] = str(e)[:150]
     try:

@@ -24,9 +24,11 @@
     Usage (ON the FlareVM, after syncing the repo via ops\sync_to_flare.ps1):
       powershell -ExecutionPolicy Bypass -File C:\WinRE\install\setup-flarevm.ps1
       powershell -ExecutionPolicy Bypass -File C:\WinRE\install\setup-flarevm.ps1 -CheckMode   # dry-run, changes nothing
+      powershell -ExecutionPolicy Bypass -File C:\WinRE\install\setup-flarevm.ps1 -DisableUAC # reboot required
 #>
 param(
-    [switch]$CheckMode
+    [switch]$CheckMode,
+    [switch]$DisableUAC
 )
 
 $ErrorActionPreference = "Continue"
@@ -324,6 +326,31 @@ $batBody = "@echo off`r`n" +
 if ((Test-Path $statusBat) -and ((Get-Item $statusBat).Length -gt 100)) { Ok "desktop WinRE-Status.bat present" }
 else { Act "create $statusBat"; if (-not $CheckMode) { [System.IO.File]::WriteAllText($statusBat, $batBody, (New-Object System.Text.UTF8Encoding($true))) } }
 Info "double-click it anytime for the full VM-side PASS/FAIL battery"
+
+# --- 6b. UAC / debugger elevation ----------------------------------------------
+# x64dbg carries an admin manifest. Scheduled-task launches already use
+# RunLevel=Highest (no prompt); disabling UAC additionally makes MANUAL
+# launches silent. Lab VM only - never do this on a daily-driver host.
+Write-Host ""
+Write-Host "--- UAC / debugger elevation ---"
+$uacKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+$enableLua = (Get-ItemProperty -Path $uacKey -Name EnableLUA -ErrorAction SilentlyContinue).EnableLUA
+if ($DisableUAC) {
+    if ($enableLua -eq 0) { Ok "UAC already disabled (EnableLUA=0)" }
+    else {
+        Act "disable UAC (EnableLUA=0; ConsentPromptBehaviorAdmin=0; PromptOnSecureDesktop=0)"
+        if (-not $CheckMode) {
+            Set-ItemProperty -Path $uacKey -Name EnableLUA -Value 0 -Type DWord
+            Set-ItemProperty -Path $uacKey -Name ConsentPromptBehaviorAdmin -Value 0 -Type DWord
+            Set-ItemProperty -Path $uacKey -Name PromptOnSecureDesktop -Value 0 -Type DWord
+        }
+        Manual "REBOOT the VM so UAC-off takes effect, THEN take/refresh the snapshot."
+    }
+} elseif ($enableLua -eq 0) {
+    Ok "UAC disabled (EnableLUA=0) - x64dbg manual launches run elevated silently"
+} else {
+    Warn "UAC enabled: task-launched x64dbg is elevated with no prompt; manual launches will prompt. Re-run with -DisableUAC (then reboot) to silence."
+}
 
 # --- 7. verify -----------------------------------------------------------------
 Write-Host ""

@@ -67,13 +67,18 @@ def keep_debugger() -> bool:
 
 
 def _launch_on_vm(cfg: dict) -> bool:
-    """Start x64dbg on the VM via scheduled task (interactive session)."""
+    """Start x64dbg on the VM via scheduled task (interactive session).
+
+    RunLevel=Highest: the Task Scheduler service grants the elevated token
+    with NO UAC prompt (x64dbg requires admin; a manual launch would pop
+    UAC unless UAC is disabled).
+    """
     task = "WinRE-X64dbg-Once"
     ps = (
         f'powershell -NoProfile -Command "$a = New-ScheduledTaskAction -Execute '
         f'\'C:\\tools\\x64dbg\\release\\x64\\x64dbg.exe\'; '
-        f'$p = New-ScheduledTaskPrincipal -UserId \'FLARE-VM\' -LogonType Interactive '
-        f'-RunLevel Limited; $s = New-ScheduledTaskSettingsSet; '
+        f'$p = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive '
+        f'-RunLevel Highest; $s = New-ScheduledTaskSettingsSet; '
         f'Register-ScheduledTask -TaskName \'{task}\' -Action $a -Principal $p '
         f'-Settings $s -Force | Out-Null; Start-ScheduledTask -TaskName \'{task}\'"'
     )
@@ -84,14 +89,14 @@ def _launch_on_vm(cfg: dict) -> bool:
 def _launch_local() -> bool:
     """Start x64dbg via scheduled task from a process already ON the VM
     (orchestrator local mode) — no SSH hop. $env:USERNAME is the autologon
-    user; the task runs x64dbg in the interactive console session."""
+    user; RunLevel=Highest grants elevation without a UAC prompt."""
     import subprocess
     task = "WinRE-X64dbg-Once"
     ps = (
         "$a = New-ScheduledTaskAction -Execute "
         "'C:\\tools\\x64dbg\\release\\x64\\x64dbg.exe'; "
         "$p = New-ScheduledTaskPrincipal -UserId $env:USERNAME "
-        "-LogonType Interactive -RunLevel Limited; "
+        "-LogonType Interactive -RunLevel Highest; "
         "$s = New-ScheduledTaskSettingsSet; "
         f"Register-ScheduledTask -TaskName '{task}' -Action $a -Principal $p "
         f"-Settings $s -Force | Out-Null; Start-ScheduledTask -TaskName '{task}'"
