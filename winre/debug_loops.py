@@ -36,6 +36,21 @@ from typing import Any
 from winre.mcp import X64DbgClient
 
 
+def _win_basename(p: str) -> str:
+    """basename for WINDOWS paths, on any driver OS.
+
+    RevAI runs the driver on Linux: `os.path.basename("C:\\samples\\x.exe")`
+    does NOT split backslashes there, which silently turned the module name
+    into a full path-minus-extension ("Module ... not found").
+    """
+    return (p or "").replace("/", "\\").rsplit("\\", 1)[-1]
+
+
+def _win_stem(p: str) -> str:
+    name = _win_basename(p)
+    return name.rsplit(".", 1)[0] if "." in name else name
+
+
 def _state_text(st: dict) -> str:
     res = st.get("result") or {}
     if isinstance(res, dict) and res.get("content"):
@@ -240,7 +255,7 @@ def ep_break(sample: str, xc: X64DbgClient | None = None,
                 "evidence": evidence}
     time.sleep(2)
     try:
-        ep = _set_entry_bp(xc, os.path.splitext(os.path.basename(sample))[0])
+        ep = _set_entry_bp(xc, _win_stem(sample))
         evidence.append({"label": "ep_bp", **ep})
     except Exception as e:
         evidence.append({"label": "ep_bp_error", "error": str(e)[:120]})
@@ -378,10 +393,9 @@ def oep_by_section(sample: str, xc: X64DbgClient | None = None,
     The FIRST instruction fetch in unpacked code is the OEP by definition.
     No stub-walking, no HW-BP DR-register dependence, no stack assumptions.
     """
-    import os
     xc = xc or X64DbgClient()
     evidence: list[dict] = []
-    stem = os.path.splitext(os.path.basename(sample))[0]
+    stem = _win_stem(sample)
     r = ep_break(sample, xc)
     if not r.get("ok"):
         return r
@@ -425,6 +439,8 @@ def oep_by_section(sample: str, xc: X64DbgClient | None = None,
     rip = w["rip"]
     evidence.append(_pause_evidence(xc, "oep_membp_hit", rip))
     return {"ok": True, "oep": rip, "module_base": hex(base),
+            "target": {"start": hex(target), "size": hex(tsize),
+                       "why": why, "rcx": hex(rcx) if rcx else None},
             "evidence": evidence}
 
 
@@ -855,7 +871,6 @@ def write_bp_trace(sample: str, xc: X64DbgClient | None = None,
     current instruction (RIP) + owning module + thread — the memory SOURCE
     of the unpacker. Bounded: one breakpoint, one hit, then cleanup.
     """
-    import os
     xc = xc or X64DbgClient()
     evidence: list[dict] = []
     try:
@@ -867,8 +882,7 @@ def write_bp_trace(sample: str, xc: X64DbgClient | None = None,
     except Exception as e:
         return {"ok": False, "error": f"load: {e}", "evidence": evidence}
 
-    base, sections = _module_base_and_sections(xc, os.path.splitext(
-        os.path.basename(sample))[0])
+    base, sections = _module_base_and_sections(xc, _win_stem(sample))
     if not base:
         return {"ok": False, "error": "module base not found",
                 "evidence": evidence}
@@ -1002,6 +1016,35 @@ def _restart_debugger(xc: X64DbgClient) -> dict:
     return info
 
 
+def _resolve_module_name(xc: X64DbgClient, basename: str, stem: str) -> str:
+    """The module name x64dbg knows (usually WITH extension).
+
+    ListModules is the source of truth: exact basename match first, then a
+    unique prefix match on the stem. Falls back to the extension-suffixed
+    basename, then the bare stem (older sessions accepted that form).
+    """
+    try:
+        lm = xc.list_modules()
+        res = lm.get("result") or {}
+        text = ""
+        if isinstance(res.get("content"), list) and res["content"]:
+            text = str(res["content"][0].get("text", ""))
+        names: list[str] = []
+        for line in text.splitlines():
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) >= 3 and parts[2]:
+                names.append(parts[2])
+        for n in names:
+            if n.lower() == (basename or "").lower():
+                return n
+        cands = [n for n in names if stem and n.lower().startswith(stem.lower())]
+        if len(cands) == 1:
+            return cands[0]
+    except Exception:
+        pass
+    return basename or stem
+
+
 def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
                    dump_suffix: str = "_unpacked.exe") -> dict:
     """OEP -> DumpModule -> static re-analysis of the dump -> compare.
@@ -1040,6 +1083,7 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
                              "error": str(e)[:150]})
         return {"ok": False,
                 "error": f"OEP failed: {oep_res.get('error')}",
+                "oep_target": oep_res.get("target"),
                 "attempts": oep_res.get("attempts"),
                 "diagnostics": oep_res.get("diagnostics"),
                 "fallback_trace": trace.get("hit") if trace else None,
@@ -1049,25 +1093,37 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
     evidence.append({"label": "oep_found", "oep": hex(oep),
                      "method": oep_res.get("method", "oep_by_section")})
 
-    # 2. DumpModule from the live session (VM-side path)
-    stem = os.path.splitext(os.path.basename(sample))[0]
-    vm_dir = os.path.dirname(sample).replace("/", "\\") or r"C:\samples"
+    # 2. DumpModule from the live session (VM-side path). The module name
+    # must be resolved as x64dbg knows it (basename WITH extension; a bare
+    # stem can fail, and os.path.basename is UNRELIABLE on Linux drivers
+    # because it does not split Windows backslashes).
+    name = _win_basename(sample)
+    stem = _win_stem(sample)
+    vm_dir = sample.replace("/", "\\").rsplit("\\", 1)[0] or r"C:\samples"
     dump_path = f"{vm_dir}\\{stem}{dump_suffix}"
-    # module name as x64dbg knows it (stem usually matches ListModules entry)
-    try:
-        from winre.remote_driver import flare_cfg
-        host = flare_cfg()["host"]
-    except Exception:
-        host = None
-    _ = host  # xc already bound; kept for symmetry with other scenarios
-    dr = xc.dump_module(stem, dump_path)
-    if not dr.get("ok"):
-        # retry once: session may need a beat after the OEP pause
-        time.sleep(2)
-        dr = xc.dump_module(stem, dump_path)
+    module = _resolve_module_name(xc, name, stem)
+    evidence.append({"label": "dump_module_name", "module": module,
+                     "dump_path": dump_path})
+    attempts_names = [module]
+    if stem and stem != module:
+        attempts_names.append(stem)  # compatibility fallback form
+    dr: dict = {}
+    for cand in attempts_names:
+        dr = xc.dump_module(cand, dump_path)
+        if dr.get("ok"):
+            break
+        time.sleep(2)  # session may need a beat after the OEP pause
+        dr = xc.dump_module(cand, dump_path)
+        if dr.get("ok"):
+            break
     if not dr.get("ok"):
         return {"ok": False,
                 "error": f"DumpModule failed: {dr.get('error')}",
+                "oep": hex(oep),
+                "oep_target": oep_res.get("target"),
+                "method": oep_res.get("method", "oep_by_section"),
+                "attempts": oep_res.get("attempts"),
+                "diagnostics": _debugger_diagnostics(xc),
                 "evidence": evidence}
     evidence.append({"label": "dumped", "dump_path": dump_path,
                      "dump": dr.get("result")})
@@ -1085,12 +1141,18 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
                     "error": f"malcat re-analysis failed: "
                              f"orig={ro.get('error')} new={rn.get('error')}",
                     "oep": hex(oep), "dump_path": dump_path,
+                    "method": oep_res.get("method", "oep_by_section"),
+                    "attempts": oep_res.get("attempts"),
+                    "oep_target": oep_res.get("target"),
                     "evidence": evidence}
         orig = ro.get("result") or {}
         new = rn.get("result") or {}
     except Exception as e:
         return {"ok": False, "error": f"malcat re-analysis failed: {e}",
                 "oep": hex(oep), "dump_path": dump_path,
+                "method": oep_res.get("method", "oep_by_section"),
+                "attempts": oep_res.get("attempts"),
+                "oep_target": oep_res.get("target"),
                 "evidence": evidence}
 
     def _verdict(a: dict) -> str:
@@ -1117,6 +1179,7 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
               "comparison": comparison,
               "method": oep_res.get("method", "oep_by_section"),
               "attempts": oep_res.get("attempts"),
+              "oep_target": oep_res.get("target"),
               "evidence": evidence}
     if vacuous:
         # unpack mechanics succeeded (OEP + dump), but the compare proved
