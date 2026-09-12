@@ -773,6 +773,11 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
             "packed_signal": agent_result.get("packed_signal"),
             "unpack_prepass": agent_result.get("unpack_prepass"),
         }
+        # pull the unpack artifact into the pack (it lives on the VM otherwise)
+        art = _pull_unpack_artifact(cfg, pack,
+                                    agent_result.get("unpack_prepass"))
+        if art:
+            out["unpack_artifact"] = art
     except Exception as e:
         failures.append(f"agent:{e}")
         agent_result = None
@@ -818,6 +823,31 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
     return {"ok": True, "fallback": fallback, "failures": failures, "mcp": mcp,
             "agent": out.get("agent"), "llm_analysis": out.get("llm_analysis"),
             "x64dbg": out.get("x64dbg")}
+
+
+def _pull_unpack_artifact(cfg: dict, pack, prepass: dict | None) -> dict | None:
+    """Pull the x64dbg unpack dump from the VM into the pack (deep/x64dbg/).
+
+    The dump is produced on the VM (C:\\samples\\<stem>_unpacked.exe); without
+    this it would stay there and be lost to the evidence pack.
+    """
+    if not isinstance(prepass, dict) or not prepass.get("ok"):
+        return None
+    vm_path = str(prepass.get("dump_path") or "")
+    if not vm_path:
+        return None
+    name = vm_path.replace("/", "\\").rsplit("\\", 1)[-1]
+    if not name:
+        return None
+    dest_dir = pack.stages["deep"] / "x64dbg"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / name
+    try:
+        scp_from(cfg, vm_path, dest)
+        return {"vm": vm_path, "local": f"deep/x64dbg/{name}",
+                "bytes": dest.stat().st_size}
+    except Exception as e:
+        return {"vm": vm_path, "error": f"pull: {str(e)[:150]}"}
 
 
 def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,

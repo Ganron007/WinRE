@@ -386,6 +386,20 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
             "packed_signal": agent_result.get("packed_signal"),
             "unpack_prepass": agent_result.get("unpack_prepass"),
         }
+        # pull the unpack artifact into the pack (VM-local mode: plain copy)
+        _pa = (agent_result.get("unpack_prepass") or {})
+        if _pa.get("ok") and _pa.get("dump_path"):
+            try:
+                import shutil as _sh
+                _nm = str(_pa["dump_path"]).replace("/", "\\").rsplit("\\", 1)[-1]
+                _dd = pack.stages["deep"] / "x64dbg"
+                _dd.mkdir(parents=True, exist_ok=True)
+                _sh.copy2(_pa["dump_path"], _dd / _nm)
+                out["unpack_artifact"] = {"vm": _pa["dump_path"],
+                                          "local": f"deep/x64dbg/{_nm}",
+                                          "bytes": (_dd / _nm).stat().st_size}
+            except Exception as e:
+                out["unpack_artifact"] = {"error": f"copy: {str(e)[:150]}"}
     except Exception as e:
         failures.append(f"agent:{e}")
         agent_result = None

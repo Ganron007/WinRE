@@ -279,6 +279,21 @@ def ep_break(sample: str, xc: X64DbgClient | None = None,
 # ---------------------------------------------------------------------------
 # Scenario 2/3 — OEP via execute-BP on the original .text region (UPX etc)
 # ---------------------------------------------------------------------------
+def _module_range(xc: X64DbgClient, sample_stem: str) -> tuple[int | None, int]:
+    """(base, size) for the sample module from ListModules."""
+    try:
+        lm = xc.list_modules()
+        res = lm.get("result") or {}
+        if isinstance(res.get("content"), list) and res["content"]:
+            for line in str(res["content"][0].get("text", "")).splitlines():
+                parts = [p.strip() for p in line.split("|")]
+                if len(parts) >= 3 and sample_stem.lower() in parts[2].lower():
+                    return int(parts[0], 16), int(parts[1], 16)
+    except Exception:
+        pass
+    return None, 0
+
+
 def _module_base_and_sections(xc: X64DbgClient, sample_stem: str) -> tuple[int | None, list[dict]]:
     """Module base + sections, bounded by the module's ListModules range.
 
@@ -295,20 +310,7 @@ def _module_base_and_sections(xc: X64DbgClient, sample_stem: str) -> tuple[int |
     if isinstance(res.get("content"), list) and res.get("content"):
         text = res["content"][0].get("text", "")
 
-    # module base + size from ListModules (`0xBASE | 0xSIZE | name.exe`)
-    mod_base = mod_size = None
-    lm = xc.list_modules()
-    lres = lm.get("result") or {}
-    if isinstance(lres.get("content"), list) and lres.get("content"):
-        for line in str(lres["content"][0].get("text", "")).splitlines():
-            parts = [p.strip() for p in line.split("|")]
-            if len(parts) >= 3 and sample_stem.lower() in parts[2].lower():
-                try:
-                    mod_base = int(parts[0], 16)
-                    mod_size = int(parts[1], 16)
-                except ValueError:
-                    mod_base = mod_size = None
-                break
+    mod_base, mod_size = _module_range(xc, sample_stem)
 
     sections: list[dict] = []
     base = mod_base
@@ -335,6 +337,97 @@ def _module_base_and_sections(xc: X64DbgClient, sample_stem: str) -> tuple[int |
                          "va": start - base,
                          "owner": name})
     return base, sections
+
+
+def _in_range(addr: int, base: int | None, size: int | None) -> bool:
+    return bool(base is not None and size
+                and base <= addr < base + size)
+
+
+def _heap_region_for(xc: X64DbgClient, addr: int) -> dict | None:
+    """Committed memory-map region containing addr (heap-OEP destinations)."""
+    try:
+        mm = xc.get_memory_map()
+        res = mm.get("result") or {}
+        text = ""
+        if isinstance(res.get("content"), list) and res["content"]:
+            text = str(res["content"][0].get("text", ""))
+        for line in text.splitlines():
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 3:
+                continue
+            try:
+                start = int(parts[0], 16)
+                size = int(parts[1], 16)
+            except ValueError:
+                continue
+            if start <= addr < start + size:
+                name = parts[3].strip().strip('"') if len(parts) >= 4 else ""
+                return {"start": start, "size": size,
+                        "perm": parts[2].upper(), "name": name}
+    except Exception:
+        pass
+    return None
+
+
+def _dump_heap_region(xc: X64DbgClient, oep: int, out_path: str,
+                      max_bytes: int = 64 * 1024 * 1024) -> dict:
+    """Dump the committed region containing a heap OEP (DumpMemory).
+
+    Scylla-style IAT rebuild is not scriptable on this image (OllyDumpEx is
+    GUI-only) — the caller records an honest parse/rebuild flag instead.
+    """
+    reg = _heap_region_for(xc, oep)
+    if not reg:
+        return {"ok": False, "error": "no committed region at OEP"}
+    size = min(reg["size"], max_bytes)
+    r = xc.call("DumpMemory", {"address": hex(reg["start"]),
+                               "size": size, "filePath": out_path})
+    return {"ok": bool(r.get("ok")),
+            "region": {**reg, "start": hex(reg["start"]),
+                       "size": hex(reg["size"])},
+            "truncated": reg["size"] > size,
+            "error": r.get("error")}
+
+
+def _dump_parse_check(dump_path: str) -> dict:
+    """Best-effort pefile check of the dump (imports present? parses?)."""
+    try:
+        import pefile  # type: ignore
+        p = pefile.PE(dump_path, fast_load=True)
+        p.parse_data_directories(directories=[
+            pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
+        return {"parses": True,
+                "imports": len(getattr(p, "DIRECTORY_ENTRY_IMPORT", []) or []),
+                "machine": hex(p.FILE_HEADER.Machine)}
+    except Exception as e:
+        local_err = str(e)[:120]
+    try:
+        from winre.remote_driver import flare_cfg, ssh_ps
+        cfg = flare_cfg()
+        if not cfg.get("host"):
+            return {"parses": False, "error": f"local: {local_err}"}
+        ps = (
+            "$c = @'\n"
+            "import pefile, json\n"
+            f"p = pefile.PE(r'{dump_path}', fast_load=True)\n"
+            "p.parse_data_directories(directories="
+            "[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_IMPORT']])\n"
+            "print(json.dumps({'imports': len(getattr(p,"
+            "'DIRECTORY_ENTRY_IMPORT', []) or []), "
+            "'machine': hex(p.FILE_HEADER.Machine)}))\n"
+            "'@\n"
+            "& C:\\Python313\\python.exe -c $c"
+        )
+        r = ssh_ps(cfg, ps, timeout=60)
+        lines = [ln for ln in (r.stdout or "").strip().splitlines() if ln.strip()]
+        if lines:
+            import json as _json
+            return {"parses": True, **_json.loads(lines[-1])}
+        return {"parses": False, "error": f"remote: {(r.stderr or '')[:120]}"}
+    except Exception as e:
+        return {"parses": False,
+                "error": f"local={local_err}; remote={str(e)[:120]}"}
 
 
 def _pick_oep_target(sections: list[dict], base: int, rcx: int | None,
@@ -1093,40 +1186,84 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
     evidence.append({"label": "oep_found", "oep": hex(oep),
                      "method": oep_res.get("method", "oep_by_section")})
 
-    # 2. DumpModule from the live session (VM-side path). The module name
-    # must be resolved as x64dbg knows it (basename WITH extension; a bare
-    # stem can fail, and os.path.basename is UNRELIABLE on Linux drivers
-    # because it does not split Windows backslashes).
+    # 2. Dump the OEP artifact. Gate on OEP location: a module-image dump is
+    # only valid when the OEP lies INSIDE the module (ListModules range); a
+    # heap-OEP (stub unpacked its payload into an allocated region) must dump
+    # that region instead — DumpModule would capture the still-packed image.
     name = _win_basename(sample)
     stem = _win_stem(sample)
     vm_dir = sample.replace("/", "\\").rsplit("\\", 1)[0] or r"C:\samples"
     dump_path = f"{vm_dir}\\{stem}{dump_suffix}"
-    module = _resolve_module_name(xc, name, stem)
-    evidence.append({"label": "dump_module_name", "module": module,
-                     "dump_path": dump_path})
-    attempts_names = [module]
-    if stem and stem != module:
-        attempts_names.append(stem)  # compatibility fallback form
+    base, mod_size = _module_range(xc, stem)
+    oep_in_module = _in_range(oep, base, mod_size)
+    evidence.append({"label": "oep_location", "oep": hex(oep),
+                     "module_base": hex(base) if base is not None else None,
+                     "module_size": hex(mod_size or 0),
+                     "in_module": oep_in_module})
+    dump_kind = "module"
+    heap_info: dict | None = None
     dr: dict = {}
-    for cand in attempts_names:
-        dr = xc.dump_module(cand, dump_path)
-        if dr.get("ok"):
-            break
-        time.sleep(2)  # session may need a beat after the OEP pause
-        dr = xc.dump_module(cand, dump_path)
-        if dr.get("ok"):
-            break
-    if not dr.get("ok"):
-        return {"ok": False,
-                "error": f"DumpModule failed: {dr.get('error')}",
-                "oep": hex(oep),
-                "oep_target": oep_res.get("target"),
-                "method": oep_res.get("method", "oep_by_section"),
-                "attempts": oep_res.get("attempts"),
-                "diagnostics": _debugger_diagnostics(xc),
-                "evidence": evidence}
+    if not oep_in_module:
+        # heap-OEP: dump the committed region containing the OEP
+        heap_info = _dump_heap_region(xc, oep, dump_path)
+        evidence.append({"label": "heap_dump",
+                         **{k: heap_info.get(k) for k in
+                            ("ok", "region", "truncated", "error")}})
+        if not heap_info.get("ok"):
+            return {"ok": False,
+                    "error": f"heap DumpMemory failed: {heap_info.get('error')}",
+                    "oep": hex(oep), "oep_target": oep_res.get("target"),
+                    "dump_kind": "heap", "heap_region": heap_info.get("region"),
+                    "method": oep_res.get("method", "oep_by_section"),
+                    "attempts": oep_res.get("attempts"),
+                    "diagnostics": _debugger_diagnostics(xc),
+                    "evidence": evidence}
+        dump_kind = "heap"
+    else:
+        # module image: resolve the name as x64dbg knows it (basename WITH
+        # extension; a bare stem can fail, and os.path.basename is
+        # UNRELIABLE on Linux drivers — it does not split backslashes).
+        module = _resolve_module_name(xc, name, stem)
+        evidence.append({"label": "dump_module_name", "module": module,
+                         "dump_path": dump_path})
+        attempts_names = [module]
+        if stem and stem != module:
+            attempts_names.append(stem)  # compatibility fallback form
+        dr: dict = {}
+        for cand in attempts_names:
+            dr = xc.dump_module(cand, dump_path)
+            if dr.get("ok"):
+                break
+            time.sleep(2)  # session may need a beat after the OEP pause
+            dr = xc.dump_module(cand, dump_path)
+            if dr.get("ok"):
+                break
+        if not dr.get("ok"):
+            return {"ok": False,
+                    "error": f"DumpModule failed: {dr.get('error')}",
+                    "oep": hex(oep),
+                    "oep_target": oep_res.get("target"),
+                    "dump_kind": "module",
+                    "method": oep_res.get("method", "oep_by_section"),
+                    "attempts": oep_res.get("attempts"),
+                    "diagnostics": _debugger_diagnostics(xc),
+                    "evidence": evidence}
     evidence.append({"label": "dumped", "dump_path": dump_path,
-                     "dump": dr.get("result")})
+                     "kind": dump_kind,
+                     "dump": (dr.get("result") if dump_kind == "module"
+                              else (heap_info or {}).get("region"))})
+
+    # dump sanity: does the image parse, and are imports present? A Scylla
+    # rebuild is NOT scriptable on this image (OllyDumpEx is GUI-only), so
+    # record it honestly instead of claiming a clean artifact.
+    dump_parse = _dump_parse_check(dump_path)
+    rebuild_hint = None
+    if not dump_parse.get("parses") or not dump_parse.get("imports"):
+        rebuild_hint = ("imports missing/unparsable — Scylla-style rebuild "
+                        "required (OllyDumpEx plugin on the VM console); "
+                        "static re-analysis of this dump is degraded")
+    evidence.append({"label": "dump_parse", **dump_parse,
+                     "rebuild_hint": rebuild_hint})
 
     # 3+4. static re-analysis of BOTH images + compare (Malcat MCP).
     # Malcat MCP binds localhost on the VM — the SSH-exec bridge is the
@@ -1141,6 +1278,8 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
                     "error": f"malcat re-analysis failed: "
                              f"orig={ro.get('error')} new={rn.get('error')}",
                     "oep": hex(oep), "dump_path": dump_path,
+                    "dump_kind": dump_kind, "dump_parse": dump_parse,
+                    "rebuild_hint": rebuild_hint,
                     "method": oep_res.get("method", "oep_by_section"),
                     "attempts": oep_res.get("attempts"),
                     "oep_target": oep_res.get("target"),
@@ -1150,6 +1289,8 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
     except Exception as e:
         return {"ok": False, "error": f"malcat re-analysis failed: {e}",
                 "oep": hex(oep), "dump_path": dump_path,
+                "dump_kind": dump_kind, "dump_parse": dump_parse,
+                "rebuild_hint": rebuild_hint,
                 "method": oep_res.get("method", "oep_by_section"),
                 "attempts": oep_res.get("attempts"),
                 "oep_target": oep_res.get("target"),
@@ -1162,30 +1303,48 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
         return str(v or "unknown")
 
     orig_v, new_v = _verdict(orig), _verdict(new)
-    # an "unknown == unknown" match is vacuous - both analyses said nothing.
-    # The compare only corroborates when at least one side produced a real
-    # verdict and the structured results are non-empty.
-    vacuous = (orig_v == "unknown" and new_v == "unknown")
+    # Conclusive only with a known verdict or a positive anomaly delta; two
+    # "unknown" sides (or no new anomalies) is an inconclusive compare and
+    # must not be presented as a validated artifact.
+    known = {"malicious", "benign", "suspicious"}
+    orig_an = len(orig.get("anomalies") or [])
+    new_an = len(new.get("anomalies") or [])
+    conclusive = (orig_v in known or new_v in known
+                  or new_an > orig_an)
     comparison = {
         "original_verdict": orig_v,
         "unpacked_verdict": new_v,
-        "verdicts_match": (orig_v == new_v) and not vacuous,
-        "vacuous_compare": vacuous,
-        "original_anomalies": len(orig.get("anomalies") or []),
-        "unpacked_anomalies": len(new.get("anomalies") or []),
+        "verdicts_match": (orig_v == new_v) and (orig_v in known),
+        "vacuous_compare": (orig_v == "unknown" and new_v == "unknown"),
+        "comparison_inconclusive": not conclusive,
+        "original_anomalies": orig_an,
+        "unpacked_anomalies": new_an,
+        "anomaly_delta": new_an - orig_an,
     }
     evidence.append({"label": "compare", **comparison})
     common = {"ok": True, "oep": hex(oep), "dump_path": dump_path,
+              "dump_kind": dump_kind,
+              "heap_region": (heap_info or {}).get("region"),
+              "dump_parse": dump_parse,
+              "rebuild_hint": rebuild_hint,
               "comparison": comparison,
+              "artifact": {"dump_path": dump_path,
+                           "kind": dump_kind,
+                           "comparison_conclusive": conclusive,
+                           "dump_parses": bool(dump_parse.get("parses")),
+                           "imports": dump_parse.get("imports"),
+                           "rebuild_hint": rebuild_hint},
               "method": oep_res.get("method", "oep_by_section"),
               "attempts": oep_res.get("attempts"),
               "oep_target": oep_res.get("target"),
               "evidence": evidence}
-    if vacuous:
-        # unpack mechanics succeeded (OEP + dump), but the compare proved
-        # nothing - record it honestly so the agent can't cite corroboration
-        return {**common,
-                "note": "unpack ok; compare vacuous (both analyses empty/unknown)"}
+    notes: list[str] = []
+    if not conclusive:
+        notes.append("compare inconclusive (no known verdict / anomaly delta)")
+    if rebuild_hint:
+        notes.append(rebuild_hint)
+    if notes:
+        return {**common, "note": "; ".join(notes)}
     return common
 
 
