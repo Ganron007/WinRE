@@ -218,20 +218,40 @@ _YARA_GENERIC_LITERALS = {
     "software", "software\\", "oftware", "oftware\\", "microsoft",
     "unknown exception", "bad allocation", "out of memory",
     "invalid parameter", "assertion failed", "abnormal program termination",
+    # CRT / ATL boilerplate (family rules generated from MSVC apps pull these)
+    "unable to initialize critical section",
+    "catlbasemodule", "catlexception", "atlthrow", "atlbase", "atlcom",
+    "atlwin", "pure virtual function call", "vector too long",
+    "string too long", "ios_base::badbit set",
+    "microsoft visual c++ runtime library", "runtime error!",
+    "invalid parameter passed to c runtime function",
+    "this application has requested the runtime to terminate it in an unusual way.",
+    "terminate called after throwing an instance of",
+    "corexitprocess", "corbindtoruntimeex", "corbindtoruntime",
+    "corruntimehost", "clrexception",
+    "isolationaware function called after isolationawarecleanup",
 }
 _YARA_GENERIC_PREFIXES = (
     "<?xml", "<assembly", "<dependency", "<dependentassembly", "<trustinfo",
     "<compatibility", "<requestedexecutionlevel", "<description",
     "version=", "type=", "manifestversion=",
+    "software\\microsoft", "error : ", "error: ", "unable to ",
+    "invalid parameter passed to ", "isolationaware ",
+    # Windows component paths / registry hives (universal, not family-level)
+    "\\internet explorer", "hardware\\", "system\\currentcontrolset",
+    "software\\",
+    # XML/manifest attribute assignments (every modern PE manifest has them)
+    'name=\\"', 'id=\\"', 'classid=\\"', 'progid=\\"', 'path=\\"',
+    'file=\\"', 'key=\\"',
 )
-_YARA_GENERIC_DLLS = {
-    "kernel32.dll", "user32.dll", "advapi32.dll", "shell32.dll", "ole32.dll",
-    "oleaut32.dll", "ntdll.dll", "msvcrt.dll", "gdi32.dll", "ws2_32.dll",
-    "wininet.dll", "urlmon.dll", "winhttp.dll", "psapi.dll", "shlwapi.dll",
-    "comctl32.dll", "comdlg32.dll", "version.dll", "crypt32.dll",
-    "bcrypt.dll", "sechost.dll", "rpcrt4.dll", "ucrtbase.dll",
-    "vcruntime140.dll", "msvcp140.dll", "imm32.dll", "mpr.dll",
-    "netapi32.dll", "wtsapi32.dll", "dnsapi.dll", "iphlpapi.dll",
+# DLL checks are STEM-based: bare or wide forms ("advapi32", "ADVAPI32") must
+# classify like "advapi32.dll" — matching only full names let them slip.
+_YARA_GENERIC_DLL_STEMS = {
+    "kernel32", "user32", "advapi32", "shell32", "ole32", "oleaut32",
+    "ntdll", "msvcrt", "gdi32", "ws2_32", "wininet", "urlmon", "winhttp",
+    "psapi", "shlwapi", "comctl32", "comdlg32", "version", "crypt32",
+    "bcrypt", "sechost", "rpcrt4", "ucrtbase", "vcruntime140", "msvcp140",
+    "imm32", "mpr", "netapi32", "wtsapi32", "dnsapi", "iphlpapi", "win32u",
 }
 # CamelCase WinAPI-shaped identifiers (verb + noun) are behavioral, not
 # family-level evidence. Family markers (mutexes, config keys, tags) rarely
@@ -244,9 +264,26 @@ _YARA_API_SHAPE = re.compile(
     r"Adjust|Change|Move|Copy|Compare|Convert|Format|Message|Dialog|Show|"
     r"Update|Draw|Paint|Peek|Translate|Dispatch|End|Begin|Destroy|Replace|"
     r"Enable|Disable|Insert|Append|Cancel|Release|Reset|Select|Parse|Print|"
-    r"Refresh|Validate|Verify|Call|Commit|Flush|Map|Unmap|Track)[A-Za-z0-9_]{0,30}$")
+    r"Refresh|Validate|Verify|Call|Commit|Flush|Map|Unmap|Track|Expand|"
+    r"Interlocked|Try|Acquire|Unlock|Exchange|Increment|Decrement|Signal|"
+    r"Setup|Teardown|Resolve|Suspend|Resume|Restore|Save|Submit|Encode|"
+    r"Decode|Duplicate|Attach|Detach|Notify|Kill|Pt|Reply|Post|Enqueue|"
+    r"Dequeue|Def|Broadcast)[A-Za-z0-9_]{0,30}$")
 _YARA_SECTION_RE = re.compile(r"^\.[a-z0-9_$]+$", re.IGNORECASE)
 _YARA_HEX_ESC_RE = re.compile(r"\\x([0-9a-fA-F]{2})")
+
+
+def _is_generic_dll(low: str) -> bool:
+    """Bare, suffixed, or path-prefixed DLL names — stem match.
+
+    "advapi32", "ADVAPI32.dll", "System32\\advapi32.dll" all classify.
+    """
+    tail = low.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+    for cand in (low, tail):
+        stem = cand.removesuffix(".dll").removesuffix(".lib")
+        if stem in _YARA_GENERIC_DLL_STEMS:
+            return True
+    return False
 
 
 def _generic_literal(text: str) -> bool:
@@ -256,12 +293,15 @@ def _generic_literal(text: str) -> bool:
     wide API names and header bytes classify correctly.
     """
     s = _YARA_HEX_ESC_RE.sub(lambda m: chr(int(m.group(1), 16)), text or "")
+    s = s.replace("\\\\", "\\")  # yara-x escapes backslash once, JSON again
     s = s.replace("\x00", "").strip()
     if not s:
         return True
     low = s.lower()
-    if low in _YARA_GENERIC_LITERALS or low in _YARA_GENERIC_DLLS:
+    if low in _YARA_GENERIC_LITERALS or _is_generic_dll(low):
         return True
+    if s.startswith("?"):
+        return True  # MSVC C++ mangled symbol (?Fn@@YAXH@Z, ?AVCAtlException@@)
     if low.startswith(_YARA_GENERIC_PREFIXES):
         return True  # XML/manifest boilerplate present in every modern PE
     if low.startswith("mz") or low.startswith("pe") or _YARA_SECTION_RE.match(low):
@@ -280,8 +320,10 @@ def _generic_literal(text: str) -> bool:
     longest = max((len(r) for r in re.findall(r"[A-Za-z0-9]+", s)), default=0)
     if longest < 7 and len(s) < 24:
         return True  # symbol soup / compiler opcode bytes ("L$ SUVWH")
-    if not re.search(r"[a-z]", s) and re.search(r"[\$^\]]", s):
-        return True  # uppercase opcode soup with symbols ("\\$ UVWAVAWH")
+    if not re.search(r"[a-z]", s) and re.search(r"[\$^\]@]", s):
+        return True  # uppercase opcode soup with symbols ("\\$ UVWAVAWH", "@WATAUAVAWH")
+    if len(s) < 20 and re.search(r"[A-Z]{5,}", s) and re.search(r"[a-z]", s):
+        return True  # opcode run + stray lowercase ("x ATAUAVH")
     if _YARA_API_SHAPE.match(s) and len(s) < 48:
         return True  # CamelCase WinAPI-shaped identifier
     return False
