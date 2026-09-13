@@ -36,7 +36,7 @@ the air-gapped VM.
 | x64dbg + MCP plugin `[base]`+`[setup]` | `C:\Tools\x64dbg` (+ `release\x64\plugins\x64dbg-MCP-Server.dp64`) | — | x64dbg OEP/dump/write-BP loops | agentic-dbg + debug loops unavailable |
 | FakeNet-NG `[base]` | `C:\Tools\fakenet\fakenet3.5\fakenet.exe` | — | network sink, pcaps | detonation network evidence absent |
 | Procmon `[base]` | `C:\Tools\sysinternals\Procmon64.exe` | — | file/reg/process capture | persistence/behavior analysis absent |
-| pe-sieve `[base]` | `C:\ProgramData\chocolatey\bin\pe-sieve.exe` | — | injection/hollowing dumps + suspended-process monitor | memory dumps partial |
+| pe-sieve `[base]` | `C:\ProgramData\chocolatey\bin\pe-sieve.exe` | `WINRE_PESIEVE` | injection/hollowing dumps + suspended-process monitor + **Scylla-class IAT rebuild** (`/imp 1..5 /dmode 3`) for unpack dumps at OEP | memory dumps partial; unpack dump falls back to savedata `DumpModule` |
 | hollows_hunter `[base]` | `C:\Tools\hollows_hunter\hollows_hunter.exe` | — | hollowing detection | best-effort skip |
 | Frida `[base]` | pip module (Python 3.13) | — | API trace | frida trace absent |
 | procdump `[base]` | `C:\Tools\sysinternals\Procdump64.exe` | — | post-mortem memory harvest | harvest skips; DFIR-Nexus gets other artifacts |

@@ -98,10 +98,12 @@ bare hash (intake records the policy note).
 
 ## Case pack (DFIR-Nexus ingest)
 
-After every dynamic run the section pack gets a 7z with dynamic logs +
-static context + `case_manifest.json` (file→sha256) + `case_timeline.json`
-(incident-style ordered events). DFIR-Nexus consumes this for host+memory+
-behavior correlation; full-image memory analysis is DFIR-Nexus-owned.
+After a dynamic run — or a deep unpack (the pack accepts deep-only sections
+too) — the section pack gets a 7z with dynamic logs, static context, the
+PE-valid unpack dump (`deep/x64dbg/`), `case_manifest.json` (file→sha256) +
+`case_timeline.json` (incident-style ordered events). DFIR-Nexus consumes
+this for host+memory+behavior correlation; full-image memory analysis is
+DFIR-Nexus-owned.
 
 ```powershell
 python -m winre.casepack <sha256> [--mode static|agentic]

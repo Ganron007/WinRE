@@ -66,7 +66,7 @@ Start from a **Windows 10/11 VM on an isolated/host-only network**.
 | **x64dbg** + MCP plugin | `C:\Tools\x64dbg` | x64dbg releases; plugin built by setup from `integrations/x64dbg-mcp-server` |
 | **FakeNet-NG** 3.5 | `C:\Tools\fakenet\fakenet3.5\fakenet.exe` | FlareVM base / mandiant releases |
 | **Procmon** (Sysinternals) | `C:\Tools\sysinternals\Procmon64.exe` | FlareVM base |
-| **pe-sieve** | `C:\ProgramData\chocolatey\bin\pe-sieve.exe` | FlareVM base / hasherezade releases |
+| **pe-sieve** | `C:\ProgramData\chocolatey\bin\pe-sieve.exe` | FlareVM base / hasherezade releases (also does Scylla-class IAT rebuild for unpack dumps: `/imp 1..5 /dmode 3`) |
 | **hollows_hunter** | `C:\Tools\hollows_hunter\hollows_hunter.exe` | FlareVM base / hasherezade releases |
 | **Python** 3.13 | `C:\Python313` | FlareVM base; deps auto-installed by setup (`frida`, `flask`, `pefile`, `psutil`, `oletools`, `pypdf`, `dnfile`, `z3`, `angr`, `speakeasy`, `setuptools<81`) |
 | **capa** + mandiant rules | `C:\Tools\capa\capa.exe` + `C:\Tools\capa-rules` | FlareVM base / pip fallback auto-used |

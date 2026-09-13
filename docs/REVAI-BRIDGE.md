@@ -220,3 +220,20 @@ python3 -m winre.pipeline <local-sample-path> --driver remote --mode agentic --d
 | Deep source `deterministic_fallback` with a key configured | endpoint returned an error or timed out | test §7; check provider status |
 | RevAI works, WinRE agentic falls back | RevAI config not translated | apply §5 at the spawn site |
 | Keys present on the VM | leftover from testing phase | delete `C:\WinRE\.env` (and from the snapshot, then re-snapshot) |
+
+## 9. Artifacts RevAI consumes
+
+Two WinRE outputs are part of the contract:
+
+- **Unpack artifact (PE-valid):** `deep/x64dbg/<stem>_pesieve_unpacked.exe` in
+  the mode-section pack, and inside the DFIR-Nexus casepack under
+  `deep/x64dbg/`. Produced by **pe-sieve `/imp`** at the unpack OEP
+  (ImportTable rebuilt from the in-memory IATs — parse it with normal PE
+  tooling). `deep.json → agent.unpack_prepass.artifact` records
+  `source` (`pesieve_imp` | `dumpex_savedata` | `dumpmemory_heap`),
+  `imports`, `dump_parses`, `rebuild_hint`, `comparison_conclusive`.
+- **Detonation window:** `dynamic/META.json → window
+  {requested_s, effective_s, adaptive, idle_stop_s, stop_reason}` (also in
+  `META.job.json`; the raw trace-side record is
+  `frida_trace.jsonl.run.json`). Cite it when reporting dynamic evidence so
+  a short effective window is not over-read (delayed C2 may fall outside it).

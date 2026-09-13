@@ -60,6 +60,15 @@ LLM: SetBreakpoint target=0x401000 → run → WaitForPause (30s) → GetAllRegi
 
 WinRE `winre/mcp/x64dbg_client.py` wraps this HTTP — see `docs/internal/ARCHITECTURE.md:4` transport.
 
+> **WinRE pipeline note (debug loops):** the deep unpack prepass runs
+> `oep_by_section → oep_by_esp` (explicit entry BP, stable-pause gate,
+> fresh-session retry, heap-OEP gate) and produces the artifact with
+> **pe-sieve `/imp 1 /dmode 3`** at the paused OEP — ImportTable rebuilt from
+> the in-memory IATs, so the dump parses with imports (savedata `DumpModule`
+> stays the fallback). The dynamic OEP/dump step
+> (`orchestrator._x64dbg_oep_dump`) still uses `DumpModule` into
+> `dynamic/x64dbg/dump/`.
+
 ## 5. Limits
 
 - `TraceInto` max 100 instr (`tools.zig:381`), `ReadMemory` 4096 (`tools.zig:997`).

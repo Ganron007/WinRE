@@ -165,6 +165,7 @@ def build_items(dyn: Path, sha: str, meta: dict[str, Any]) -> dict[str, Any]:
         "sha256": sha,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "platform": platform,
+        "window": meta.get("window"),
         "collected": collected,
         "pcaps": [p.name for p in pcaps],
         "memory_present": has_memory,
@@ -188,6 +189,12 @@ def render_md(data: dict[str, Any]) -> str:
         "## Already collected (do not redo)",
         "",
     ]
+    _w = data.get("window") or {}
+    if isinstance(_w, dict) and _w:
+        lines.insert(4, (
+            f"_Detonation window: **{_w.get('effective_s')}s effective** "
+            f"(requested {_w.get('requested_s')}s, stop={_w.get('stop_reason')}, "
+            f"adaptive={_w.get('adaptive')})_"))
     if data.get("collected"):
         for c in data["collected"]:
             lines.append(f"- `{c['path']}` — {c['label']}")

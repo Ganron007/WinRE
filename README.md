@@ -188,7 +188,6 @@ Per-feature docs: `docs/PIPELINE.md` · `docs/SQL-GHIDRA.md` · `docs/SQL-IDA.md
 | **LLM endpoint on control plane** | Point `WINRE_LLM_BASE_URL` at a local model / API so deep-dive reports are `llm_judge` not fallback |
 | **Persistence forensics pass** | Registry Run keys / services diff in `process_snapshot_*` vs clean baseline, surfaced in `ANALYST-NEXT.md` |
 | **RevAI evidence backlink** | URL/`load_dynamic_pack()` links in published RevAI reports pointing at the WinRE artifact pack |
-| **Packer taxonomy** | pe-sieve + Malcat unpack results fused into a `packer-summary.json` the Linux agent can cite |
 
 ---
 
