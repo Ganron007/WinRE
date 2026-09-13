@@ -319,7 +319,7 @@ def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict) -> dict:
 REMOTE_DYNAMIC_HELPER = r'''
 """Remote dynamic helper — runs orchestrator --mode local on the VM.
 
-Usage: python _remote_dynamic_helper.py <sha> <sample_path> <max_seconds> [--pesieve] [--section=agentic|static]
+Usage: python _remote_dynamic_helper.py <sha> <sample_path> <max_seconds> [--pesieve] [--adaptive] [--idle-stop=N] [--section=agentic|static]
 Writes the session file, sets env, runs orchestrator, prints META.json tail.
 --section pins detonation into logs/<sha>/<section>/dynamic (mode-sectioned
 packs); default agentic for legacy callers.
@@ -334,10 +334,17 @@ sha = sys.argv[1]
 sample = sys.argv[2]
 max_seconds = int(sys.argv[3])
 pesieve = "--pesieve" in sys.argv[4:]
+adaptive = "--adaptive" in sys.argv[4:]
+idle_stop = 10
 section = "agentic"
 for _a in sys.argv[4:]:
     if _a.startswith("--section=") and _a.split("=", 1)[1] in ("agentic", "static"):
         section = _a.split("=", 1)[1]
+    if _a.startswith("--idle-stop="):
+        try:
+            idle_stop = int(_a.split("=", 1)[1])
+        except ValueError:
+            idle_stop = 10
 
 pipeline = Path(__file__).resolve().parents[1]
 sessions = pipeline / "sessions"
@@ -359,6 +366,8 @@ cmd = [sys.executable, str(pipeline / "winre" / "orchestrator.py"), sha,
        "--mode", "local", "--max-seconds", str(max_seconds)]
 if pesieve:
     cmd.append("--pesieve")
+if adaptive:
+    cmd += ["--adaptive", "--idle-stop-seconds", str(idle_stop)]
 try:
     r = subprocess.run(cmd, capture_output=True, text=True, env=env,
                        timeout=int(max_seconds) + 600,
@@ -371,7 +380,9 @@ except subprocess.TimeoutExpired:
 
 
 def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
-                   max_seconds: int, enable_pesieve: bool) -> dict:
+                   max_seconds: int, enable_pesieve: bool,
+                   adaptive: bool = False,
+                   idle_stop_seconds: int = 10) -> dict:
     """SSH: run orchestrator --mode local on the VM via helper, scp pack back."""
     t0 = time.time()
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -399,6 +410,8 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
            f'{cfg["remote_pipeline"]}\\winre\\_remote_dynamic_helper.py '
            f'{sha} "{remote_sample}" {int(max_seconds)}'
            f'{" --pesieve" if enable_pesieve else ""}'
+           f'{" --adaptive" if adaptive else ""}'
+           f' --idle-stop={int(idle_stop_seconds)}'
            f' --section={pack.mode or "agentic"} 2>&1"')
     r = ssh_run(cfg, cmd, timeout=int(max_seconds) + 700)
     # honest RC check: the helper prints RC=<code> as its last line
@@ -854,7 +867,9 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
                         enable_pesieve: bool = False, enable_dynamic: bool = False,
                         dry_llm: bool = False,
                         enable_agentic_dbg: bool = False,
-                        mode: str = "agentic") -> dict:
+                        mode: str = "agentic",
+                        adaptive: bool = False,
+                        idle_stop_seconds: int = 10) -> dict:
     """Control-plane pipeline driver: SSH/HTTP to the VM + local LLM + local audit.
 
     DEFAULT = static-only (quick + deep + yara + report + audit). Dynamic is
@@ -893,7 +908,9 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
     # ---- DYNAMIC phase (segregated, opt-in, runs LAST after static) ----
     if enable_dynamic:
         results["dynamic"] = remote_dynamic(sample.name, sha, pack, cfg,
-                                            max_seconds, enable_pesieve)
+                                            max_seconds, enable_pesieve,
+                                            adaptive=adaptive,
+                                            idle_stop_seconds=idle_stop_seconds)
         # DFIR-Nexus ingest pack: dynamic logs + static context in one 7z
         try:
             from .casepack import build_case

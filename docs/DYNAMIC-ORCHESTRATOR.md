@@ -12,7 +12,10 @@ host: scp sample → C:\samples\foo.exe + C:\WinRE\orchestrator.py --file C:\sam
      ├─ start FakeNet-NG → C:\WinRE\logs\<sha>\network_raw\fakenet.log
      ├─ start Procmon → procmon.exe /BackingFile C:\WinRE\logs\<sha>\procmon.pcap
      ├─ spawn frida_api_trace.py --target C:\samples\foo.exe --apis <hooklist> → frida_trace.jsonl
-     ├─ wait --max-seconds (default 45), optional PE-sieve mid-run if --pesieve
+     ├─ wait --max-seconds (default 45; with --adaptive this is the CAP and
+     │   the Frida trace stops early after --idle-stop-seconds without new
+     │   events — effective window recorded in META.window), optional
+     │   PE-sieve mid-run if --pesieve
      ├─ stop Procmon → procmon.csv, tshark enrich → procmon_summary.json + network_intel.json
      ├─ post-analysis (KB 2026-09-07): procmon_post (persistence catalog +
      │   behavior_timeline.csv + spoof suspects), pcap_beacon (cadence/UA/
@@ -36,6 +39,8 @@ ELF on Flare is rare — `elf_dynamic_job.sh` handles `readelf/objdump` + local 
 ```powershell
 python C:\WinRE\winre\orchestrator.py C:\samples\foo.exe --max-seconds 45
 python C:\WinRE\winre\orchestrator.py C:\samples\foo.exe --max-seconds 60 --pesieve
+# adaptive window: 150s cap, stop 10s after the last Frida event
+python C:\WinRE\winre\orchestrator.py C:\samples\foo.exe --max-seconds 150 --adaptive --idle-stop-seconds 10
 python C:\WinRE\winre\orchestrator.py C:\samples\foo.exe --skip  # writes META skipped
 
 # local mode (run on Flare, no SSH hop — preferred, Phase 7)

@@ -28,6 +28,7 @@ record of every pause (rip, regs, disasm).
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -1138,6 +1139,105 @@ def _resolve_module_name(xc: X64DbgClient, basename: str, stem: str) -> str:
     return basename or stem
 
 
+def _pesieve_imp_dump(xc: X64DbgClient, stem: str, pid, copy_to: str) -> dict:
+    """pe-sieve import-recovery dump of the live (paused) process.
+
+    pe-sieve /imp rebuilds the ImportTable from the in-memory IATs
+    (Scylla class): verified 291 imports vs 0 for the savedata DumpModule.
+    Runs locally when we ARE on the VM, otherwise over SSH. The chosen dump
+    is copied to `copy_to` (the pack artifact path).
+    """
+    exe = os.environ.get("WINRE_PESIEVE",
+                         r"C:\ProgramData\chocolatey\bin\pe-sieve.exe")
+    out_dir = rf"C:\samples\{stem}_pesieve"
+    try:
+        from winre.remote_driver import flare_cfg
+        cfg: dict = dict(flare_cfg() or {})
+        remote = bool(cfg.get("host"))
+    except Exception:
+        cfg, remote = {}, False
+
+    stdout = ""
+    if not remote:
+        import shutil
+        import subprocess
+        try:
+            shutil.rmtree(out_dir, ignore_errors=True)
+            os.makedirs(out_dir, exist_ok=True)
+            p = subprocess.run(
+                [exe, "/pid", str(pid), "/imp", "1", "/dmode", "3",
+                 "/report", "7", "/dir", out_dir, "/quiet", "/json"],
+                capture_output=True, text=True, timeout=300)
+            stdout = p.stdout or ""
+        except Exception as e:
+            return {"ok": False, "error": f"pe-sieve local: {str(e)[:150]}"}
+    else:
+        from winre.remote_driver import ssh_ps
+        ps = (
+            f"Remove-Item -Recurse -Force '{out_dir}' -ErrorAction SilentlyContinue\n"
+            f"New-Item -ItemType Directory -Force -Path '{out_dir}' | Out-Null\n"
+            f"& '{exe}' /pid {int(pid)} /imp 1 /dmode 3 /report 7 "
+            f"/dir '{out_dir}' /quiet /json 2>$null | Out-String"
+        )
+        try:
+            r = ssh_ps(cfg, ps, timeout=300)
+            stdout = r.stdout or ""
+        except Exception as e:
+            return {"ok": False, "error": f"pe-sieve ssh: {str(e)[:150]}"}
+
+    report = None
+    try:
+        start, end = stdout.find("{"), stdout.rfind("}")
+        if start >= 0 and end > start:
+            report = json.loads(stdout[start:end + 1])
+    except Exception:
+        report = None
+    if not isinstance(report, dict):
+        try:
+            raw = ""
+            if remote:
+                from winre.remote_driver import ssh_ps
+                raw = ssh_ps(cfg, f"Get-Content -Raw '{out_dir}\\dump_report.json'",
+                             timeout=60).stdout or ""
+            else:
+                with open(os.path.join(out_dir, "dump_report.json"),
+                          encoding="utf-8") as fh:
+                    raw = fh.read()
+            report = json.loads(raw or "{}")
+        except Exception as e:
+            return {"ok": False, "error": f"pe-sieve report: {str(e)[:150]}"}
+
+    dr = report.get("dump_report") or {}
+    dumps = dr.get("dumps") or []
+    pick = None
+    for d in dumps:
+        if not isinstance(d, dict):
+            continue
+        fn = str(d.get("dump_file") or "").lower()
+        mf = str(d.get("module_file") or "").lower()
+        if stem.lower() in fn or mf.endswith(f"{stem.lower()}.exe"):
+            pick = d
+            break
+    if pick is None and dumps:
+        pick = dumps[0]
+    if not isinstance(pick, dict):
+        return {"ok": False, "error": "pe-sieve: no dump entry"}
+    src = rf"{out_dir}\{dr.get('output_dir') or f'process_{pid}'}\{pick.get('dump_file')}"
+    try:
+        if remote:
+            from winre.remote_driver import ssh_ps
+            ssh_ps(cfg, f"Copy-Item -Force '{src}' '{copy_to}'", timeout=120)
+        else:
+            import shutil
+            shutil.copy2(src, copy_to)
+    except Exception as e:
+        return {"ok": False, "error": f"pe-sieve copy: {str(e)[:150]}"}
+    return {"ok": True, "dump_path": copy_to, "source_dump": src,
+            "imp_rec_result": pick.get("imp_rec_result"),
+            "dump_mode": pick.get("dump_mode"),
+            "module_file": pick.get("module_file")}
+
+
 def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
                    dump_suffix: str = "_unpacked.exe") -> dict:
     """OEP -> DumpModule -> static re-analysis of the dump -> compare.
@@ -1201,6 +1301,7 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
                      "module_size": hex(mod_size or 0),
                      "in_module": oep_in_module})
     dump_kind = "module"
+    dump_source: str | None = None
     heap_info: dict | None = None
     dr: dict = {}
     if not oep_in_module:
@@ -1219,28 +1320,50 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
                     "diagnostics": _debugger_diagnostics(xc),
                     "evidence": evidence}
         dump_kind = "heap"
+        dump_source = "dumpmemory_heap"
     else:
-        # module image: resolve the name as x64dbg knows it (basename WITH
-        # extension; a bare stem can fail, and os.path.basename is
-        # UNRELIABLE on Linux drivers — it does not split backslashes).
+        # Module image. Preferred artifact: pe-sieve /imp REBUILDS the
+        # ImportTable from the in-memory IATs (Scylla class) — verified 291
+        # imports vs 0 for the savedata dump, which makes the image parseable
+        # by static tooling. savedata DumpModule stays the fallback; the
+        # better-parse dump wins.
+        savedata_path = dump_path
+        pesieve_path = f"{vm_dir}\\{stem}_pesieve_unpacked.exe"
+        pid = _parse_state(xc.get_state()).get("pid")
+        ps_res: dict = {}
+        if pid:
+            ps_res = _pesieve_imp_dump(xc, stem, pid, pesieve_path)
+            evidence.append({"label": "pesieve_imp",
+                             **{k: ps_res.get(k) for k in
+                                ("ok", "imp_rec_result", "dump_mode",
+                                 "module_file", "error")}})
         module = _resolve_module_name(xc, name, stem)
         evidence.append({"label": "dump_module_name", "module": module,
-                         "dump_path": dump_path})
+                         "dump_path": savedata_path})
         attempts_names = [module]
         if stem and stem != module:
             attempts_names.append(stem)  # compatibility fallback form
-        dr: dict = {}
         for cand in attempts_names:
-            dr = xc.dump_module(cand, dump_path)
+            dr = xc.dump_module(cand, savedata_path)
             if dr.get("ok"):
                 break
             time.sleep(2)  # session may need a beat after the OEP pause
-            dr = xc.dump_module(cand, dump_path)
+            dr = xc.dump_module(cand, savedata_path)
             if dr.get("ok"):
                 break
-        if not dr.get("ok"):
+        savedata_ok = bool(dr.get("ok"))
+        ps_parse: dict = _dump_parse_check(pesieve_path) if ps_res.get("ok") else {}
+        ps_imports = int(ps_parse.get("imports") or 0)
+        if ps_res.get("ok") and ps_parse.get("parses") and ps_imports > 0:
+            dump_path, dump_source = pesieve_path, "pesieve_imp"
+        elif savedata_ok:
+            dump_path, dump_source = savedata_path, "dumpex_savedata"
+        elif ps_res.get("ok"):
+            dump_path, dump_source = pesieve_path, "pesieve_imp"
+        else:
             return {"ok": False,
-                    "error": f"DumpModule failed: {dr.get('error')}",
+                    "error": (f"DumpModule failed: {dr.get('error')}; "
+                              f"pe-sieve: {ps_res.get('error')}"),
                     "oep": hex(oep),
                     "oep_target": oep_res.get("target"),
                     "dump_kind": "module",
@@ -1248,8 +1371,11 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
                     "attempts": oep_res.get("attempts"),
                     "diagnostics": _debugger_diagnostics(xc),
                     "evidence": evidence}
+        evidence.append({"label": "dump_choice", "source": dump_source,
+                         "pesieve_parse": ps_parse, "savedata_ok": savedata_ok,
+                         "pesieve_imp_result": ps_res.get("imp_rec_result")})
     evidence.append({"label": "dumped", "dump_path": dump_path,
-                     "kind": dump_kind,
+                     "kind": dump_kind, "source": dump_source,
                      "dump": (dr.get("result") if dump_kind == "module"
                               else (heap_info or {}).get("region"))})
 
@@ -1324,12 +1450,14 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
     evidence.append({"label": "compare", **comparison})
     common = {"ok": True, "oep": hex(oep), "dump_path": dump_path,
               "dump_kind": dump_kind,
+              "dump_source": dump_source,
               "heap_region": (heap_info or {}).get("region"),
               "dump_parse": dump_parse,
               "rebuild_hint": rebuild_hint,
               "comparison": comparison,
               "artifact": {"dump_path": dump_path,
                            "kind": dump_kind,
+                           "source": dump_source,
                            "comparison_conclusive": conclusive,
                            "dump_parses": bool(dump_parse.get("parses")),
                            "imports": dump_parse.get("imports"),

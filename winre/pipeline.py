@@ -271,7 +271,9 @@ def _first_cell(result: dict):
 
 
 def _dynamic(sample: Path, pack: EvidencePack, sha: str,
-             max_seconds: int, enable_pesieve: bool) -> dict:
+             max_seconds: int, enable_pesieve: bool,
+             adaptive: bool = False,
+             idle_stop_seconds: int = 10) -> dict:
     """Run orchestrator --mode local, copy its dynamic pack into evidence."""
     t0 = time.time()
     orch = Path(__file__).resolve().parent / "orchestrator.py"
@@ -293,6 +295,8 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
            "--max-seconds", str(max_seconds)]
     if enable_pesieve:
         cmd.append("--pesieve")
+    if adaptive:
+        cmd += ["--adaptive", "--idle-stop-seconds", str(int(idle_stop_seconds))]
     try:
         cp = subprocess.run(cmd, capture_output=True, text=True, env=env,
                             timeout=int(max_seconds) + 600,
@@ -510,7 +514,8 @@ def _report(pack: EvidencePack, sha: str, quick: dict, dynamic: dict | None,
 
 def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = False,
                  enable_dynamic: bool = False, dry_llm: bool = False,
-                 mode: str = "agentic", enable_agentic_dbg: bool = False) -> dict:
+                 mode: str = "agentic", enable_agentic_dbg: bool = False,
+                 adaptive: bool = False, idle_stop_seconds: int = 10) -> dict:
     """Run the WinRE pipeline.
 
     DEFAULT = STATIC-ONLY (mirrors RevEng/RevAI): intake → quick → deep → yara
@@ -553,7 +558,9 @@ def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = 
     if enable_dynamic:
         # static already complete; detonation runs on (restored) VM now.
         # dynamic is corroboration — do not let it fail static artifacts.
-        dynamic = _dynamic(sample, pack, sha, max_seconds, enable_pesieve)
+        dynamic = _dynamic(sample, pack, sha, max_seconds, enable_pesieve,
+                           adaptive=adaptive,
+                           idle_stop_seconds=idle_stop_seconds)
         results["dynamic"] = dynamic
 
     # DFIR-Nexus ingest pack: dynamic logs + static context in one 7z
@@ -620,6 +627,13 @@ def main() -> int:
     ap.add_argument("--dynamic", action="store_true",
                     help="ENABLE the segregated dynamic phase (opt-in; "
                          "requires snapshot-restored VM; static_yara_wins)")
+    ap.add_argument("--adaptive", action="store_true",
+                    help="adaptive detonation window: --max-seconds is the CAP; "
+                         "stop the Frida trace early after "
+                         "--idle-stop-seconds without new events "
+                         "(effective window recorded in dynamic META)")
+    ap.add_argument("--idle-stop-seconds", type=int, default=10,
+                    help="adaptive window idle cutoff (default 10s)")
     ap.add_argument("--dry-llm", action="store_true",
                     help="never call the LLM (deterministic fallback only)")
     ap.add_argument("--agentic-dbg", action="store_true",
@@ -650,7 +664,9 @@ def main() -> int:
             args.sample, max_seconds=args.max_seconds, enable_pesieve=args.pesieve,
             enable_dynamic=enable_dynamic, dry_llm=args.dry_llm,
             enable_agentic_dbg=enable_agentic_dbg,
-            mode=args.mode)
+            mode=args.mode,
+            adaptive=args.adaptive,
+            idle_stop_seconds=args.idle_stop_seconds)
         if args.publish:
             from .reporting import publish_case
             from .evidence import EvidencePack as _EP
@@ -662,7 +678,9 @@ def main() -> int:
                        enable_pesieve=args.pesieve,
                        enable_dynamic=enable_dynamic, dry_llm=args.dry_llm,
                        enable_agentic_dbg=enable_agentic_dbg,
-                       mode=args.mode)
+                       mode=args.mode,
+                       adaptive=args.adaptive,
+                       idle_stop_seconds=args.idle_stop_seconds)
     if args.publish:
         from .reporting import publish_case
         pub = publish_case(EvidencePack(LOGS_DIR, res["sha"], mode=args.mode).root,

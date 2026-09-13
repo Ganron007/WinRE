@@ -35,6 +35,13 @@ def main() -> None:
     ap.add_argument("--out", required=True, help="output JSONL file")
     ap.add_argument("--max-calls", type=int, default=10000)
     ap.add_argument("--max-seconds", type=int, default=60)
+    ap.add_argument(
+        "--idle-stop",
+        type=int,
+        default=0,
+        help="adaptive window: stop early after N seconds without new events "
+             "(0 = off; max-seconds stays the hard cap)",
+    )
     args = ap.parse_args()
 
     try:
@@ -258,6 +265,7 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
     out_fh = open(out_path, "w", encoding="utf-8")
     write_lock = threading.Lock()
     closed = {"done": False}
+    last = {"t": time.time()}
 
     def on_message(msg, data):
         if closed["done"]:
@@ -269,6 +277,7 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
                         return
                     out_fh.write(json.dumps(msg["payload"]) + "\n")
                     out_fh.flush()
+                last["t"] = time.time()
             elif msg["type"] == "error":
                 sys.stderr.write(f"[frida error] {msg.get('stack', msg)}\n")
         except Exception:
@@ -306,18 +315,36 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
         device.resume(spawned_pid)
 
     print(f"tracing for up to {args.max_seconds}s (max {args.max_calls} calls)", file=sys.stderr)
-    deadline = time.time() + args.max_seconds
+    t_start = time.time()
+    deadline = t_start + args.max_seconds
+    idle_stop = int(getattr(args, "idle_stop", 0) or 0)
+    stop_reason = "cap"
     try:
         while time.time() < deadline:
             time.sleep(0.5)
             try:
                 if session.is_detached:
+                    stop_reason = "detached"
                     print("session detached (target exited)", file=sys.stderr)
                     break
             except Exception:
+                stop_reason = "detached"
+                break
+            if idle_stop and (time.time() - last["t"]) > idle_stop:
+                stop_reason = "idle"
+                print(f"idle-stop: no events for {idle_stop}s", file=sys.stderr)
                 break
     except KeyboardInterrupt:
+        stop_reason = "interrupted"
         print("interrupted; detaching", file=sys.stderr)
+    try:
+        with open(str(out_path) + ".run.json", "w", encoding="utf-8") as fh:
+            json.dump({"stop_reason": stop_reason,
+                       "elapsed_s": round(time.time() - t_start, 1),
+                       "max_seconds": args.max_seconds,
+                       "idle_stop_s": idle_stop}, fh)
+    except Exception:
+        pass
 
     closed["done"] = True
     if spawned_pid is not None:

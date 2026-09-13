@@ -141,8 +141,12 @@ def build_case(pack_root: Path, sha: str, mode: str | None = None,
     dyn = pack_root / "dynamic"
     dyn_files = sorted(f for f in (dyn.rglob("*") if dyn.is_dir() else [])
                        if f.is_file())
-    if not dyn_files:
-        return {"ok": False, "error": "no dynamic artifacts to pack"}
+    deep_dir = pack_root / "deep" / "x64dbg"
+    deep_files = sorted(f for f in (deep_dir.rglob("*")
+                                    if deep_dir.is_dir() else [])
+                        if f.is_file())
+    if not dyn_files and not deep_files:
+        return {"ok": False, "error": "no dynamic artifacts or unpack dumps to pack"}
 
     sevenzip = find_7z()
     suffix = ".7z" if sevenzip else ".zip"
@@ -187,6 +191,16 @@ def build_case(pack_root: Path, sha: str, mode: str | None = None,
             manifest_files.append({"path": dst.relative_to(staging).as_posix(),
                                    "size": src.stat().st_size,
                                    "sha256": _sha256(src)})
+        # deep unpack artifact (pe-sieve-rebuilt x64dbg dump): the PE-valid
+        # image RevAI static consumes for unpacked analysis
+        for f in deep_files:
+            rel = f.relative_to(pack_root / "deep")
+            dst = staging / "deep" / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, dst)
+            manifest_files.append({"path": f"deep/{rel.as_posix()}",
+                                   "size": f.stat().st_size,
+                                   "sha256": _sha256(f)})
         # VM-state HITL ledger (sha-root, mode-independent) — not sectioned
         snap = pack_root.parent / "snapshot.json"
         if snap.is_file():

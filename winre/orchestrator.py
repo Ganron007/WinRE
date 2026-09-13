@@ -655,7 +655,9 @@ def _kill_stale_local() -> None:
 
 def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
                        max_seconds: int, apis: str,
-                       enable_pesieve: bool, meta: dict) -> dict:
+                       enable_pesieve: bool, meta: dict,
+                       adaptive: bool = False,
+                       idle_stop_seconds: int = 10) -> dict:
     """Run flare_dynamic_job.ps1 on the local host (no SSH)."""
     if not LOCAL_JOB_PS1.is_file():
         meta["error"] = f"job ps1 missing: {LOCAL_JOB_PS1}"
@@ -675,6 +677,8 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
     ]
     if enable_pesieve:
         job_args.append("-EnablePeSieve")
+    if adaptive:
+        job_args += ["-Adaptive", "-IdleStopSeconds", str(int(idle_stop_seconds))]
     print(f"[dynamic_run_v2] LOCAL powershell job -> {LOCAL_JOB_PS1}", flush=True)
     timed_out = False
     try:
@@ -752,6 +756,10 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
             # sample pid (captured while alive) -> post-mortem harvest +
             # ntdll integrity + DFIR-Nexus memory correlation
             meta["sample_pid"] = jm.get("sample_pid")
+            # detonation-window telemetry (adaptive mechanism; RevAI cites it)
+            meta["max_seconds"] = jm.get("max_seconds")
+            if isinstance(jm.get("window"), dict):
+                meta["window"] = jm.get("window")
         except Exception:
             pass
 
@@ -787,6 +795,8 @@ def run_dynamic(
     mode: str | None = None,
     force: bool = False,
     sample_override: str | None = None,
+    adaptive: bool = False,
+    idle_stop_seconds: int = 10,
 ) -> dict:
     cfg = _flare_cfg()
     # Section-aware dynamic dir: pipeline/remote drivers set WINRE_DYNAMIC_DIR
@@ -944,7 +954,9 @@ def run_dynamic(
             try:
                 meta = _run_local_windows(sha, Path(sample), dyn_dir,
                                           max_seconds, api_list,
-                                          enable_pesieve, meta)
+                                          enable_pesieve, meta,
+                                          adaptive=adaptive,
+                                          idle_stop_seconds=idle_stop_seconds)
             except Exception as e:
                 meta["error"] = str(e)
                 meta["ok"] = False
@@ -1208,6 +1220,10 @@ def main() -> int:
     ap.add_argument("--sample", default=None,
                     help="explicit sample path (repairs a missing session)")
     ap.add_argument("--max-seconds", type=int, default=60)
+    ap.add_argument("--adaptive", action="store_true",
+                    help="adaptive window: max-seconds is the cap, stop the "
+                         "trace early after --idle-stop-seconds without events")
+    ap.add_argument("--idle-stop-seconds", type=int, default=10)
     ap.add_argument("--apis", default=None, help="comma-separated API list override")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-deploy", action="store_true", help="skip SCP of job scripts (SSH mode only)")
@@ -1257,6 +1273,8 @@ def main() -> int:
         mode=args.mode,
         force=args.force,
         sample_override=sample_override,
+        adaptive=args.adaptive,
+        idle_stop_seconds=args.idle_stop_seconds,
     )
     if meta.get("skipped") or meta.get("ok"):
         return 0

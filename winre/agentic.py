@@ -742,6 +742,7 @@ class ToolRegistry:
                     "attempts": r.get("attempts"),
                     "oep_target": r.get("oep_target"),
                     "dump_kind": r.get("dump_kind"),
+                    "dump_source": r.get("dump_source"),
                     "heap_region": r.get("heap_region"),
                     "dump_parse": r.get("dump_parse"),
                     "rebuild_hint": r.get("rebuild_hint"),
@@ -1199,9 +1200,9 @@ dynamic tool errors, fall back to static — do not retry more than once.
         unpack_prepass = {k: r.get(k) for k in
                           ("ok", "oep", "dump_path", "comparison", "note",
                            "error", "method", "attempts", "diagnostics",
-                           "oep_target", "dump_kind", "heap_region",
-                           "dump_parse", "rebuild_hint", "artifact",
-                           "fallback_trace", "fallback_summary")
+                           "oep_target", "dump_kind", "dump_source",
+                           "heap_region", "dump_parse", "rebuild_hint",
+                           "artifact", "fallback_trace", "fallback_summary")
                           if k in r}
     packer_note = _packer_note(packed_sig, unpack_prepass, dynamic)
 

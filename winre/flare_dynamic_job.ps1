@@ -12,6 +12,8 @@ param(
   [string]$HollowsHunterExe = "C:\Tools\hollows_hunter\hollows_hunter.exe",
   [string]$ProcdumpExe = "C:\Tools\sysinternals\Procdump64.exe",
   [switch]$EnablePeSieve,
+  [switch]$Adaptive,
+  [int]$IdleStopSeconds = 10,
   [string]$Apis = "CreateFileW,WriteFile,ReadFile,DeleteFileW,RegOpenKeyExW,RegSetValueExW,VirtualAlloc,VirtualProtect,WriteProcessMemory,CreateRemoteThread,WinHttpOpen,InternetOpenW,connect,send,recv,LoadLibraryW,GetProcAddress,CreateProcessW"
 )
 
@@ -144,18 +146,25 @@ $peSievePid = $null
 $peSieveRc = $null
 $psReportValid = $false
 $samplePid = $null
-Log ("Frida start EnablePeSieve={0}" -f [bool]$EnablePeSieve)
+Log ("Frida start EnablePeSieve={0} Adaptive={1}" -f [bool]$EnablePeSieve, [bool]$Adaptive)
 $fridaExit = -1
+$fridaStart = $null
 try {
   # Non-blocking Frida so we can pe-sieve mid-run when enabled
-  $fridaProc = Start-Process -FilePath $Python -ArgumentList @(
+  $fridaArgs = @(
     $FridaScript,
     "--target", $SamplePath,
     "--apis", $Apis,
     "--out", $trace,
     "--max-seconds", "$MaxSeconds",
     "--max-calls", "5000"
-  ) -PassThru -NoNewWindow `
+  )
+  if ($Adaptive) {
+    # adaptive window: max-seconds is the CAP, idle-stop ends a quiet run
+    $fridaArgs += @("--idle-stop", "$IdleStopSeconds")
+  }
+  $fridaStart = Get-Date
+  $fridaProc = Start-Process -FilePath $Python -ArgumentList $fridaArgs -PassThru -NoNewWindow `
     -RedirectStandardError (Join-Path $OutDir "frida.stderr.txt") `
     -RedirectStandardOutput (Join-Path $OutDir "frida.stdout.txt")
 
@@ -325,6 +334,23 @@ while ((Get-Date) -lt `$deadline) {
 }
 Log ("Frida exit={0}" -f $fridaExit)
 
+# adaptive-window telemetry: effective run length + stop reason (Frida
+# writes frida_trace.jsonl.run.json; wall time is the fallback)
+$windowEffective = $null
+$windowReason = "unknown"
+if ($fridaStart) {
+  $windowEffective = [Math]::Round(((Get-Date) - $fridaStart).TotalSeconds, 1)
+}
+$frRun = Join-Path $OutDir "frida_trace.jsonl.run.json"
+if (Test-Path $frRun) {
+  try {
+    $rj = Get-Content $frRun -Raw | ConvertFrom-Json
+    if ($rj.stop_reason) { $windowReason = [string]$rj.stop_reason }
+    if ($rj.elapsed_s) { $windowEffective = [double]$rj.elapsed_s }
+  } catch { $windowReason = "unparsable" }
+}
+Log ("window effective={0}s reason={1} adaptive={2}" -f $windowEffective, $windowReason, [bool]$Adaptive)
+
 # The delayed in-run procdump (scheduled at capture time) should be done or
 # nearly done - bounded wait, then report how many dumps landed.
 if ($pdProc) {
@@ -423,6 +449,13 @@ if (Test-Path $trace) {
   ok = $true
   sha256 = $Sha256
   max_seconds = $MaxSeconds
+  window = @{
+    requested_s = $MaxSeconds
+    effective_s = $windowEffective
+    adaptive = [bool]$Adaptive
+    idle_stop_s = if ($Adaptive) { $IdleStopSeconds } else { $null }
+    stop_reason = $windowReason
+  }
   frida_exit = $fridaExit
   fakenet_started = [bool]$fnProc
   procmon_pml = (Test-Path $pml)
