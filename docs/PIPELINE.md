@@ -47,7 +47,8 @@ debugger control — then applies the same honest gates.
 
 ```
 python -m winre.pipeline <sample> [--mode agentic|static] [--dynamic] [--max-seconds 45]
-                   [--pesieve] [--dry-llm] [--agentic-dbg] [--driver remote] [--publish]
+                   [--pesieve] [--adaptive] [--idle-stop-seconds 10]
+                   [--dry-llm] [--agentic-dbg] [--driver remote] [--publish]
    │
    ├─ 1. intake   hash, format, magic            → logs/<sha>/<mode>/intake/
    ├─ 2. quick    deterministic triage           → logs/<sha>/<mode>/quick/
