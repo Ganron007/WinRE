@@ -391,44 +391,87 @@ def _dump_heap_region(xc: X64DbgClient, oep: int, out_path: str,
             "error": r.get("error")}
 
 
+def _last_json_line(text: str) -> dict | None:
+    """Last {...} line in mixed stdout (compact probe results)."""
+    for ln in reversed((text or "").splitlines()):
+        ln = ln.strip()
+        if ln.startswith("{"):
+            try:
+                d = json.loads(ln)
+            except Exception:
+                continue
+            if isinstance(d, dict):
+                return d
+    return None
+
+
+def _short_err(text: str, n: int = 300) -> str:
+    """Last non-empty line of an error stream (exception, not traceback head)."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    return (lines[-1] if lines else "unknown error")[:n]
+
+
 def _dump_parse_check(dump_path: str) -> dict:
-    """Best-effort pefile check of the dump (imports present? parses?)."""
+    """Best-effort pefile check of the dump (imports present? parses?).
+
+    Failures record the REAL exception type+message, not a truncation of the
+    traceback head: the VM-side probe handles its own exceptions and prints a
+    compact JSON error line; local (on-VM) checks return the exception
+    directly. `where` says which side ran the probe.
+    """
+    pefile = None
     try:
         import pefile  # type: ignore
-        p = pefile.PE(dump_path, fast_load=True)
-        p.parse_data_directories(directories=[
-            pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
-        return {"parses": True,
-                "imports": len(getattr(p, "DIRECTORY_ENTRY_IMPORT", []) or []),
-                "machine": hex(p.FILE_HEADER.Machine)}
-    except Exception as e:
-        local_err = str(e)[:120]
+    except ImportError:
+        pefile = None
+    if pefile is not None and os.path.isfile(dump_path):
+        try:
+            p = pefile.PE(dump_path, fast_load=True)
+            p.parse_data_directories(directories=[
+                pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
+            return {"parses": True,
+                    "imports": len(getattr(p, "DIRECTORY_ENTRY_IMPORT", []) or []),
+                    "machine": hex(p.FILE_HEADER.Machine),
+                    "where": "local"}
+        except Exception as e:
+            return {"parses": False, "where": "local",
+                    "error": f"{type(e).__name__}: {e}"[:300]}
+    # driver side (dump lives on the VM): same probe, compact error contract
     try:
         from winre.remote_driver import flare_cfg, ssh_ps
         cfg = flare_cfg()
         if not cfg.get("host"):
-            return {"parses": False, "error": f"local: {local_err}"}
-        ps = (
-            "$c = @'\n"
-            "import pefile, json\n"
-            f"p = pefile.PE(r'{dump_path}', fast_load=True)\n"
-            "p.parse_data_directories(directories="
+            return {"parses": False, "where": "driver",
+                    "error": "pefile not importable locally and no VM host "
+                             "configured"}
+        code = (
+            "import json\n"
+            "try:\n"
+            "    import pefile\n"
+            f"    p = pefile.PE(r'{dump_path}', fast_load=True)\n"
+            "    p.parse_data_directories(directories="
             "[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_IMPORT']])\n"
-            "print(json.dumps({'imports': len(getattr(p,"
-            "'DIRECTORY_ENTRY_IMPORT', []) or []), "
-            "'machine': hex(p.FILE_HEADER.Machine)}))\n"
-            "'@\n"
-            "& C:\\Python313\\python.exe -c $c"
+            "    print(json.dumps({'ok': True, 'imports': len(getattr(p, "
+            "'DIRECTORY_ENTRY_IMPORT', []) or []), 'machine': "
+            "hex(p.FILE_HEADER.Machine)}))\n"
+            "except Exception as e:\n"
+            "    print(json.dumps({'ok': False, "
+            "'error': type(e).__name__ + ': ' + str(e)}))\n"
         )
+        ps = "$c = @'\n" + code + "'@\n& C:\\Python313\\python.exe -c $c"
         r = ssh_ps(cfg, ps, timeout=60)
-        lines = [ln for ln in (r.stdout or "").strip().splitlines() if ln.strip()]
-        if lines:
-            import json as _json
-            return {"parses": True, **_json.loads(lines[-1])}
-        return {"parses": False, "error": f"remote: {(r.stderr or '')[:120]}"}
+        d = _last_json_line(r.stdout or "")
+        if d is None:
+            return {"parses": False, "where": "vm",
+                    "error": _short_err(r.stderr or r.stdout)}
+        if d.get("ok"):
+            return {"parses": True, "imports": d.get("imports"),
+                    "machine": d.get("machine"), "where": "vm"}
+        return {"parses": False, "where": "vm",
+                "error": str(d.get("error"))[:300]}
     except Exception as e:
-        return {"parses": False,
-                "error": f"local={local_err}; remote={str(e)[:120]}"}
+        return {"parses": False, "where": "driver",
+                "error": f"{type(e).__name__}: {e}"[:300]}
 
 
 def _pick_oep_target(sections: list[dict], base: int, rcx: int | None,
