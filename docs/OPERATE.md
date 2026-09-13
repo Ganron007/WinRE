@@ -16,13 +16,15 @@ Day-2 operation of the WinRE lab. Install first: [`INSTALL.md`](INSTALL.md).
 Environment equivalents: `WINRE_ENABLE_DYNAMIC=1`, `WINRE_AGENTIC_DBG=1`.
 The UI (`python -m winre.ui.app` → `winre\ui\start_ui.ps1`, port 5001)
 drives the same engine: a deep-mode selector on the Run page
-(agentic/static + live engine preview), one row per `(sha, mode section)`
-in Cases with S/A badges, a section switcher on the pack page, manual
-stage control that writes into the viewed section, and **fire-one-tool** on
-the pack page (any of the 35 static tools, optional raw-JSON args;
-result → `deep/01-manual-<tool>.json` + `manual_runs.json` audit trail;
-x64dbg_* excluded — use deep + agentic-dbg). Pack export zips the viewed
-section.
+(agentic/static + live engine preview), dynamic opt-in with a
+**pe-sieve** toggle and an **adaptive-window** toggle (+ idle-stop seconds;
+`--max-seconds` = cap, effective window lands in `META.window`), one row
+per `(sha, mode section)` in Cases with S/A badges, a section switcher on
+the pack page, manual stage control that writes into the viewed section,
+and **fire-one-tool** on the pack page (any of the 35 static tools,
+optional raw-JSON args; result → `deep/01-manual-<tool>.json` +
+`manual_runs.json` audit trail; x64dbg_* excluded — use deep +
+agentic-dbg). Pack export zips the viewed section.
 
 **UI-only mode (single VM).** The console is self-sufficient — no CLI
 needed. Put `FLARE_*` + `WINRE_LLM_*` in the console host's repo `.env`,

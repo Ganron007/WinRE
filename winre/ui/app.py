@@ -532,7 +532,9 @@ def _stage_timings(sha: str | None, mode: str | None = None) -> dict:
 def _run_pipeline_in_thread(sample_path: str, max_seconds: int,
                             pesieve: bool, dry_llm: bool, dynamic: bool,
                             agentic_dbg: bool = False,
-                            mode: str = "agentic") -> None:
+                            mode: str = "agentic",
+                            adaptive: bool = False,
+                            idle_stop_seconds: int = 10) -> None:
     """Run the remote pipeline in a background thread; store the result."""
     import contextlib
     import datetime
@@ -591,7 +593,9 @@ def _run_pipeline_in_thread(sample_path: str, max_seconds: int,
                     Path(sample_path), max_seconds=max_seconds,
                     enable_pesieve=pesieve, enable_dynamic=dynamic,
                     dry_llm=dry_llm, enable_agentic_dbg=agentic_dbg,
-                    mode=mode)
+                    mode=mode,
+                    adaptive=adaptive,
+                    idle_stop_seconds=idle_stop_seconds)
                 _run_state["sha"] = res["sha"]
                 _run_state["last"] = {"ok": True, "sha": res["sha"],
                                       "started": started,
@@ -685,6 +689,12 @@ def create_app() -> "Flask":
                 dry_llm = request.form.get("dry_llm") == "on"
                 dynamic = request.form.get("dynamic") == "on"
                 agentic_dbg = request.form.get("agentic_dbg") == "on"
+                adaptive = dynamic and request.form.get("adaptive") == "on"
+                try:
+                    idle_stop_seconds = max(3, min(120, int(
+                        request.form.get("idle_stop_seconds", 10))))
+                except ValueError:
+                    idle_stop_seconds = 10
                 mode = request.form.get("mode", "agentic")
                 if mode not in ("agentic", "static"):
                     mode = "agentic"
@@ -693,7 +703,9 @@ def create_app() -> "Flask":
                 _run_state["last"] = None
                 _run_state["mode"] = mode
                 _run_pipeline_in_thread(sample, max_seconds, pesieve, dry_llm,
-                                        dynamic, agentic_dbg, mode)
+                                        dynamic, agentic_dbg, mode,
+                                        adaptive=adaptive,
+                                        idle_stop_seconds=idle_stop_seconds)
                 # form POST: redirect back so the browser lands on the live
                 # progress board instead of a raw JSON body
                 return redirect("/run", 303)

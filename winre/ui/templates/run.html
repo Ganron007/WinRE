@@ -123,7 +123,7 @@
 
         <div class="row" style="margin-top:10px">
           <div>
-            <label>Detonation seconds (dynamic only)</label>
+            <label>Detonation seconds (dynamic; cap if adaptive)</label>
             <input name="max_seconds" type="number" value="45" min="10" max="600">
           </div>
           <div>
@@ -152,6 +152,13 @@
             <span class="muted" style="font-size:var(--tx-xs)">(opt-in, last phase)</span></label>
           <label class="check" id="pesLbl" style="margin-left:26px" hidden>
             <input type="checkbox" name="pesieve"> also run pe-sieve mid-detonation</label>
+          <label class="check" id="adaptLbl" style="margin-left:26px" hidden>
+            <input type="checkbox" name="adaptive">
+            <span style="color:var(--warn)">Adaptive window</span>
+            <span class="muted" style="font-size:var(--tx-xs)">— stop the trace after</span>
+            <input name="idle_stop_seconds" type="number" value="10" min="3" max="120"
+                   style="width:52px; padding:1px 4px; font-size:var(--tx-xs)">
+            <span class="muted" style="font-size:var(--tx-xs)">s without new events (seconds above = cap; effective window recorded in META)</span></label>
         </div>
 
         <p style="font-size:var(--tx-sm); margin:8px 0 0">
@@ -184,6 +191,7 @@
     const chk = document.getElementById('dynChk');
     const warn = document.getElementById('dynWarn');
     const pes = document.getElementById('pesLbl');
+    const adapt = document.getElementById('adaptLbl');
     const dbg = document.getElementById('dbgChk');
     const dry = document.getElementById('dryChk');
     const mode = document.getElementById('deepMode');
@@ -212,6 +220,7 @@
     chk.addEventListener('change', () => {
       warn.hidden = !chk.checked;
       pes.hidden = !chk.checked;
+      adapt.hidden = !chk.checked;
     });
     dbg.addEventListener('change', refreshMode);
     dry.addEventListener('change', refreshMode);
