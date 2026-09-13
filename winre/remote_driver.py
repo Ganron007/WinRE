@@ -785,6 +785,7 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
             "history": history,
             "packed_signal": agent_result.get("packed_signal"),
             "unpack_prepass": agent_result.get("unpack_prepass"),
+            "windbg_dump": agent_result.get("windbg_dump"),
         }
         # pull the unpack artifact into the pack (it lives on the VM otherwise)
         art = _pull_unpack_artifact(cfg, pack,

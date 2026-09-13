@@ -75,6 +75,7 @@ See `docs/internal/ARCHITECTURE.md:3` contract table. Key:
 | `memory/pe_sieve_report.json` | `C:\tools\pe-sieve\pe-sieve64.exe /pid <pid> /json` |
 | `malcat-triage.json` | `tools/malcat_win.py` (if licensed) |
 | `x64dbg/dump/*.dmp` | `DumpModule` via `http://127.0.0.1:9094/` |
+| `META.json` → `x64dbg_dump` | terminal OEP/dump record `{attempted, ok, reason, dump_path?, oep?, module?, detect_ok?, analyze_ok?}` — always present, so a missing dump is never silent (the pre-run META carries `running=true` if the orchestrator died mid-run) |
 | `META.json` → `window` | detonation-window telemetry `{requested_s, effective_s, adaptive, idle_stop_s, stop_reason}` (also in `META.job.json`; Frida writes `frida_trace.jsonl.run.json`) |
 | `windbg_analysis.json` | `winre/windbg_post.py` via mcp-windbg (`http://127.0.0.1:9097/mcp/`) over `memory/*.dmp`; passive, honest skip when no dump/server |
 

@@ -1153,6 +1153,21 @@ def _restart_debugger(xc: X64DbgClient) -> dict:
     return info
 
 
+def _wait_for_file(path: str, timeout_s: float = 15.0) -> bool:
+    """Wait for an asynchronously-written file.
+
+    x64dbg's DumpModule fallback queues `savedata` via cmdExec (async): the
+    call returns ok before the file lands. An immediate is_file() check
+    false-negatives (observed: dump ok, dir looked empty).
+    """
+    deadline = time.time() + max(0.0, timeout_s)
+    while time.time() < deadline:
+        if os.path.isfile(path):
+            return True
+        time.sleep(0.5)
+    return os.path.isfile(path)
+
+
 def _resolve_module_name(xc: X64DbgClient, basename: str, stem: str) -> str:
     """The module name x64dbg knows (usually WITH extension).
 
@@ -1425,6 +1440,9 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
     # dump sanity: does the image parse, and are imports present? A Scylla
     # rebuild is NOT scriptable on this image (OllyDumpEx is GUI-only), so
     # record it honestly instead of claiming a clean artifact.
+    if dump_kind == "module" and dump_source == "dumpex_savedata":
+        # x64dbg's savedata fallback is ASYNC — wait for the file to land
+        _wait_for_file(str(dump_path), 15)
     dump_parse = _dump_parse_check(dump_path)
     rebuild_hint = None
     if not dump_parse.get("parses") or not dump_parse.get("imports"):

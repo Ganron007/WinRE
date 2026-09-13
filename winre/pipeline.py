@@ -389,6 +389,7 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
             "history": history,
             "packed_signal": agent_result.get("packed_signal"),
             "unpack_prepass": agent_result.get("unpack_prepass"),
+            "windbg_dump": agent_result.get("windbg_dump"),
         }
         # pull the unpack artifact into the pack (VM-local mode: plain copy)
         _pa = (agent_result.get("unpack_prepass") or {})

@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -355,6 +356,11 @@ def _write_schema(dyn_dir: Path) -> None:
 
 def _write_meta(dyn_dir: Path, meta: dict) -> None:
     dyn_dir.mkdir(parents=True, exist_ok=True)
+    # A crashed orchestrator (e.g. native AV in a child-tool driver) leaves
+    # the pre-run META (running=true) instead of nothing; any terminal-ish
+    # write clears the flag so a finished pack is never marked in-progress.
+    if meta.get("ok") or meta.get("error") or meta.get("skipped"):
+        meta["running"] = False
     (dyn_dir / "META.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
     _write_schema(dyn_dir)
 
@@ -548,15 +554,27 @@ def _static_pre_scan(sample: Path, dyn_dir: Path, meta: dict) -> None:
 
 
 def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
-    """Best-effort x64dbg OEP detect + dump. MCP-down is non-fatal."""
+    """Best-effort x64dbg OEP detect + dump. MCP-down is non-fatal.
+
+    ALWAYS writes a terminal `meta["x64dbg_dump"]` record with a reason, so
+    "no dump" is never silent: {attempted, ok, reason, dump_path?, oep?,
+    module?, detect_ok?, analyze_ok?, load_error?}.
+    """
+    def _terminal(ok: bool, reason: str | None = None, **extra) -> None:
+        rec: dict = {"attempted": True, "ok": bool(ok), "reason": reason}
+        rec.update(extra)
+        meta["x64dbg_dump"] = rec
+
     if os.environ.get("REVENG_DYNAMIC_X64DBG", "1") in ("0", "false", "no"):
         meta["x64dbg_mcp_skipped"] = "REVENG_DYNAMIC_X64DBG=0"
+        _terminal(False, "REVENG_DYNAMIC_X64DBG=0")
         return
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from winre.mcp import X64DbgClient  # type: ignore
     except Exception as e:
         meta["x64dbg_mcp_skipped"] = f"client import: {e}"
+        _terminal(False, f"client import: {e}")
         return
     cli = X64DbgClient()
     if not cli.is_up():
@@ -566,6 +584,7 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
         flag = os.environ.get("WINRE_MCP_AUTOSTART", "1").strip().lower()
         if flag in ("0", "false", "no", "off"):
             meta["x64dbg_mcp_unreachable"] = True
+            _terminal(False, "x64dbg MCP unreachable and WINRE_MCP_AUTOSTART=0")
             return
         try:
             from winre.mcp.x64dbg_manager import ensure_mcp_local
@@ -573,10 +592,12 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
             if not ok:
                 meta["x64dbg_mcp_ensure_failed"] = info
                 meta["x64dbg_mcp_unreachable"] = True
+                _terminal(False, f"x64dbg MCP heal failed: {info}")
                 return
         except Exception as e:
             meta["x64dbg_mcp_ensure_error"] = str(e)[:200]
             meta["x64dbg_mcp_unreachable"] = True
+            _terminal(False, f"x64dbg MCP heal error: {str(e)[:200]}")
             return
     # x64dbg resolves module names through its expression parser (hyphens =
     # subtraction, hex stems = numbers) — stage an expression-safe copy
@@ -596,20 +617,44 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
         load_out = cli.load_binary(str(dbg_sample))
         if not load_out.get("ok"):
             meta["x64dbg_load_error"] = load_out.get("error")
+            _terminal(False, f"LoadBinary failed: {load_out.get('error')}")
             return
-        # module name is sample stem
-        module = dbg_sample.stem
+        # module name resolution (WITH extension first; a bare stem can fail)
+        wait_file = None
+        try:
+            from winre.debug_loops import _resolve_module_name, _wait_for_file
+            wait_file = _wait_for_file
+            module = _resolve_module_name(cli, dbg_sample.name, dbg_sample.stem)
+        except Exception:
+            module = dbg_sample.name
         analyze = cli.analyze_module(module)
         detect = cli.detect_oep(module)
         oep = None
         if detect.get("ok"):
-            r = detect.get("result") or {}
-            if isinstance(r, dict):
-                oep = r.get("oep") or r.get("OEP")
+            res = detect.get("result") or {}
+            text = ""
+            if isinstance(res, dict):
+                c = res.get("content") or []
+                if c and isinstance(c[0], dict):
+                    text = str(c[0].get("text", ""))
+                else:
+                    oep = res.get("oep") or res.get("OEP")
+            m = re.search(
+                r"(?:Stated Entry Point|OEP)[^0-9A-Fa-fx]*(0x[0-9A-Fa-f]+)",
+                text)
+            if m:
+                oep = m.group(1)
         dump_dir = dyn_dir / "x64dbg" / "dump"
         dump_dir.mkdir(parents=True, exist_ok=True)
         dump_path = dump_dir / f"{dbg_sample.stem}.dmp"
-        dump = cli.dump_module(module, str(dump_path))
+        attempts_names = [module]
+        if dbg_sample.stem and dbg_sample.stem != module:
+            attempts_names.append(dbg_sample.stem)
+        dump: dict = {}
+        for cand in attempts_names:
+            dump = cli.dump_module(cand, str(dump_path))
+            if dump.get("ok"):
+                break
         meta["x64dbg_mcp"] = {
             "loaded": True,
             "module": module,
@@ -619,10 +664,26 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
             "dump_ok": dump.get("ok"),
             "dump_path": str(dump_path) if dump.get("ok") else None,
         }
-        if dump.get("ok") and dump_path.is_file():
+        # x64dbg's savedata fallback writes ASYNC: wait for the file to land
+        file_ok = (wait_file(str(dump_path), 15) if wait_file
+                   else dump_path.is_file())
+        if dump.get("ok") and file_ok:
             meta["artifacts"]["x64dbg/dump/"] = str(dump_dir)
+            _terminal(True, None, dump_path=str(dump_path),
+                      oep=oep, module=module,
+                      detect_ok=bool(detect.get("ok")),
+                      analyze_ok=bool(analyze.get("ok")))
+        else:
+            _terminal(False,
+                      (f"DumpModule failed: {dump.get('error') or 'unknown'}"
+                       if not dump.get("ok")
+                       else "DumpModule reported ok but no file after 15s"),
+                      module=module, oep=oep,
+                      detect_ok=bool(detect.get("ok")),
+                      analyze_ok=bool(analyze.get("ok")))
     except Exception as e:
         meta["x64dbg_mcp_error"] = str(e)
+        _terminal(False, f"{type(e).__name__}: {str(e)[:250]}")
     finally:
         # neat closure: stop the debuggee and close the x64dbg GUI — the
         # local-mode post-detonation dump must not leave a halted sample
@@ -682,21 +743,33 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
     print(f"[dynamic_run_v2] LOCAL powershell job -> {LOCAL_JOB_PS1}", flush=True)
     timed_out = False
     try:
-        cp = subprocess.run(job_args, capture_output=True, text=True,
-                            timeout=int(max_seconds) + 300,
-                            encoding="utf-8", errors="replace")
-        meta["job_rc"] = cp.returncode
-        meta["job_stdout_tail"] = (cp.stdout or "")[-800:]
-        meta["job_stderr_tail"] = (cp.stderr or "")[-800:]
-    except subprocess.TimeoutExpired as te:
-        meta["job_timeout"] = True
-        meta["error"] = f"local powershell timeout: {te}"
+        # Popen + taskkill-on-timeout: subprocess.run's kill() can BLOCK when
+        # a grandchild is wedged in a driver call (observed hang), leaving the
+        # orchestrator stuck with no META. taskkill /T always terminates the
+        # tree; _kill_stale_local sweeps any survivors after.
+        proc = subprocess.Popen(job_args, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True,
+                                encoding="utf-8", errors="replace")
+        try:
+            out, err = proc.communicate(timeout=int(max_seconds) + 300)
+            meta["job_rc"] = proc.returncode
+            meta["job_stdout_tail"] = (out or "")[-800:]
+            meta["job_stderr_tail"] = (err or "")[-800:]
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            meta["job_timeout"] = True
+            meta["error"] = (f"local powershell timeout after "
+                             f"{int(max_seconds) + 300}s")
+            meta["ok"] = False
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True, timeout=60)
+            except Exception:
+                pass
+            _kill_stale_local()
+    except Exception as e:
+        meta["error"] = f"local job launch failed: {e}"
         meta["ok"] = False
-        timed_out = True
-        # python killed only the powershell child — Frida/sample/FakeNet/
-        # Procmon (grandchildren) survive. Sweep them NOW; never leave a
-        # sample running independently of the pipeline.
-        _kill_stale_local()
 
     # Pull artifacts from <work_root>\out into dyn_dir (also on timeout —
     # a nearly-complete pack is evidence, not trash)
@@ -831,7 +904,14 @@ def run_dynamic(
         "network_mode": "fakenet_on_flare" if mode == "ssh" else "fakenet_local",
         "pe_sieve_requested": bool(enable_pesieve),
         "orchestrator_mode": mode,
+        # terminal record is ALWAYS present (no silent "no dump")
+        "x64dbg_dump": {"attempted": False, "ok": False, "reason": "not-run"},
     }
+    # crash-visible pre-run record: if this process dies mid-run (observed:
+    # native AV while Procmon's driver was starting), the pack still carries
+    # a META with running=true instead of no evidence at all.
+    meta["running"] = True
+    _write_meta(dyn_dir, meta)
 
     if _env_truthy("REVENG_DYNAMIC_SKIP"):
         meta["skipped"] = True

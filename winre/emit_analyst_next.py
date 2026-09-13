@@ -60,6 +60,18 @@ def build_items(dyn: Path, sha: str, meta: dict[str, Any]) -> dict[str, Any]:
     if has_memory:
         n_mem = sum(1 for p in mem_dir.rglob("*") if p.is_file())
         collected.append({"path": "memory/", "label": f"pe-sieve / memory dumps ({n_mem} files)"})
+    # x64dbg OEP/dump terminal record: a missing dump must never be silent
+    xd = meta.get("x64dbg_dump")
+    if isinstance(xd, dict) and xd:
+        if xd.get("ok") and xd.get("dump_path"):
+            collected.append({"path": str(xd.get("dump_path")),
+                              "label": "x64dbg OEP dump"})
+        else:
+            collected.append({
+                "path": "x64dbg/dump/",
+                "label": (f"x64dbg OEP dump NOT produced: "
+                          f"{xd.get('reason') or 'no reason recorded'}"
+                          f"{'' if xd.get('attempted', True) else ' (step not attempted)'}")})
 
     # --- recommended next ---
     if pcaps and not (dyn / "network_intel.json").is_file():

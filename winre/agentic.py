@@ -1206,12 +1206,52 @@ dynamic tool errors, fall back to static — do not retry more than once.
                           if k in r}
     packer_note = _packer_note(packed_sig, unpack_prepass, dynamic)
 
+    # deterministic WinDbg routing (Bug-2 fix): the agent never reached for
+    # windbg_analyze_dump on its own. Run it once when the debug tools are
+    # available and record an explicit applicability reason — at deep time no
+    # detonation dump exists yet, and the unpack artifact is a PE image
+    # (cdb dump mode needs a minidump), so "not applicable" must be stated.
+    windbg_dump: dict | None = None
+    if dynamic:
+        try:
+            wb = registry.call("windbg_analyze_dump", {})
+        except Exception as e:
+            wb = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+        windbg_dump = dict(wb or {})
+        if not windbg_dump.get("ok") and not windbg_dump.get("error"):
+            reason = str(windbg_dump.get("note") or windbg_dump.get("skipped")
+                         or "no memory dump available")
+            if unpack_prepass and unpack_prepass.get("ok") \
+                    and "PE image" not in reason and "cdb" not in reason:
+                reason += ("; the unpack artifact is a PE image — WinDbg dump "
+                           "mode (cdb -z) does not apply to it")
+            windbg_dump["note"] = reason
+        windbg_dump.setdefault("reason", windbg_dump.get("note")
+                               or windbg_dump.get("error") or "unknown")
+        history.append({"step": len(history) + 1, "tool": "windbg_analyze_dump",
+                        "args": {}, "result": windbg_dump,
+                        "reason": "deterministic post-unpack routing"})
+        findings[f"windbg_analyze_dump_{len(history)}"] = windbg_dump
+        state["calls"] += 1
+        state["seen"].add(json.dumps(("windbg_analyze_dump", {}),
+                                     sort_keys=True))
+    windbg_note = ""
+    if windbg_dump is not None:
+        if windbg_dump.get("ok"):
+            windbg_note = ("\nWINDBG: deterministic dump analysis already ran "
+                           "(see history) — do not repeat it.")
+        else:
+            windbg_note = ("\nWINDBG: dump analysis not applicable here: "
+                           f"{str(windbg_dump.get('reason'))[:220]}. "
+                           "Do not retry it.")
+
     if dry:
         # no LLM — deterministic fallback stub (the unpack prepass, if any,
         # still ran and is recorded in the history)
         return {"verdict": "unknown", "source": "deterministic_fallback",
                 "history": history, "llm_analysis": None, "dry": True,
-                "packed_signal": packed_sig, "unpack_prepass": unpack_prepass}
+                "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
+                "windbg_dump": windbg_dump}
 
     api_key = os.environ.get("WINRE_LLM_API_KEY", "")
     api_url = (os.environ.get("WINRE_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
@@ -1223,7 +1263,8 @@ dynamic tool errors, fall back to static — do not retry more than once.
         return {"verdict": "unknown", "source": "deterministic_fallback",
                 "history": history,
                 "llm_analysis": "WINRE_LLM_API_KEY not set for remote endpoint",
-                "packed_signal": packed_sig, "unpack_prepass": unpack_prepass}
+                "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
+                "windbg_dump": windbg_dump}
 
     llm = ChatOpenAI(model=model, api_key=api_key or "none",
                      base_url=api_url, temperature=0.0, max_tokens=4096)
@@ -1311,21 +1352,22 @@ Malcat anomalies/YARA/high-signal imports fire, verdict must be malicious
 even if strings look legitimate.
 BUDGET DISCIPLINE: limited tool calls; when a [BUDGET] note appears, converge
 to your final answer immediately.
-{dyn_note}{packer_note}"""
+{dyn_note}{packer_note}{windbg_note}"""
     agent = create_react_agent(llm, tools=tools, prompt=system_prompt)
     recursion_limit = max(16, int(max_steps) * 2 + 6)
     try:
         brief = _quick_brief(quick)
         result = agent.invoke(
             {"messages": [HumanMessage(content=(
-                f"Analyze sample {sha}. {brief}{packer_note}Use SQL + Malcat to "
+                f"Analyze sample {sha}. {brief}{packer_note}{windbg_note}Use SQL + Malcat to "
                 "deepen, then produce the final flat JSON verdict."))]},
             config={"recursion_limit": recursion_limit},
         )
     except Exception as e:
         return {"verdict": "unknown", "source": "deterministic_fallback",
                 "history": history, "llm_analysis": f"agent error: {e}",
-                "packed_signal": packed_sig, "unpack_prepass": unpack_prepass}
+                "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
+                "windbg_dump": windbg_dump}
 
     # parse final flat JSON from AI messages (newest first). Models wrap
     # verdicts in prose/fences, so try every {...} candidate, not just the
@@ -1378,10 +1420,12 @@ to your final answer immediately.
     if verdict is None:
         return {"verdict": "unknown", "source": "deterministic_fallback",
                 "history": history, "llm_analysis": llm_text[:4000],
-                "packed_signal": packed_sig, "unpack_prepass": unpack_prepass}
+                "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
+                "windbg_dump": windbg_dump}
     return {"verdict": verdict, "source": "llm_judge",
             "history": history, "llm_analysis": llm_text[:8000],
-            "packed_signal": packed_sig, "unpack_prepass": unpack_prepass}
+            "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
+                "windbg_dump": windbg_dump}
 
 
 if __name__ == "__main__":
