@@ -396,7 +396,14 @@ Info "LLM keys live on the CONTROL PLANE (.env next to the repo there) - the VM 
 
 $marker = "C:\WinRE\.clean_snapshot"
 if (Test-Path $marker) { Ok "clean-snapshot marker present" }
-else { Act "create marker $marker"; if (-not $CheckMode) { New-Item -ItemType File -Path $marker -Force | Out-Null } }
+else {
+    Act "create marker $marker"
+    if (-not $CheckMode) {
+        $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+        Set-Content -LiteralPath $marker -Encoding ASCII `
+            -Value ("created=" + (Get-Date -Format o) + ";boot_epoch=" + $boot.ToString("o"))
+    }
+}
 if (-not $CheckMode) { Manual "TAKE/UPDATE the VM snapshot NOW so the marker is baked in (restores re-create it)." }
 
 # --- 6. VM desktop status shortcut ---------------------------------------------

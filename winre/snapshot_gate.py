@@ -107,9 +107,15 @@ def consume_marker(cfg: dict | None = None, timeout: int = 45) -> bool | None:
 
 
 def create_marker(cfg: dict | None = None, timeout: int = 45) -> bool:
-    """One-time setup helper: create the marker (run BEFORE taking the snapshot)."""
+    """One-time setup helper: create the marker (run BEFORE taking the snapshot).
+
+    Content is audit-only (`created` + `boot_epoch`); the gate contract stays
+    presence-based so pre-existing empty markers remain valid.
+    """
     cfg = cfg or flare_cfg()
-    p = _ssh_ps(cfg, f"New-Item -ItemType File -Path '{MARKER}' -Force | Out-Null; "
+    p = _ssh_ps(cfg, "$boot=(Get-CimInstance Win32_OperatingSystem).LastBootUpTime; "
+                     f"$v='created=' + (Get-Date -Format o) + ';boot_epoch=' + $boot.ToString('o'); "
+                     f"Set-Content -LiteralPath '{MARKER}' -Value $v -Encoding ASCII; "
                      f"Test-Path -LiteralPath '{MARKER}'", timeout=timeout)
     return (p.stdout or "").strip().lower() == "true"
 

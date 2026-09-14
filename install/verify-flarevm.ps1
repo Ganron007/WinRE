@@ -199,8 +199,11 @@ else { Warn "UAC enabled - task launches are elevated silently; manual x64dbg la
 
 Write-Host ""
 Write-Host "--- Snapshot gate ---"
-if (Test-Path "C:\WinRE\.clean_snapshot") { Ok "clean-snapshot marker present (bake it into the VM snapshot)" }
-else { Info "no clean-snapshot marker (create with: New-Item C:\WinRE\.clean_snapshot -ItemType File, then re-snapshot)" }
+if (Test-Path "C:\WinRE\.clean_snapshot") {
+    Ok "clean-snapshot marker present (bake it into the VM snapshot)"
+    $mc = Get-Content "C:\WinRE\.clean_snapshot" -Raw -ErrorAction SilentlyContinue
+    if ($mc -and $mc.Trim()) { Info "marker content: $($mc.Trim())" }
+} else { Info "no clean-snapshot marker (create with: New-Item C:\WinRE\.clean_snapshot -ItemType File, then re-snapshot)" }
 
 Write-Host ""
 Write-Host "--- LLM config (control-plane concern) ---"
