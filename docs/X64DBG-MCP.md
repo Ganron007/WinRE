@@ -4,7 +4,7 @@
 > into `integrations/x64dbg-mcp-server-main/` (gitignored), then apply our
 > one-line fix from `tools/x64dbg-mcp-winre.patch` (surfacing hardware-BP
 > failures as errors instead of success text).
-> **Binary:** Zig single-file plugin `x64dbg-MCP-Server.dp64/.dp32` (`build.zig:5`); setup-flarevm.ps1 builds it when zig is on PATH.
+> **Binary:** Zig single-file plugin `x64dbg-MCP-Server.dp64/.dp32` (`build.zig:5`); setup-flarevm.ps1 auto-provisions the toolchain from `C:\Tools-staged\zig-*.zip` (zig 0.14+, `build.zig.zon` minimum) and builds from `C:\WinRE\integrations\x64dbg-mcp-server*`.
 
 ## 1. What it is
 
@@ -24,7 +24,7 @@ Event callbacks 22 (`README.md:37`): `CB_INITDEBUG`, `CB_STOPDEBUG`, `CB_BREAKPO
 ## 3. Install (FlareVM)
 
 ```powershell
-# build anywhere (Zig 0.16-dev) — wrapper added Phase 4
+# build anywhere (Zig 0.14+; setup-flarevm.ps1 uses C:\Tools\zig or the staged zip) — wrapper added Phase 4
 powershell -ExecutionPolicy Bypass -File C:\WinRE\tools\build_x64dbg_mcp.ps1
 # or directly:
 # cd integrations\x64dbg-mcp-server-main

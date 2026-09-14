@@ -24,6 +24,7 @@ the air-gapped VM.
 | Sysinternals strings64 `[base]` | `C:\Tools\sysinternals\strings64.exe` | — | raw string extraction | strings tool skips |
 | radare2 `[base]` | `C:\Tools\radare2\radare2.exe` | — | r2_decompile, sink_sites | those tools skip |
 | scdbg `[base]` | `C:\Tools\scdbg\scdbg.exe` | — | shellcode extraction emulation | shellcode_extract degrades |
+| UPX `[base]` | `C:\Tools\upx\upx.exe` | — | `upx_unpack` (static), UPX-packed test fixtures | upx_unpack skips honestly |
 | goresym `[user]`/`[stage]` | `C:\Tools\goresym\goresym.exe` | — | Go binaries only | goresym tool skips (Go detection gates it) |
 | ILSpy CLI `[user]` | `%USERPROFILE%\.dotnet\tools\ilspycmd.exe` | — | .NET decompile | dotnet_analyze degrades to metadata-only |
 | IDA Pro/Free + idasql `[user]` | `C:\Program Files\IDA Professional 9.3` (also probed: IDA Free 9.3/8.3, `C:\Tools\IDA*`) | **`WINRE_IDA_DIR`** (dir with `idat.exe`); **`IDASQL`** / `WINRE_IDASQL` (idasql.exe full path) | ida_query, .i64 creation | License states: **pro** (idapro*.hexlic in install dir, no AppData free license → fully supported) · **shadowed** (Pro present but a stale FREE license in the user profile wins license resolution → move the stale file aside, backup kept) · **free** (no Pro anywhere → instant honest skip + actionable message, GUI-only) · **missing** (setup verify fails open, Ghidra canonical) |

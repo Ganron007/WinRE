@@ -84,6 +84,16 @@ $scdbgOk = Get-File "https://github.com/dzzie/SCDBG/releases/latest/download/scd
 $yaraOk = Get-File "https://github.com/VirusTotal/yara-x/releases/latest/download/yr-x86_64-pc-windows-msvc.zip" `
     (Join-Path $stage "yr-x86_64-pc-windows-msvc.zip")
 
+# capa-rules (mandiant): capa's capability signatures
+$capaRulesDir = Join-Path $stage "capa-rules"
+if (-not (Test-Path (Join-Path $capaRulesDir ".git"))) {
+    try {
+        git clone --depth 1 https://github.com/mandiant/capa-rules $capaRulesDir 2>$null
+        if (Test-Path (Join-Path $capaRulesDir ".git")) { Write-Host "  [OK] capa-rules staged" }
+        else { Write-Host "  [WARN] capa-rules clone failed - fetch manually (mandiant/capa-rules)" -ForegroundColor Yellow }
+    } catch { Write-Host "  [WARN] git not available - fetch capa-rules manually" -ForegroundColor Yellow }
+}
+
 # x64dbg-MCP source (users fetch upstream; we apply tools\x64dbg-mcp-winre.patch)
 $gitOk = $true
 try {
@@ -123,8 +133,10 @@ Write-Host "     (or let the FlareVM base installer place them)"
 Write-Host "  5. die_win32_portable_*.zip                -> unzip, copy diec.exe to C:\Tools\die\"
 Write-Host "  6. GoReSym.exe                             -> C:\Tools\goresym\goresym.exe"
 Write-Host "  7. scdbg.zip / yr-x86_64-*.zip             -> C:\Tools\scdbg\ / C:\Tools\yr\ (FlareVM base often ships these)"
-Write-Host "  8. Run: powershell -File C:\WinRE\install\setup-flarevm.ps1"
-Write-Host "     (builds the MCP plugin with the staged zig, verifies everything)"
+Write-Host "  8. capa-rules\ (cloned)                    -> C:\Tools\capa-rules"
+Write-Host "  9. x64dbg-mcp-server\ (cloned)             -> C:\WinRE\integrations\ (setup builds the plugin)"
+Write-Host " 10. Run: powershell -File C:\WinRE\install\setup-flarevm.ps1"
+Write-Host "     (unzips staged zig, builds the MCP plugin, verifies everything)"
 Write-Host ""
 $failed = @()
 if (-not $ghidraOk) { $failed += "Ghidra" }

@@ -52,8 +52,40 @@ python ops\smoke_flare.py
 
 ## 2. FlareVM (execution VM)
 
+### Bare VM: what you provide vs what WinRE configures
+
+**You provide (once):**
+
+| Step | Why |
+|---|---|
+| Windows 10 + **FlareVM base** | all free tooling (Ghidra, x64dbg, FakeNet-NG, Procmon, Sysinternals, pe-sieve, hollows_hunter, ...) |
+| **Python 3.13 (all users) -> `C:\Python313`** | every WinRE tool + MCP server runs on it; setup installs the pip deps |
+| **Malcat** (optional commercial) installed + license activated | malcat_* tools; honest skip when absent |
+| **IDA Pro** (optional commercial) installed + activated; `idasql.exe` next to `idat.exe` | `ida_query` / `.i64` creation; headless needs Pro (Free is GUI-only) |
+| **SSH key**: your public key in `C:\ProgramData\ssh\administrators_authorized_keys` | FlareVM's admin user authenticates via that file, NOT the profile one - see [`REVAI-BRIDGE.md`](REVAI-BRIDGE.md) 2.1 |
+| NAT/internet **during setup only** | pip downloads (or use staged wheels); production stays air-gapped |
+
+**WinRE configures (idempotent: `sync_to_flare.ps1` + `setup-flarevm.ps1`):**
+repo `C:\WinRE` + layout, snapshot marker, `.env.template`; pip deps
+(`frida`, `flask`, `pefile`, `psutil`, `oletools`, `pypdf`, `dnfile`, `z3`,
+`angr`, `speakeasy`, `mcp-windbg`, `setuptools<81`) - from
+`C:\Tools-staged\wheels` first (air-gap safe); the **x64dbg-MCP plugin chain**
+(source -> `tools\x64dbg-mcp-winre.patch` -> staged zig auto-unzip to
+`C:\Tools\zig` -> build -> deploy to `C:\Tools\x64dbg\release\x64\plugins`);
+MCP autostart (Malcat :9009, mcp-windbg :9097; x64dbg :9094 on demand);
+IDA license hygiene (shadowed-Free auto-fix) + logon/BinDiff cleanup.
+
+Rules: `C:\Tools\capa-rules` (clone `mandiant/capa-rules`) and
+`C:\Tools\yara-rules` (curated set - operator stages). `ops\provision_tools.ps1`
+downloads/clones the free tools and stages them to `C:\Tools-staged\`.
+
+**Operator with staged assets** (`internal\reapply\`, air-gap safe): one
+command re-applies everything to a fresh/reverted VM -
+`powershell -ExecutionPolicy Bypass -File ops\reapply_after_revert.ps1`.
+
 1. Build the VM: Windows 10/11 on an **isolated network**, FlareVM base
-   installed, commercial tools per [`PREREQUISITES.md`](PREREQUISITES.md).
+   installed, plus the "you provide" list above (commercial tools per
+   [`PREREQUISITES.md`](PREREQUISITES.md)).
 2. Sync the repo from the control plane:
 
    ```powershell
@@ -87,12 +119,18 @@ python -m winre.ui.app          # http://127.0.0.1:5001
 
 ## 4. First run
 
+> **Fresh-VM validation (benign):** use a **VM-native** benign binary - copy
+> `C:\Windows\System32\notepad.exe` *from the VM* to the control plane and run
+> against that file. Host Windows 11 system binaries do NOT run on the
+> Win10 VM (they exit instantly). This validates setup end-to-end without
+> any sample risk.
+
 ```powershell
-# static-only (default, safe) — deterministic engine needs no LLM at all
-python -m winre.pipeline C:\samples\notepad.exe --mode static
+# static-only (default, safe) - deterministic engine needs no LLM at all
+python -m winre.pipeline <vm-native-benign.exe> --mode static
 
 # or agentic engine (needs the LLM endpoint for llm_judge)
-python -m winre.pipeline C:\samples\notepad.exe --mode agentic
+python -m winre.pipeline <vm-native-benign.exe> --mode agentic
 
 # or from the UI: Run page -> pick sample -> deep-mode -> Run pipeline
 ```

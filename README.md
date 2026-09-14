@@ -143,7 +143,7 @@ python C:\WinRE\winre\orchestrator.py <sha256> --mode local --max-seconds 45
 
 # 5. Debugger MCP (x64dbg)
 #    build once:    powershell -File C:\WinRE\tools\build_x64dbg_mcp.ps1
-#    deploy:        xcopy /E dist\x64\plugins\x64dbg-MCP-Server.dp64 C:\tools\x64dbg\x64\plugins\
+#    deploy:        xcopy /E dist\x64\plugins\x64dbg-MCP-Server.dp64 C:\Tools\x64dbg\release\x64\plugins\
 #    then in x64dbg: Plugins > Configure MCP Server > 0.0.0.0:9094
 curl http://127.0.0.1:9094/ -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 

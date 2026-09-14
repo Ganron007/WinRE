@@ -49,7 +49,9 @@ if (-not $OutDir) {
 }
 if (-not $ZigPath) {
     $cmd = Get-Command zig -ErrorAction SilentlyContinue
-    if ($cmd) { $ZigPath = $cmd.Path } else { $ZigPath = "C:\zig\zig.exe" }
+    if ($cmd) { $ZigPath = $cmd.Path }
+    elseif (Test-Path "C:\Tools\zig\zig.exe") { $ZigPath = "C:\Tools\zig\zig.exe" }
+    else { $ZigPath = "C:\zig\zig.exe" }
 }
 
 function Log([string]$m) { Write-Host "[build_x64dbg_mcp] $m" }
@@ -60,7 +62,7 @@ Log "SourceDir = $SourceDir"
 Log "OutDir    = $OutDir"
 Log "Target    = $Target"
 
-if (-not (Test-Path $ZigPath)) { Die "zig not found: $ZigPath (install from https://ziglang.org/download/, 0.16-dev required)" }
+if (-not (Test-Path $ZigPath)) { Die "zig not found: $ZigPath (install zig 0.14+ from https://ziglang.org/download/; build.zig.zon requires >=0.14.0)" }
 if (-not (Test-Path (Join-Path $SourceDir "build.zig"))) { Die "build.zig missing in $SourceDir (run `git submodule update --init`?)" }
 if (-not (Test-Path (Join-Path $SourceDir "build.zig.zon"))) { Die "build.zig.zon missing" }
 

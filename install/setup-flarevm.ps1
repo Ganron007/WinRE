@@ -216,10 +216,12 @@ Write-Host ""
 Write-Host "--- Free static tooling ---"
 foreach ($t in @(
         @("C:\Tools\capa\capa.exe", "capa (REQUIRED free; pip fallback auto-used)"),
+        @("C:\Tools\capa-rules", "capa-rules dir (REQUIRED free; mandiant/capa-rules)"),
         @("C:\Tools\die\diec.exe", "Detect It Easy diec (REQUIRED free)"),
         @("C:\Tools\yr\yr.exe", "yara-x scanner (REQUIRED free)"),
         @("C:\Tools\yara-rules", "curated YARA rules dir (REQUIRED free)"),
         @("C:\Tools\scdbg\scdbg.exe", "scdbg shellcode emulator (free)"),
+        @("C:\Tools\upx\upx.exe", "UPX (free; upx_unpack + packed test fixtures)"),
         @("C:\Tools\radare2\radare2.exe", "radare2 (free)"),
         @("C:\Tools\goresym\goresym.exe", "goresym (free; Go samples only)"),
         @("C:\Tools\sysinternals\strings64.exe", "Sysinternals strings64 (free)"))) {
@@ -237,11 +239,61 @@ if (Test-Path $x64) {
         Where-Object Name -match "^x64dbg-MCP-Server" | Select-Object -First 1
     if ($plug) { Ok "MCP plugin -> $($plug.FullName)" }
     else {
-        if (Get-Command zig -ErrorAction SilentlyContinue) {
-            Act "build x64dbg MCP plugin (zig build) from C:\WinRE\integrations\x64dbg-mcp-server"
+        # ---- fresh-VM plugin chain: source -> patch -> zig -> build ----
+        # source: repo integrations\ OR the host-staged clone (provision_tools)
+        $srcDir = Get-ChildItem "C:\WinRE\integrations" -Directory -ErrorAction SilentlyContinue |
+            Where-Object Name -match "^x64dbg-mcp-server" | Select-Object -First 1
+        if (-not $srcDir) {
+            $stagedSrc = Get-ChildItem "C:\Tools-staged" -Directory -ErrorAction SilentlyContinue |
+                Where-Object Name -match "^x64dbg-mcp-server" | Select-Object -First 1
+            if ($stagedSrc) {
+                Act "copy staged plugin source -> C:\WinRE\integrations\x64dbg-mcp-server"
+                if (-not $CheckMode) {
+                    New-Item -ItemType Directory -Force -Path "C:\WinRE\integrations" | Out-Null
+                    Copy-Item $stagedSrc.FullName "C:\WinRE\integrations\x64dbg-mcp-server" -Recurse -Force
+                    $srcDir = Get-Item "C:\WinRE\integrations\x64dbg-mcp-server" -ErrorAction SilentlyContinue
+                } else {
+                    $srcDir = $stagedSrc
+                }
+            }
+        }
+        # our one-line patch (hardware-BP failures must surface)
+        if ($srcDir -and (Test-Path "C:\WinRE\tools\x64dbg-mcp-winre.patch")) {
+            $toolsZig = Join-Path $srcDir.FullName "src\mcp\tools.zig"
+            if ((Test-Path $toolsZig) -and
+                -not (Select-String -Path $toolsZig -Pattern "WinRE" -Quiet)) {
+                Act "apply tools\x64dbg-mcp-winre.patch"
+                if (-not $CheckMode) {
+                    Push-Location $srcDir.FullName
+                    git apply "C:\WinRE\tools\x64dbg-mcp-winre.patch" 2>&1 | Select-Object -Last 2
+                    Pop-Location
+                    if (Select-String -Path $toolsZig -Pattern "WinRE" -Quiet) { Ok "patch applied" }
+                    else { Manual "git apply failed - apply tools\x64dbg-mcp-winre.patch manually (docs\X64DBG-MCP.md)." }
+                }
+            }
+        }
+        # zig: on PATH, else auto-unzip the staged toolchain to C:\Tools\zig
+        $zigCmd = Get-Command zig -ErrorAction SilentlyContinue
+        if (-not $zigCmd -and -not (Test-Path "C:\Tools\zig\zig.exe")) {
+            $zigZip = Get-ChildItem "C:\Tools-staged" -File -ErrorAction SilentlyContinue |
+                Where-Object Name -match "^zig.*\.zip$" | Select-Object -First 1
+            if ($zigZip) {
+                Act "unzip $($zigZip.Name) -> C:\Tools\zig"
+                if (-not $CheckMode) {
+                    Expand-Archive -Path $zigZip.FullName -DestinationPath "C:\Tools\zig-tmp" -Force -ErrorAction SilentlyContinue
+                    $inner = Get-ChildItem "C:\Tools\zig-tmp" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($inner) { Move-Item $inner.FullName "C:\Tools\zig" -Force }
+                    Remove-Item "C:\Tools\zig-tmp" -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        if (Test-Path "C:\Tools\zig\zig.exe") { $env:PATH = "C:\Tools\zig;$env:PATH" }
+        $zigCmd = Get-Command zig -ErrorAction SilentlyContinue
+        if ($srcDir -and $zigCmd) {
+            Act "build x64dbg MCP plugin (zig build) from $($srcDir.FullName)"
             if (-not $CheckMode) {
-                Push-Location "C:\WinRE\integrations\x64dbg-mcp-server"
-                zig build 2>&1 | Select-Object -Last 3
+                Push-Location $srcDir.FullName
+                & $zigCmd.Path build 2>&1 | Select-Object -Last 3
                 $built = Get-ChildItem "zig-out" -Recurse -Include "*.dp64", "*.dp32" -ErrorAction SilentlyContinue |
                     Where-Object Name -match "^x64dbg-MCP-Server" | Select-Object -First 1
                 if ($built) {
@@ -252,7 +304,10 @@ if (Test-Path $x64) {
                 } else { Manual "zig build produced no plugin - build manually (docs\X64DBG-MCP.md)." }
                 Pop-Location
             }
-        } else { Manual "MCP plugin missing and zig not on PATH - build per docs\X64DBG-MCP.md (zig 0.14.x)." }
+        } else {
+            if (-not $srcDir) { Manual "MCP plugin source missing - clone duty1g/x64dbg-mcp-server into C:\WinRE\integrations, or run ops\provision_tools.ps1 on the host (docs\X64DBG-MCP.md)." }
+            if (-not $zigCmd) { Manual "zig missing - stage C:\Tools-staged\zig-*.zip via ops\provision_tools.ps1 (zig 0.14+, build.zig.zon minimum) or install manually (docs\X64DBG-MCP.md)." }
+        }
     }
 } else { Manual "REQUIRED (free): install x64dbg to C:\Tools\x64dbg - run the FlareVM base installer (brings it) or download the release; then re-run setup. docs\PREREQUISITES.md." }
 
