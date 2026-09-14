@@ -69,14 +69,31 @@ function Start-Hidden([string]$file, [string[]]$argsList, [string]$name, [int]$p
     $win = "Hidden"
     if ($Foreground) { $win = "Normal" }
     $log = Join-Path $LogDir "$name-$ts.log"
-    # Redirect *> only works in PS; for hidden windows we capture via
-    # Start-Process -RedirectStandardOutput when not foreground.
-    $p = Start-Process -FilePath $file -ArgumentList $argsList -PassThru `
-        -WindowStyle $win
+    $errLog = Join-Path $LogDir "$name-$ts.err.log"
+    # QUOTE every argument: -ArgumentList with an array joins with spaces and
+    # does NOT quote — any arg containing a space is split (observed: python
+    # received `-c import` and died with SyntaxError). Build one string.
+    $quoted = ($argsList | ForEach-Object {
+        if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+    }) -join ' '
+    $p = Start-Process -FilePath $file -ArgumentList $quoted -PassThru `
+        -WindowStyle $win `
+        -RedirectStandardOutput $log -RedirectStandardError $errLog `
+        -ErrorAction SilentlyContinue
+    if (-not $p) {
+        Write-Host "[winre-mcp] ERROR: could not start $name (see $errLog)" -ForegroundColor Red
+        return
+    }
     if (-not $Foreground) {
         Start-Sleep -Milliseconds 500
     }
-    Write-Host "[winre-mcp] $name starting -> :$port (pid $($p.Id))" -ForegroundColor Green
+    Write-Host "[winre-mcp] $name starting -> :$port (pid $($p.Id)) logs: $log"
+    # crash-visibility: a server that dies early must not be silent
+    Start-Sleep -Seconds 2
+    if ($p.HasExited) {
+        $tail = (Get-Content $errLog -Tail 6 -ErrorAction SilentlyContinue) -join ' | '
+        Write-Host "[winre-mcp] ERROR: $name exited rc=$($p.ExitCode) — $tail" -ForegroundColor Red
+    }
 }
 
 Write-Host "[winre-mcp] starting WinRE MCP servers (boot-safe)..." -ForegroundColor Cyan
