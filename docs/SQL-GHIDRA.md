@@ -31,12 +31,19 @@ C:\WinRE\cache\ghidra\               # per-sample project dir (gitignored)
 Install:
 
 ```powershell
-# 1. Verify Ghidra
-dir C:\tools\ghidra*\support\analyzeHeadless.bat
-# 2. Install LibGhidraHost (copy built jar from RevEng or rebuild)
-xcopy /E /I C:\WinRE\deps\LibGhidraHost C:\tools\ghidra_12.2_PUBLIC\Ghidra\Extensions\LibGhidraHost
-# 3. Install CADRE loader
-xcopy /E /I C:\WinRE\deps\CADRE C:\tools\ghidra_12.2_PUBLIC\Ghidra\Extensions\CADRE
+# 1. Verify Ghidra (setup detects C:\Tools\ghidra_*)
+dir C:\Tools\ghidra*\support\analyzeHeadless.bat
+# 2. Headless SQL: NOTHING to install - GhidraSql.java ships in this repo
+#    (C:\WinRE\tools\ghidra_scripts\GhidraSql.java); sync + setup is enough.
+# 3. CADRE PE loader (required by verify; platform-provided - not public):
+#    stage the BUILT extension and setup installs it:
+#      copy RevAI\extensions\cadre-pe-loader -> C:\Tools-staged\cadre-pe-loader
+#      (or build RevEng\Tools\cadre-ghidra-loader via build.sh)
+#    -> <ghidra>\Ghidra\Extensions\CADRE
+# 4. LibGhidraHost (OPTIONAL - serve mode :19301 only): copy the built
+#    extension from RevEng or rebuild with Gradle ->
+#    <ghidra>\Ghidra\Extensions\LibGhidraHost (wrapper auto-detects
+#    ...\lib\GhidraSql.jar). Headless is the default path.
 ```
 
 ## 3. Canonical queries (must match Remnux)

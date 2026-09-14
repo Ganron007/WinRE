@@ -95,8 +95,7 @@ if (-not (Test-Path (Join-Path $capaRulesDir ".git"))) {
 }
 
 # x64dbg-MCP source (users fetch upstream; we apply tools\x64dbg-mcp-winre.patch)
-$gitOk = $true
-try {
+$gitOk = $truetry {
     $mcpDir = Join-Path $stage "x64dbg-mcp-server"
     if (-not (Test-Path $mcpDir)) {
         git clone --depth 1 https://github.com/duty1g/x64dbg-mcp-server $mcpDir 2>$null
@@ -112,6 +111,16 @@ try {
 } catch { Write-Host "  [WARN] git not available - fetch x64dbg-mcp-server manually" -ForegroundColor Yellow }
 
 Write-Host ""
+# --- Platform-provided / licensed (NOT downloaded) -----------------------------
+#   CADRE PE loader : built extension - stage from RevAI\extensions\cadre-pe-loader
+#                     (or build RevEng\Tools\cadre-ghidra-loader); setup installs
+#                     it into Ghidra\Extensions\CADRE.
+#   idasql.exe      : licensed (allthingsida/idasql) - drop your copy at
+#                     dist\provision\idasql.exe; it is staged to C:\Tools-staged
+#                     and setup installs it next to idat.exe.
+if (Test-Path (Join-Path $stage "idasql.exe")) { Write-Host "  [OK] idasql.exe staged (licensed copy provided)" }
+else { Write-Host "  [NOTE] idasql.exe not staged - place your licensed copy at dist\provision\idasql.exe" -ForegroundColor DarkGray }
+
 Write-Host "--- Staging to VM (C:\Tools-staged) ---" -ForegroundColor Cyan
 if (-not $FlareHost) { Write-Host "[WARN] FLARE_HOST not set - staging locally only ($stage)" -ForegroundColor Yellow }
 else {

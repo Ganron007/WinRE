@@ -10,6 +10,7 @@
 
       1. sync repo             -> C:\WinRE              (ops/sync_to_flare.ps1)
       2. stage integrations    -> C:\WinRE\integrations (gitignored, host-only)
+      2b. CADRE loader + idasql-> C:\Tools-staged       (setup installs both)
       3. stage offline wheels  -> C:\Tools-staged\wheels (pip --no-index)
       4. restore rule sets     -> C:\Tools\{yara,capa}-rules (host backup)
       5. run setup-flarevm.ps1 on the VM (detects/fixes: pip deps, setuptools
@@ -93,6 +94,25 @@ Write-Host "`n--- 2. stage integrations ---"
 $integ = Join-Path $repo "integrations"
 if (Test-Path $integ) { Get-File $integ "C:/WinRE/" }
 else { Write-Host "  [SKIP] host integrations\ missing" }
+
+# --- 2b. CADRE PE loader (Ghidra extension) + idasql (licensed) ----------------
+# Sourced from the sibling RevAI checkout or a local backup; setup installs
+# them (Extensions\CADRE, next to idat.exe). Neither is downloadable - CADRE
+# is platform-provided, idasql is licensed.
+Write-Host "`n--- 2b. stage CADRE loader + idasql -> C:\Tools-staged ---"
+Invoke-VM "New-Item -ItemType Directory -Force -Path C:\Tools-staged | Out-Null; 'ok'" 60 | Out-Null
+$cadre = @(
+    (Join-Path (Split-Path $repo -Parent) "RevAI\extensions\cadre-pe-loader"),
+    (Join-Path $repo "internal\reapply\cadre-pe-loader")
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($cadre) { Get-File $cadre "C:/Tools-staged/cadre-pe-loader" }
+else { Write-Host "  [SKIP] CADRE extension not found (expected RevAI\extensions\cadre-pe-loader or internal\reapply\cadre-pe-loader)" }
+$idasql = @(
+    (Join-Path $repo "internal\reapply\idasql.exe"),
+    (Join-Path $repo "deps\idasql.exe")
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($idasql) { Get-File $idasql "C:/Tools-staged/" }
+else { Write-Host "  [NOTE] idasql.exe not staged - drop your licensed copy at internal\reapply\idasql.exe to auto-install" }
 
 # --- 3. offline wheels --------------------------------------------------------
 Write-Host "`n--- 3. stage offline wheels -> C:\Tools-staged\wheels ---"

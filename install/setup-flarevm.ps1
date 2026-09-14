@@ -133,11 +133,32 @@ $ghidra = Get-ChildItem "C:\Tools" -Directory -ErrorAction SilentlyContinue |
     Where-Object Name -match "^ghidra_\d" | Select-Object -First 1
 if ($ghidra) {
     Ok "Ghidra -> $($ghidra.FullName)"
-    $loader = Get-ChildItem (Join-Path $ghidra.FullName "Ghidra\Extensions") -Directory -ErrorAction SilentlyContinue |
+    $extDir = Join-Path $ghidra.FullName "Ghidra\Extensions"
+    $loader = Get-ChildItem $extDir -Directory -ErrorAction SilentlyContinue |
         Where-Object Name -match "CADRE" | Select-Object -First 1
+    if (-not $loader -and (Test-Path "C:\Tools-staged\cadre-pe-loader")) {
+        Act "install CADRE PE loader -> $extDir\CADRE"
+        if (-not $CheckMode) {
+            New-Item -ItemType Directory -Force -Path $extDir | Out-Null
+            Copy-Item "C:\Tools-staged\cadre-pe-loader" (Join-Path $extDir "CADRE") -Recurse -Force
+        }
+        $loader = Get-Item (Join-Path $extDir "CADRE") -ErrorAction SilentlyContinue
+    }
     if ($loader) { Ok "CADRE PE loader -> $($loader.Name)" }
-    else { Manual "Build/copy the CADRE PE loader into $($ghidra.FullName)\Ghidra\Extensions (see docs\PREREQUISITES.md)." }
-} else { Manual "Install Ghidra 12.x to C:\Tools\ghidra_<version> (docs\PREREQUISITES.md)." }
+    else { Manual "Copy the CADRE PE loader into $extDir (stage RevAI\extensions\cadre-pe-loader via ops\reapply_after_revert.ps1, or build RevEng\Tools\cadre-ghidra-loader)." }
+    # SQL surface: headless path is SELF-CONTAINED in the repo (GhidraSql.java);
+    # LibGhidraHost (:19301 serve) is optional.
+    if (Test-Path "C:\WinRE\tools\ghidra_scripts\GhidraSql.java") {
+        Ok "Ghidra SQL headless path ready (repo GhidraSql.java)"
+    } else {
+        Warn "GhidraSql.java missing under C:\WinRE\tools\ghidra_scripts - ghidra_query headless path unavailable"
+    }
+    if (Test-Path (Join-Path $extDir "LibGhidraHost")) {
+        Ok "LibGhidraHost present (optional :19301 serve mode)"
+    } else {
+        Info "LibGhidraHost not installed (optional; headless SQL is the default - docs\SQL-GHIDRA.md)"
+    }
+} else { Manual "Install Ghidra 11/12.x to C:\Tools\ghidra_<version> (docs\PREREQUISITES.md)." }
 
 $malcatBin = @("C:\Tools\malcat\bin", "C:\Program Files\Malcat\bin",
                "C:\Users\$env:USERNAME\Downloads\malcat\bin") |
@@ -161,8 +182,18 @@ $idaCands += @("C:\Program Files\IDA Professional 9.3", "C:\Program Files\IDA Fr
 $idaResolved = $idaCands | Where-Object { Test-Path (Join-Path $_ "idat.exe") } | Select-Object -First 1
 if ($idaResolved) {
     Ok "IDA -> $idaResolved"
-    if (Test-Path (Join-Path $idaResolved "idasql.exe")) { Ok "idasql present" }
-    else { Manual "Install idasql.exe into $idaResolved (id_query tool needs it)." }
+    $idasqlPath = Join-Path $idaResolved "idasql.exe"
+    if (Test-Path $idasqlPath) { Ok "idasql present" }
+    elseif (Test-Path "C:\Tools-staged\idasql.exe") {
+        Act "install idasql.exe -> $idaResolved"
+        if (-not $CheckMode) {
+            Copy-Item "C:\Tools-staged\idasql.exe" $idasqlPath -Force
+            if (Test-Path $idasqlPath) { Ok "idasql installed (from staged copy)" }
+            else { Manual "copy failed - place idasql.exe next to idat.exe manually" }
+        }
+    } else {
+        Manual "idasql.exe missing (licensed; allthingsida/idasql): place it next to idat.exe in $idaResolved, or drop it at C:\Tools-staged\idasql.exe - setup installs it."
+    }
     # license-flavor resolution (same order IDA itself uses: profile first).
     # A stale FREE license in AppData SHADOWS a real PRO license in the
     # install dir for headless runs — the #1 user-side IDA integration trap.

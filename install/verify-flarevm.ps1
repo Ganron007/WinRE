@@ -78,6 +78,16 @@ if ($ghidra) {
         Where-Object Name -match "CADRE" | Select-Object -First 1
     if ($loader) { Ok "CADRE PE loader extension -> $($loader.Name)" }
     else { Fail "CADRE PE loader extension not in Ghidra\Extensions (see docs\PREREQUISITES.md)" }
+    if (Test-Path "C:\WinRE\tools\ghidra_scripts\GhidraSql.java") {
+        Ok "GhidraSql.java post-script present (headless SQL)"
+    } else {
+        Warn "GhidraSql.java missing under C:\WinRE\tools\ghidra_scripts (ghidra_query headless unavailable)"
+    }
+    if (Test-Path (Join-Path $ghidra.FullName "Ghidra\Extensions\LibGhidraHost")) {
+        Ok "LibGhidraHost present (optional :19301 serve mode)"
+    } else {
+        Info "LibGhidraHost absent (optional; headless SQL is the default - docs\SQL-GHIDRA.md)"
+    }
 } else {
     Fail "Ghidra not found under C:\Tools\ghidra_* (see docs\PREREQUISITES.md)"
 }

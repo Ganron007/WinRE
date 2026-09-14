@@ -61,7 +61,7 @@ python ops\smoke_flare.py
 | Windows 10 + **FlareVM base** | all free tooling (Ghidra, x64dbg, FakeNet-NG, Procmon, Sysinternals, pe-sieve, hollows_hunter, ...) |
 | **Python 3.13 (all users) -> `C:\Python313`** | every WinRE tool + MCP server runs on it; setup installs the pip deps |
 | **Malcat** (optional commercial) installed + license activated | malcat_* tools; honest skip when absent |
-| **IDA Pro** (optional commercial) installed + activated; `idasql.exe` next to `idat.exe` | `ida_query` / `.i64` creation; headless needs Pro (Free is GUI-only) |
+| **IDA Pro** (optional commercial) installed + activated; `idasql.exe` next to `idat.exe` | `ida_query` / `.i64` creation; headless needs Pro (Free is GUI-only). Drop the licensed `idasql.exe` at `C:\Tools-staged\idasql.exe` and setup installs it |
 | **SSH key**: your public key in `C:\ProgramData\ssh\administrators_authorized_keys` | FlareVM's admin user authenticates via that file, NOT the profile one - see [`REVAI-BRIDGE.md`](REVAI-BRIDGE.md) 2.1 |
 | NAT/internet **during setup only** | pip downloads (or use staged wheels); production stays air-gapped |
 
@@ -72,8 +72,13 @@ repo `C:\WinRE` + layout, snapshot marker, `.env.template`; pip deps
 `C:\Tools-staged\wheels` first (air-gap safe); the **x64dbg-MCP plugin chain**
 (source -> `tools\x64dbg-mcp-winre.patch` -> staged zig auto-unzip to
 `C:\Tools\zig` -> build -> deploy to `C:\Tools\x64dbg\release\x64\plugins`);
-MCP autostart (Malcat :9009, mcp-windbg :9097; x64dbg :9094 on demand);
-IDA license hygiene (shadowed-Free auto-fix) + logon/BinDiff cleanup.
+the **Ghidra SQL headless path** (repo `tools\ghidra_scripts\GhidraSql.java` -
+zero install; LibGhidraHost `:19301` serve mode is optional) + **CADRE PE
+loader** (auto-copied into Ghidra `Extensions\CADRE` from
+`C:\Tools-staged\cadre-pe-loader`); **`idasql.exe`** auto-installed from
+staging next to `idat.exe`; MCP autostart (Malcat :9009, mcp-windbg :9097;
+x64dbg :9094 on demand); IDA license hygiene (shadowed-Free auto-fix) +
+logon/BinDiff cleanup.
 
 Rules: `C:\Tools\capa-rules` (clone `mandiant/capa-rules`) and
 `C:\Tools\yara-rules` (curated set - operator stages). `ops\provision_tools.ps1`
