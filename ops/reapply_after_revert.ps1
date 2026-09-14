@@ -18,7 +18,9 @@
       6. run verify-flarevm.ps1 (PASS/FAIL battery)
 
     Host-side prerequisites (all under internal\reapply\, gitignored):
-      - wheels\   : setuptools<81 + pypdf (+ floss fallback)
+      - wheels\   : full offline pip set for C:\Python313 (frida, flask,
+                    pefile, psutil, oletools, pypdf, dnfile, z3-solver,
+                    speakeasy-emulator, mcp-windbg + deps + setuptools<81)
       - rules\    : yara-rules\ + capa-rules\ backups pulled from the VM
 
     Post-steps NOT automated here (by design):

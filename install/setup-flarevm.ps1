@@ -88,8 +88,12 @@ if (Test-Path $py) {
     $wheelDir = "C:\Tools-staged\wheels"
     # import name -> PyPI package name (needed where they differ)
     $pipNames = @{ "z3" = "z3-solver"; "speakeasy" = "speakeasy-emulator"; "mcp_windbg" = "mcp-windbg" }
+    # angr needs sdist-only deps (cooldict/cppheaderparser/mulpyplexer) - no
+    # offline wheel set exists; the deobf helper degrades gracefully, so a
+    # miss is Info, not Warn.
+    $optionalMods = @("angr")
     foreach ($mod in @("frida", "flask", "pefile", "psutil", "oletools",
-                       "pypdf", "dnfile", "z3", "angr", "speakeasy", "mcp_windbg")) {
+                       "pypdf", "dnfile", "z3", "speakeasy", "mcp_windbg", "angr")) {
         & $py -c "import $mod" 2>$null
         if ($LASTEXITCODE -eq 0) { Ok "module $mod present"; continue }
         $pipName = if ($pipNames.ContainsKey($mod)) { $pipNames[$mod] } else { $mod }
@@ -102,6 +106,7 @@ if (Test-Path $py) {
             if ($LASTEXITCODE -ne 0) { & $py -m pip install --quiet $pipName }
             & $py -c "import $mod" 2>$null
             if ($LASTEXITCODE -eq 0) { Ok "module $mod installed" }
+            elseif ($optionalMods -contains $mod) { Info "optional module $mod not installed (helper will skip it)" }
             else { Warn "module $mod still not importable - install manually (pip install $pipName)" }
         }
     }

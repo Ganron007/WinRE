@@ -95,7 +95,7 @@ if (-not (Test-Path (Join-Path $capaRulesDir ".git"))) {
 }
 
 # x64dbg-MCP source (users fetch upstream; we apply tools\x64dbg-mcp-winre.patch)
-$gitOk = $truetry {
+$gitOk = try {
     $mcpDir = Join-Path $stage "x64dbg-mcp-server"
     if (-not (Test-Path $mcpDir)) {
         git clone --depth 1 https://github.com/duty1g/x64dbg-mcp-server $mcpDir 2>$null
