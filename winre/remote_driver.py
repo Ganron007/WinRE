@@ -964,7 +964,9 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
     results["cleanup"] = _final_sweep(cfg, dynamic=enable_dynamic,
                                       debug=enable_agentic_dbg)
 
-    print(f"[winre-remote] {sha} quick={results['quick'].get('verdict')} "
+    # audit's static_verdict is deep-aware (quick writes a placeholder)
+    _verdict = (audit_res or {}).get("static_verdict")
+    print(f"[winre-remote] {sha} verdict={_verdict or results['quick'].get('verdict')} "
           f"dynamic={'ok' if results.get('dynamic',{}).get('ok') else 'not-run'} "
           f"truly_green={audit_res['truly_green']}", flush=True)
     return {"sha": sha, "results": results}

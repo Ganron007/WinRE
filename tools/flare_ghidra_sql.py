@@ -134,10 +134,22 @@ def health() -> dict:
 # Path A — analyzeHeadless.bat + Java post-script
 # ---------------------------------------------------------------------------
 def _loader_name() -> str:
-    """Only use the CADRE PE Loader when it is actually installed and
-    registered (extension dir contains a built jar + manifest). Otherwise
-    return '' so Ghidra auto-detects the loader — in Ghidra 12.1.3 the old
-    'PE Loader' name is invalid and an unregistered 'CADRE PE Loader' hangs."""
+    """Loader override for analyzeHeadless.
+
+    The CADRE PE Loader can hang Ghidra 12.1.x when the extension is present
+    but not correctly registered for that Ghidra build (the batch then sits at
+    its 'Press any key to continue' prompt). So it is NEVER forced by default:
+      - GHIDRA_LOADER=<name>     explicit override (operator knows best)
+      - WINRE_GHIDRA_CADRE=1     opt-in: 'CADRE PE Loader' when installed
+      - default: '' -> Ghidra auto-detects (built-in PE loader)
+    """
+    forced = (os.environ.get("GHIDRA_LOADER") or "").strip()
+    if forced:
+        return forced
+    if (os.environ.get("WINRE_GHIDRA_CADRE", "").strip().lower()
+            not in ("1", "true", "yes")):
+        return ""
+
     def _valid_cadre(dir_: Path) -> bool:
         try:
             if not dir_.is_dir():
@@ -219,17 +231,25 @@ def run_query_headless(sql: str, sample: Path, timeout: int = 420,
         cmd.insert(-2, f"GhidraSqlPersist.java GHIDRA_SQL_QUERY")
 
     try:
+        # stdin=DEVNULL: Ghidra's .bat launcher ends with an interactive
+        # `pause` when the JVM fails to start; without a closed stdin this
+        # subprocess would hang until the timeout instead of reporting the
+        # real error (observed: JDK mismatch + CADRE loader on 12.1.2).
         proc = subprocess.run(cmd, capture_output=True, text=True, env=env,
+                              stdin=subprocess.DEVNULL,
                               timeout=timeout, encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"analyzeHeadless timeout {timeout}s",
+        return {"ok": False, "error": f"analyzeHeadless timeout {timeout}s "
+                                      f"(launcher or analysis stuck; check "
+                                      f"java >= 21 and JAVA_HOME)",
                 "mode": "headless", "elapsed_s": round(time.time() - t0, 1)}
     except FileNotFoundError as e:
         return {"ok": False, "error": f"java/analyzeHeadless not invokable: {e}",
                 "mode": "headless"}
 
     if proc.returncode != 0:
-        return {"ok": False, "error": (proc.stderr or proc.stdout)[-800:],
+        tail = ((proc.stdout or "") + "\n" + (proc.stderr or ""))[-1200:]
+        return {"ok": False, "error": f"analyzeHeadless rc={proc.returncode}: {tail}",
                 "returncode": proc.returncode, "mode": "headless",
                 "elapsed_s": round(time.time() - t0, 1)}
 

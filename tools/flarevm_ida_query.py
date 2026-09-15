@@ -155,6 +155,12 @@ def query_oneshot(db_path: str, sql: str, write: bool = False) -> dict:
     """
     ok, resolved = _ensure_i64(db_path)
     if not ok:
+        # IDA/idasql are commercial-optional: absent tooling is an honest
+        # capability skip (no quality penalty), not a tool failure.
+        low = (resolved or "").lower()
+        if ("idasql not found" in low or "idat.exe not found" in low
+                or "idat not found" in low):
+            return {"ok": False, "skipped": f"ida_query disabled: {resolved}"}
         return {"ok": False, "error": resolved}
     db_path = resolved
 
@@ -169,7 +175,8 @@ def query_oneshot(db_path: str, sql: str, write: bool = False) -> dict:
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "timeout after 600s"}
     except FileNotFoundError:
-        return {"ok": False, "error": f"idasql not found at {IDASQL}"}
+        return {"ok": False,
+                "skipped": f"idasql not found at {IDASQL} (licensed, optional)"}
     stdout = result.stdout
     if result.returncode != 0 or "Error" in stdout:
         return {

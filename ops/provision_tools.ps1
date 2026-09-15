@@ -35,6 +35,19 @@ $repo = Split-Path -Parent $PSScriptRoot
 $stage = Join-Path $repo "dist\provision"
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
+# dotenv: FLARE_* live in .env on this host (params/env still win)
+$dotenv = @{}
+$dotenvPath = Join-Path $repo ".env"
+if (Test-Path $dotenvPath) {
+    foreach ($ln in Get-Content $dotenvPath) {
+        if ($ln -match '^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.+?)\s*$') { $dotenv[$Matches[1]] = $Matches[2].Trim('"') }
+    }
+}
+if (-not $FlareHost) { $FlareHost = if ($env:FLARE_HOST) { $env:FLARE_HOST } else { $dotenv["FLARE_HOST"] } }
+if (-not $User) { $User = if ($env:FLARE_USER) { $env:FLARE_USER } else { $dotenv["FLARE_USER"] } }
+if (-not $SshKey) { $SshKey = if ($env:FLARE_SSH_KEY) { $env:FLARE_SSH_KEY } else { $dotenv["FLARE_SSH_KEY"] } }
+if (-not $User) { $User = "FLARE-VM" }
+
 function Get-File([string]$url, [string]$out) {
     if (Test-Path $out) { Write-Host "  [SKIP] $(Split-Path $out -Leaf) (exists)" -ForegroundColor DarkGray; return $true }
     try {
@@ -54,18 +67,30 @@ $ghidraVer = "11.3.2"
 $ghidraOk = Get-File "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${ghidraVer}_build/ghidra_${ghidraVer}_PUBLIC_20250415.zip" `
     (Join-Path $stage "ghidra_${ghidraVer}_PUBLIC.zip")
 
-# x64dbg: latest snapshot zip
+# x64dbg: latest snapshot zip (asset name varies; try both)
 $x64Ok = Get-File "https://github.com/x64dbg/x64dbg/releases/download/snapshot/x64dbg.zip" `
     (Join-Path $stage "x64dbg.zip")
+if (-not $x64Ok) {
+    $x64Ok = Get-File "https://github.com/x64dbg/x64dbg/releases/latest/download/x64dbg.zip" `
+        (Join-Path $stage "x64dbg.zip")
+}
 
-# Zig (for the x64dbg MCP plugin build)
+# Zig (for the x64dbg MCP plugin build) - 0.14+ uses zig-<arch>-windows-<ver>.zip
 $zigVer = "0.14.1"
-$zigOk = Get-File "https://ziglang.org/download/${zigVer}/zig-windows-x86_64-${zigVer}.zip" `
+$zigOk = Get-File "https://ziglang.org/download/${zigVer}/zig-x86_64-windows-${zigVer}.zip" `
     (Join-Path $stage "zig-${zigVer}.zip")
+if (-not $zigOk) {
+    $zigOk = Get-File "https://ziglang.org/download/${zigVer}/zig-windows-x86_64-${zigVer}.zip" `
+        (Join-Path $stage "zig-${zigVer}.zip")
+}
 
-# pe-sieve / hollows_hunter (direct release binaries)
+# pe-sieve / hollows_hunter (direct release binaries; asset name varies)
 $peOk = Get-File "https://github.com/hasherezade/pe-sieve/releases/latest/download/pe_sieve64.exe" `
     (Join-Path $stage "pe-sieve64.exe")
+if (-not $peOk) {
+    $peOk = Get-File "https://github.com/hasherezade/pe-sieve/releases/latest/download/pe-sieve64.exe" `
+        (Join-Path $stage "pe-sieve64.exe")
+}
 $hhOk = Get-File "https://github.com/hasherezade/hollows_hunter/releases/latest/download/hollows_hunter64.exe" `
     (Join-Path $stage "hollows_hunter64.exe")
 

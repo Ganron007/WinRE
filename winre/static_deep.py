@@ -16,8 +16,11 @@ Verdict rules (conservative, evidence-cited):
                      are evidence-only and never drive the verdict
   malicious/medium — ransomware-family capa cluster OR
                      (packed + XOR-encoded strings + forged metadata)
-  suspicious       — packed/high-entropy + anomalies, or forged metadata,
-                     or high-signal imports alone
+  suspicious       — packed/high-entropy, or forged metadata, or RARE
+                     high-signal imports (strong set); generic Win32 imports
+                     and Malcat's generic anomalies (UnsignedMicrosoft,
+                     UnparsedVersionInfo, SpaghettiFunction, DelayImports...)
+                     are evidence-only and never drive the verdict alone
   unknown          — nothing fires (honest)
 """
 from __future__ import annotations
@@ -146,9 +149,20 @@ def _rules_verdict(ev: dict) -> dict:
                 "key_evidence": reasons,
                 "rules_fired": ["packed+xor+forged-metadata"]}
 
-    # 4. suspicious singles
+    # 4. suspicious singles - only RARE imports may drive suspicion alone.
+    # Generic Win32 plumbing (LoadLibrary/GetProcAddress/IsDebuggerPresent/
+    # CreateProcess/VirtualAlloc...) is ubiquitous in benign binaries
+    # (notepad flagged 'suspicious' from these alone) -> evidence-only.
+    _STRONG_LABELS = {
+        "create_remote_thread", "write_process_memory", "unmap_section_view",
+        "queue_apc", "set_thread_context", "download_file", "create_service",
+        "crypto_encrypt", "bcrypt_encrypt",
+    }
     sig_ev = _dict_of(ev.get("pe_import_signals"))
-    sigs = sig_ev.get("signals") or []
+    sigs = sig_ev.get("strong_signals")
+    if sigs is None:  # legacy output without the strong classifier
+        sigs = [s for s in (sig_ev.get("signals") or [])
+                if isinstance(s, dict) and s.get("label") in _STRONG_LABELS]
     if sigs:
         reasons.append("high-signal imports: " + ", ".join(
             s.get("label", "?") for s in sigs[:5] if isinstance(s, dict)))
@@ -162,9 +176,31 @@ def _rules_verdict(ev: dict) -> dict:
         reasons.append(f"packed/high-entropy ({len(high_ent)} sections >= 7.0)")
     if forged:
         reasons.append("version metadata looks forged")
-    anoms = (ev.get("malcat_anomalies") or [])
-    if anoms:
-        reasons.append(f"malcat anomalies: {len(anoms)}")
+    # Malcat anomalies: the raw list is generic code/import noise on nearly
+    # every binary (notepad: DelayImports x41, DynamicString, ManyHighValue-
+    # Immediates...). Only high-level (level>=4) or explicitly notable names
+    # may drive suspicion; everything else stays evidence-only.
+    anoms_raw = ev.get("malcat_anomalies") or []
+    if isinstance(anoms_raw, dict):
+        anoms_raw = anoms_raw.get("result") or []
+    _NOTABLE = ("packed", "high entropy", "virtualalloc", "inject", "hook",
+                "anti-debug", "antidebug", "anti-vm", "shellcode", "ransom",
+                "credential", "download", "persist", "obfus")
+    notable = []
+    for a in anoms_raw:
+        if not isinstance(a, dict):
+            continue
+        lvl = int(a.get("level") or 0)
+        text = (str(a.get("name") or "") + " " + str(a.get("desc") or "")).lower()
+        if lvl >= 4 or any(k in text for k in _NOTABLE):
+            notable.append(a)
+    # Malcat anomalies corroborate other signals but NEVER fire alone: stock
+    # catalog-signed Windows binaries (notepad/calc) trigger generic anomalies
+    # (UnsignedMicrosoft = no *embedded* signature, UnparsedVersionInfo,
+    # SpaghettiFunction) that would otherwise flag every healthy OS binary.
+    if notable and (packed or high_ent or forged or sigs or ahr.get("signal")):
+        reasons.append("malcat notable anomalies: " + ", ".join(
+            str(a.get("name")) for a in notable[:4]))
     if reasons:
         return {"verdict": "suspicious", "confidence": "medium",
                 "summary": "Suspicious static indicators, no decisive match.",

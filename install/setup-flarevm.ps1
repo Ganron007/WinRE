@@ -149,6 +149,41 @@ if (-not $ghidra) {
 }
 if ($ghidra) {
     Ok "Ghidra -> $($ghidra.FullName)"
+    # Ghidra headless needs a SUPPORTED JDK. FlareVM 2026 ships OpenJDK 25,
+    # which hangs Ghidra 12's launcher (batch lands on 'Press any key').
+    # Pin a Ghidra-supported JDK (21) via support\launch.properties.
+    $lp = Join-Path $ghidra.FullName "support\launch.properties"
+    if (Test-Path $lp) {
+        $jdk21 = @(Get-ChildItem "C:\Program Files\Eclipse Adoptium",
+                                   "C:\Program Files\Java",
+                                   "C:\Program Files\OpenJDK" -Directory -ErrorAction SilentlyContinue |
+            Where-Object Name -match "^jdk-21") | Select-Object -First 1
+        if (-not $jdk21 -and (Get-Command choco -ErrorAction SilentlyContinue)) {
+            Act "install temurin21 (Ghidra-supported JDK; FlareVM ships JDK25 which hangs Ghidra)"
+            if (-not $CheckMode) { & choco install temurin21 -y --no-progress 2>$null | Out-Null }
+            $jdk21 = @(Get-ChildItem "C:\Program Files\Eclipse Adoptium" -Directory -ErrorAction SilentlyContinue |
+                Where-Object Name -match "^jdk-21") | Select-Object -First 1
+        }
+        if ($jdk21) {
+            $cur = (Select-String -Path $lp -Pattern "^JAVA_HOME_OVERRIDE=(.*)$" |
+                Select-Object -First 1).Matches.Groups[1].Value
+            if ($cur -ne $jdk21.FullName) {
+                Act "pin Ghidra JAVA_HOME_OVERRIDE -> $($jdk21.FullName)"
+                if (-not $CheckMode) {
+                    Copy-Item $lp "$lp.winre.bak" -Force -ErrorAction SilentlyContinue
+                    $txt = Get-Content $lp -Raw
+                    if ($txt -match "(?m)^JAVA_HOME_OVERRIDE=") {
+                        $txt = $txt -replace "(?m)^JAVA_HOME_OVERRIDE=.*$", "JAVA_HOME_OVERRIDE=$($jdk21.FullName)"
+                    } else {
+                        $txt += "`nJAVA_HOME_OVERRIDE=$($jdk21.FullName)`n"
+                    }
+                    Set-Content -Path $lp -Value $txt -Encoding ASCII
+                }
+            } else { Ok "Ghidra JAVA_HOME_OVERRIDE pinned ($($jdk21.Name))" }
+        } else {
+            Manual "Ghidra needs a supported JDK (21): choco install temurin21, then set JAVA_HOME_OVERRIDE=<jdk-21 dir> in $lp (FlareVM ships JDK25 -> analyzeHeadless hangs)."
+        }
+    }
     $extDir = Join-Path $ghidra.FullName "Ghidra\Extensions"
     $loader = Get-ChildItem $extDir -Directory -ErrorAction SilentlyContinue |
         Where-Object Name -match "CADRE" | Select-Object -First 1

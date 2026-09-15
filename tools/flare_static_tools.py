@@ -500,6 +500,17 @@ _PE_IMPORT_SIGNALS = (
 )
 
 
+# Labels rare enough in benign software to justify suspicion ALONE. Generic
+# Win32 plumbing (LoadLibrary, GetProcAddress, IsDebuggerPresent, CreateProcess,
+# VirtualAlloc/VirtualProtect, RegSetValue, InternetOpen...) is evidence-only:
+# notepad imports several of them (observed false-positive -> 'suspicious').
+_STRONG_IMPORT_SIGNALS = {
+    "create_remote_thread", "write_process_memory", "unmap_section_view",
+    "queue_apc", "set_thread_context", "download_file", "create_service",
+    "crypto_encrypt", "bcrypt_encrypt",
+}
+
+
 def pe_import_signals(sample: str, timeout: int = 300) -> dict:
     """PE import table high-signal API map (pefile). NOT capa — never label
     as capa. Verbatim port of RevAI v2_lib.pe_import_signals."""
@@ -518,7 +529,8 @@ def pe_import_signals(sample: str, timeout: int = 300) -> dict:
         pe.close()
     except Exception as e:
         return {"ok": False, "error": f"pe_import_signals failed: {e}",
-                "engine": "pe_imports", "signal_count": 0, "signals": []}
+                "engine": "pe_imports", "signal_count": 0, "signals": [],
+                "strong_signals": [], "strong_count": 0}
     lower_keys = [n.lower() for n in imports_seen]
     signals: list[dict] = []
     seen_labels: set[str] = set()
@@ -527,11 +539,14 @@ def pe_import_signals(sample: str, timeout: int = 300) -> dict:
             if label in seen_labels:
                 continue
             seen_labels.add(label)
-            signals.append({"label": label, "api_match": api, "attack": tactics})
+            signals.append({"label": label, "api_match": api, "attack": tactics,
+                            "strong": label in _STRONG_IMPORT_SIGNALS})
+    strong = [s for s in signals if s.get("strong")]
     return {"ok": True, "tool": "pe_import_signals", "engine": "pe_imports",
             "duration_s": round(time.time() - t0, 2),
             "import_count": len(imports_seen), "signal_count": len(signals),
             "signals": signals,
+            "strong_signals": strong, "strong_count": len(strong),
             "hint": "PE import high-signal map (pefile). Not capa."}
 
 

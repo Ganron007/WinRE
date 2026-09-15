@@ -99,6 +99,21 @@ if ($ghidra) {
     Ok "Ghidra install -> $($ghidra.FullName)"
     $headless = Join-Path $ghidra.FullName "support\analyzeHeadless.bat"
     if (Test-Path $headless) { Ok "analyzeHeadless present" } else { Warn "analyzeHeadless.bat missing under $($ghidra.FullName)" }
+    # Ghidra 12 needs JDK 21; FlareVM 2026 ships JDK 25 -> launcher hangs.
+    $lp = Join-Path $ghidra.FullName "support\launch.properties"
+    if (Test-Path $lp) {
+        $ovr = (Select-String -Path $lp -Pattern "^JAVA_HOME_OVERRIDE=(.*)$" |
+            Select-Object -First 1).Matches.Groups[1].Value
+        if ($ovr -and (Test-Path $ovr)) { Ok "Ghidra JDK pinned -> $ovr" }
+        else {
+            $jvRaw = (& java -version 2>&1 | Select-Object -First 1) -replace '.*version "(\d+).*', '$1'
+            if ($jvRaw -match '^\d+$' -and [int]$jvRaw -ge 21 -and [int]$jvRaw -le 24) {
+                Ok "Ghidra JDK from PATH (java $jvRaw)"
+            } else {
+                Warn "Ghidra JAVA_HOME_OVERRIDE unset and java '$jvRaw' may be unsupported (Ghidra 12 wants 21) - analyzeHeadless can hang; run setup (pins temurin21)"
+            }
+        }
+    }
     $loader = Get-ChildItem (Join-Path $ghidra.FullName "Ghidra\Extensions") -Directory -ErrorAction SilentlyContinue |
         Where-Object Name -match "CADRE" | Select-Object -First 1
     if ($loader) { Ok "CADRE PE loader extension -> $($loader.Name)" }

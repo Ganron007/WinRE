@@ -606,12 +606,13 @@ def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = 
     except OSError:
         pass
 
-    # summary line
+    # summary line (verdict from the deep/rules engine - quick's verdict is a
+    # placeholder on remote runs)
     phase = "static"
     if dynamic:
         phase += f"+dynamic({'ok' if dynamic.get('ok') else 'FAIL'})"
     print(f"[winre-pipeline] {sha} [{phase}] "
-          f"quick={quick.get('verdict')} "
+          f"verdict={audit_res.get('static_verdict') or quick.get('verdict')} "
           f"truly_green={audit_res['truly_green']}", flush=True)
     return {"sha": sha, "results": results}
 

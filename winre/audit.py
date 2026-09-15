@@ -86,6 +86,20 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                                   .get("verdict"))
             except json.JSONDecodeError:
                 pass
+    # The REAL static verdict is produced by the deep stage
+    # (deep/deep.json -> agent.verdict). remote_quick writes a placeholder
+    # 'unknown', so prefer the deep verdict when present.
+    deepf = evidence / "deep" / "deep.json"
+    if deepf.is_file():
+        try:
+            _dv = ((json.loads(deepf.read_text(encoding="utf-8"))
+                    .get("agent") or {}).get("verdict"))
+            if isinstance(_dv, dict) and _dv.get("verdict"):
+                static_verdict = _dv.get("verdict")
+            elif isinstance(_dv, str):
+                static_verdict = _dv
+        except json.JSONDecodeError:
+            pass
     for dyn_name in ("STAGE.json", "META.json"):
         df = evidence / "dynamic" / dyn_name
         if df.is_file():
