@@ -99,8 +99,10 @@ function Start-Hidden([string]$file, [string[]]$argsList, [string]$name, [int]$p
 Write-Host "[winre-mcp] starting WinRE MCP servers (boot-safe)..." -ForegroundColor Cyan
 
 # --- Malcat MCP (headless, 45 tools) ---
-$malcatBin = "C:\Users\flare-vm\Downloads\malcat\bin\malcat.mcp.py"
-if (-not (Test-Path $malcatBin)) { $malcatBin = "C:\tools\malcat\bin\malcat.mcp.py" }
+# Canonical portable location: C:\Tools\malcat (folder name 'malcat').
+$malcatBin = "C:\Tools\malcat\bin\malcat.mcp.py"
+if (-not (Test-Path $malcatBin)) { $malcatBin = "C:\Program Files\Malcat\bin\malcat.mcp.py" }
+if (-not (Test-Path $malcatBin)) { $malcatBin = "C:\Users\flare-vm\Downloads\malcat\bin\malcat.mcp.py" }
 if (Test-Path $malcatBin) {
     $key = ""
     if (Test-Path "$WinRE\.env") {

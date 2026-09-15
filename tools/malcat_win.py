@@ -45,9 +45,9 @@ def _find_malcat_bin() -> Path:
     if env:
         return Path(env)
     candidates = [
-        Path(r"C:\Users\flare-vm\Downloads\malcat\bin"),
-        Path(r"C:\tools\malcat\bin"),
+        Path(r"C:\Tools\malcat\bin"),          # canonical (keep folder name: malcat)
         Path(r"C:\Program Files\Malcat\bin"),
+        Path(r"C:\Users\flare-vm\Downloads\malcat\bin"),
     ]
     for c in candidates:
         if (c / "malcat.mcp.py").is_file():

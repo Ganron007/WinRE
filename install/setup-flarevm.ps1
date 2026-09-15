@@ -178,13 +178,18 @@ $malcatBin = @("C:\Tools\malcat\bin", "C:\Program Files\Malcat\bin",
     Where-Object { Test-Path (Join-Path $_ "malcat.mcp.py") } | Select-Object -First 1
 if ($malcatBin) {
     Ok "Malcat -> $malcatBin"
+    if ($malcatBin -ne "C:\Tools\malcat\bin") {
+        Info "canonical Malcat location is C:\Tools\malcat (folder name 'malcat') - move it there for consistency"
+    }
     $malcatPy = Join-Path $malcatBin "python313\python.exe"
     if (-not (Test-Path $malcatPy)) { $malcatPy = "C:\Python313\python.exe" }
     $licOut = & $malcatPy -c "import sys; sys.path.insert(0, r'$malcatBin'); import malcat; print(malcat.env.flavor)" 2>$null
     $licVal = if ($licOut) { $licOut.Trim() } else { "unknown" }
     if ($licOut -match "FULL|OEM|PRO") { Ok "Malcat license ACTIVE ($($licOut.Trim()))" }
-    else { Manual "Activate Malcat (GUI -> Preferences -> license). Headless API reports: $licVal." }
-} else { Manual "Install Malcat (commercial) with bin\malcat.mcp.py reachable (docs\PREREQUISITES.md)." }
+    else { Manual "Activate the Malcat license: open C:\Tools\malcat\bin\malcat.exe -> Preferences -> License, paste the license (it writes %APPDATA%\Malcat\license.dat). Headless API currently reports: $licVal." }
+} else {
+    Manual "Install the portable Malcat at C:\Tools\malcat (keep the folder name 'malcat'; expected C:\Tools\malcat\bin\malcat.exe + malcat.mcp.py), then activate the license -> %APPDATA%\Malcat\license.dat. Also probed: C:\Program Files\Malcat, %USERPROFILE%\Downloads\malcat. docs\PREREQUISITES.md."
+}
 
 $idaDir = if ($env:WINRE_IDA_DIR) { $env:WINRE_IDA_DIR } else { "C:\Program Files\IDA Professional 9.3" }
 $idaCands = @()

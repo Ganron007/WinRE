@@ -142,7 +142,7 @@ if ($malcatBin) {
 } else {
     # Malcat is COMMERCIAL-OPTIONAL: pipeline degrades to Ghidra-primary
     # with honest 'skipped' annotations. Not a readiness failure.
-    Warn "Malcat not installed (OPTIONAL commercial) - pipeline runs Ghidra-primary with malcat steps skipped"
+    Warn "Malcat not installed (OPTIONAL commercial) - place the portable folder at C:\Tools\malcat (keep folder name 'malcat'; bin\malcat.mcp.py) + activate license -> %APPDATA%\Malcat\license.dat"
 }
 
 Write-Host ""
