@@ -90,7 +90,7 @@ Start from a **Windows 10/11 VM on an isolated/host-only network**.
 
 | Tool | Default location | Env override | Degradation when absent |
 |---|---|---|---|
-| **Malcat** (portable; + license) | `C:\Tools\malcat\bin` (also probed: `C:\Program Files\Malcat\bin`, `%USERPROFILE%\Downloads\malcat\bin`) — expects `bin\malcat.mcp.py` | `MALCAT_BIN_DIR` (license: `MALCAT_LICENSE`) | quick-triage strings/anomalies and Malcat agent tools are skipped (honest `skipped` annotations); Ghidra + x64dbg carry the analysis |
+| **Malcat** (portable; + license) | `C:\Tools\malcat\bin` - **keep the folder name `malcat`**; expects `bin\malcat.exe` + `bin\malcat.mcp.py` (also probed: `C:\Program Files\Malcat\bin`, `%USERPROFILE%\Downloads\malcat\bin`) | `MALCAT_BIN_DIR` (license: `MALCAT_LICENSE`, default `%APPDATA%\Malcat\license.dat`)
 | **IDA Professional** 9.x + `idasql` | `C:\Program Files\IDA Professional 9.3` (also probed: IDA Free 9.3/8.3, `C:\Tools\IDA*`) — **install-at-preference is fully supported** | `WINRE_IDA_DIR` (dir containing `idat.exe`); `IDASQL`/`WINRE_IDASQL` (full path to `idasql.exe`) | `ida_query` agent tool skips (honest skip + hint); Ghidra SQL is the canonical source. **Note: IDA Free licenses are detected and skipped with a clear message — headless `.i64`/idalib requires IDA Professional** |
 
 > **Tool-location contract:** every expected path, its detection order, and
