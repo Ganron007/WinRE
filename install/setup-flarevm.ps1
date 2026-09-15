@@ -110,21 +110,24 @@ if (Test-Path $py) {
             else { Warn "module $mod still not importable - install manually (pip install $pipName)" }
         }
     }
-    # speakeasy imports setuptools.pkg_resources (removed in setuptools>=81)
-    & $py -c "import setuptools" 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        $stv = & $py -c "import setuptools; print(setuptools.__version__)"
-        if ([version]$stv -ge [version]"81.0.0") {
-            Act "pin setuptools<81 (speakeasy pkg_resources)"
-            if (-not $CheckMode) {
-                if (Test-Path $wheelDir) {
-                    & $py -m pip install --quiet --no-index --find-links $wheelDir "setuptools<81" 2>$null
-                }
-                $stv2 = & $py -c "import setuptools; print(setuptools.__version__)"
-                if ([version]$stv2 -ge [version]"81.0.0") { & $py -m pip install --quiet "setuptools<81" }
+    # speakeasy + floss import setuptools.pkg_resources. Two traps:
+    #   - Python 3.12+ does not bundle setuptools at all (absent on fresh 3.13)
+    #   - setuptools>=81 removed pkg_resources (deprecated).
+    # Ensure setuptools<81 is importable either way.
+    $stv = & $py -c "import setuptools; print(setuptools.__version__)" 2>$null
+    $needPin = (-not $stv) -or ([version]$stv -ge [version]"81.0.0")
+    if ($needPin) {
+        Act "install/pin setuptools<81 (speakeasy pkg_resources; not bundled on Py3.12+)"
+        if (-not $CheckMode) {
+            if (Test-Path $wheelDir) {
+                & $py -m pip install --quiet --no-index --find-links $wheelDir "setuptools<81" 2>$null
             }
-        } else { Ok "setuptools $($stv.Trim()) (<81)" }
-    }
+            $stv2 = & $py -c "import setuptools; print(setuptools.__version__)" 2>$null
+            if ((-not $stv2) -or ([version]$stv2 -ge [version]"81.0.0")) { & $py -m pip install --quiet "setuptools<81" }
+            $stv3 = & $py -c "import setuptools; print(setuptools.__version__)" 2>$null
+            if ($stv3) { Ok "setuptools $($stv3.Trim()) (<81)" } else { Warn "setuptools<81 still not importable" }
+        }
+    } else { Ok "setuptools $($stv.Trim()) (<81)" }
 }
 
 # --- 3. commercial/static tools: detect + instruct ----------------------------
