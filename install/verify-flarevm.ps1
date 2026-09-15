@@ -25,6 +25,23 @@ function Test-PathOk([string]$p, [string]$label, [string]$hint) {
     if (Test-Path $p) { Ok "$label -> $p" } else { Fail "$label missing: $p ($hint)" }
 }
 
+# Tool locations drift between FlareVM releases (2026 moved yara-x -> Tools\yara-x,
+# UPX -> Tools\upx\upx-<ver>\, ilspycmd -> Tools\ilspycmd, Ghidra -> ProgramData).
+function Resolve-Tool([string[]]$paths, [string[]]$names) {
+    foreach ($p in $paths) { if ($p -and (Test-Path $p)) { return $p } }
+    foreach ($n in $names) {
+        $c = Get-Command $n -ErrorAction SilentlyContinue
+        if ($c -and $c.Source) { return $c.Source }
+    }
+    return $null
+}
+function Test-Tool([string]$label, [string[]]$paths, [string[]]$names, [string]$hint, [switch]$Optional) {
+    $r = Resolve-Tool $paths $names
+    if ($r) { Ok "$label -> $r" }
+    elseif ($Optional) { Warn "$label missing ($hint)" }
+    else { Fail "$label missing ($hint)" }
+}
+
 Write-Host "=== WinRE / FlareVM verification ===" -ForegroundColor Cyan
 
 Write-Host ""
@@ -70,6 +87,14 @@ Write-Host ""
 Write-Host "--- Ghidra ---"
 $ghidra = Get-ChildItem "C:\Tools" -Directory -ErrorAction SilentlyContinue |
     Where-Object Name -match "^ghidra_\d" | Select-Object -First 1
+if (-not $ghidra) {
+    # FlareVM 2026: the `ghidra` choco package installs under ProgramData
+    $gdRoot = "C:\ProgramData\chocolatey\lib\ghidra\tools"
+    if (Test-Path $gdRoot) {
+        $ghidra = Get-ChildItem $gdRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object Name -match "^ghidra_\d" | Select-Object -First 1
+    }
+}
 if ($ghidra) {
     Ok "Ghidra install -> $($ghidra.FullName)"
     $headless = Join-Path $ghidra.FullName "support\analyzeHeadless.bat"
@@ -142,26 +167,33 @@ else { Fail "x64dbg MCP plugin (x64dbg-MCP-Server.dp64) not found - build from i
 
 Write-Host ""
 Write-Host "--- Dynamic prerequisites ---"
-Test-PathOk "C:\Tools\fakenet\fakenet3.5\fakenet.exe" "FakeNet-NG" "docs\PREREQUISITES.md"
-Test-PathOk "C:\Tools\sysinternals\Procmon64.exe" "Procmon" "docs\PREREQUISITES.md"
-Test-PathOk "C:\ProgramData\chocolatey\bin\pe-sieve.exe" "pe-sieve" "choco install pe-sieve"
-Test-PathOk "C:\Tools\hollows_hunter\hollows_hunter.exe" "hollows_hunter" "docs\PREREQUISITES.md"
-Test-PathOk "C:\Tools\sysinternals\Procdump64.exe" "Procdump" "Sysinternals (post-mortem harvest)"
+Test-Tool "FakeNet-NG" @("C:\Tools\fakenet\fakenet3.5\fakenet.exe") @("fakenet.exe") "docs\PREREQUISITES.md"
+Test-Tool "Procmon" @("C:\Tools\sysinternals\Procmon64.exe") @("Procmon64.exe") "run install\flarevm\flarevm-postfix.ps1 (docs\PREREQUISITES.md)"
+Test-Tool "pe-sieve" @("C:\ProgramData\chocolatey\bin\pe-sieve.exe") @("pe-sieve.exe", "pe-sieve64.exe") "choco install pe-sieve"
+Test-Tool "hollows_hunter" @("C:\Tools\hollows_hunter\hollows_hunter.exe") @("hollows_hunter.exe", "hollows_hunter64.exe") "docs\PREREQUISITES.md"
+Test-Tool "Procdump" @("C:\Tools\sysinternals\Procdump64.exe", "C:\Tools\sysinternals\procdump64.exe") @("procdump64.exe", "procdump.exe") "Sysinternals (post-mortem harvest)"
+Test-Tool "cdb (classic debugger)" @("C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe", "C:\Program Files\Windows Kits\10\Debuggers\x64\cdb.exe") @("cdb.exe") "install\flarevm\flarevm-postfix.ps1 - FlareVM 2026 ships Store WinDbg only"
 Test-PathOk "C:\samples" "samples dir" "mkdir C:\samples"
 
 Write-Host ""
 Write-Host "--- Free static tooling ---"
-Test-PathOk "C:\Tools\capa\capa.exe" "capa" "FlareVM base / pip fallback"
-Test-PathOk "C:\Tools\capa-rules" "capa-rules dir" "mandiant/capa-rules (ops\provision_tools.ps1)"
-Test-PathOk "C:\Tools\die\diec.exe" "diec (Detect It Easy)" "FlareVM base / provision_tools.ps1"
-Test-PathOk "C:\Tools\yr\yr.exe" "yara-x" "FlareVM base / provision_tools.ps1"
-Test-PathOk "C:\Tools\yara-rules" "yara-rules dir" "stage curated rules (operator)"
-Test-PathOk "C:\Tools\scdbg\scdbg.exe" "scdbg" "FlareVM base"
-Test-PathOk "C:\Tools\upx\upx.exe" "UPX" "FlareVM base / provision_tools.ps1"
-Test-PathOk "C:\Tools\radare2\radare2.exe" "radare2" "FlareVM base"
-Test-PathOk "C:\Tools\goresym\goresym.exe" "goresym" "hasherezade releases (Go only)"
-Test-PathOk "C:\Tools\sysinternals\strings64.exe" "strings64" "FlareVM base"
-if (Test-Path "$env:USERPROFILE\.dotnet\tools\ilspycmd.exe") { Ok "ilspycmd (.NET) present" }
+Test-Tool "capa" @("C:\Tools\capa\capa.exe") @("capa.exe") "FlareVM base / pip fallback"
+Test-Tool "capa-rules dir" @("C:\Tools\capa-rules") @() "mandiant/capa-rules (ops\provision_tools.ps1)"
+Test-Tool "diec (Detect It Easy)" @("C:\Tools\die\diec.exe") @("diec.exe") "FlareVM base / provision_tools.ps1"
+Test-Tool "yara-x" @("C:\Tools\yr\yr.exe", "C:\Tools\yara-x\yr.exe") @("yr.exe", "yara-x.exe") "FlareVM base / provision_tools.ps1"
+Test-Tool "yara-rules dir" @("C:\Tools\yara-rules") @() "stage curated rules (operator)"
+Test-Tool "scdbg" @("C:\Tools\scdbg\scdbg.exe") @("scdbg.exe") "FlareVM base"
+$upxHit = Resolve-Tool @("C:\Tools\upx\upx.exe") @("upx.exe")
+if (-not $upxHit) {
+    $upxHit = Get-ChildItem "C:\Tools\upx" -Recurse -Filter "upx.exe" -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty FullName
+}
+if ($upxHit) { Ok "UPX -> $upxHit" } else { Fail "UPX missing (FlareVM base / provision_tools.ps1)" }
+Test-Tool "radare2" @("C:\Tools\radare2\radare2.exe") @("radare2.exe", "r2.exe") "optional - absent in FlareVM 2026; r2_decompile degrades" -Optional
+Test-Tool "goresym" @("C:\Tools\goresym\goresym.exe", "C:\Tools\GoReSym\GoReSym.exe") @("GoReSym.exe", "goresym.exe") "hasherezade releases (Go only)"
+Test-Tool "strings64" @("C:\Tools\sysinternals\strings64.exe") @("strings64.exe") "run install\flarevm\flarevm-postfix.ps1 (FlareVM base)"
+$ilspyHit = Resolve-Tool @("$env:USERPROFILE\.dotnet\tools\ilspycmd.exe", "C:\Tools\ilspycmd\ilspycmd.exe") @("ilspycmd.exe")
+if ($ilspyHit) { Ok "ilspycmd (.NET) -> $ilspyHit" }
 else { Warn "ilspycmd missing (dotnet tool install -g ilspycmd) - .NET decompile degrades" }
 if (Test-Path "C:\Program Files\7-Zip\7z.exe") { Ok "7-Zip present" }
 else { Warn "7-Zip missing - DFIR-Nexus case packs fall back to .zip" }

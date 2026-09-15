@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -26,10 +27,60 @@ from pathlib import Path
 
 PY = sys.executable or r"C:\Python313\python.exe"
 CAPA_RULES = r"C:\Tools\capa-rules"
-DIE_DIR = r"C:\Tools\die"
-ILSPY = str(Path.home() / ".dotnet" / "tools" / "ilspycmd.exe")
 YARA_RULES_DIR = r"C:\Tools\yara-rules"
-STRINGS64 = r"C:\Tools\sysinternals\strings64.exe"
+
+
+def _first(*cands):
+    """First existing file among candidates (PATH-independent)."""
+    for c in cands:
+        if not c:
+            continue
+        try:
+            p = Path(c)
+            if p.is_file():
+                return p
+        except OSError:
+            continue
+    return None
+
+
+def _which(*names):
+    for n in names:
+        w = shutil.which(n)
+        if w:
+            return Path(w)
+    return None
+
+
+def _upx_exe():
+    p = _first(os.environ.get("WINRE_UPX"), r"C:\Tools\upx\upx.exe")
+    if p:
+        return p
+    p = _which("upx.exe")
+    if p:
+        return p
+    d = Path(r"C:\Tools\upx")  # FlareVM 2026: versioned subdir (upx-5.x-win64)
+    if d.is_dir():
+        for c in sorted(d.glob(r"*\upx.exe")):
+            if c.is_file():
+                return c
+    return None
+
+
+# Tool locations drift between FlareVM releases (2026 moved yara-x/upx/ilspycmd
+# and ships Ghidra under ProgramData) - resolve with fallbacks + PATH shims.
+CAPA_EXE = _first(os.environ.get("WINRE_CAPA"), r"C:\Tools\capa\capa.exe") or _which("capa.exe")
+DIEC_EXE = _first(os.environ.get("WINRE_DIEC"), r"C:\Tools\die\diec.exe") or _which("diec.exe")
+ILSPY = (_first(os.environ.get("WINRE_ILSPY"),
+                str(Path.home() / ".dotnet" / "tools" / "ilspycmd.exe"),
+                r"C:\Tools\ilspycmd\ilspycmd.exe")
+         or _which("ilspycmd.exe", "ilspycmd"))
+YR_CANDS = [os.environ.get("WINRE_YARA_X"), r"C:\Tools\yr\yr.exe",
+            r"C:\Tools\yara-x\yr.exe", shutil.which("yr.exe"),
+            shutil.which("yara-x.exe")]
+UPX_EXE = _upx_exe()
+R2_EXE = _first(os.environ.get("WINRE_R2"), r"C:\Tools\radare2\radare2.exe") or _which("radare2.exe", "r2.exe")
+STRINGS64 = _first(r"C:\Tools\sysinternals\strings64.exe") or _which("strings64.exe")
 
 
 def _run(cmd: list[str], timeout: int, env: dict | None = None) -> tuple[int, str, str]:
@@ -50,11 +101,11 @@ def _skipped(tool: str, detail: str = "") -> dict:
 def capa(sample: str, timeout: int = 900) -> dict:
     """capa — standalone exe preferred (embeds function-ID sigs); pip capa
     needs a site-packages\\sigs dir that doesn't ship separately."""
-    exe = Path(r"C:\Tools\capa\capa.exe")
+    exe = CAPA_EXE
     rules = Path(CAPA_RULES)
     if not any(rules.rglob("*.yml")):
         return _skipped("capa-rules", "no rules under C:\\Tools\\capa-rules")
-    if exe.is_file():
+    if exe and exe.is_file():
         cmd = [str(exe), sample, "-r", CAPA_RULES, "--json", "-q"]
     else:
         import importlib.util
@@ -171,9 +222,9 @@ def lief_parse(sample: str, timeout: int = 300) -> dict:
 
 
 def diec(sample: str, timeout: int = 300) -> dict:
-    exe = Path(DIE_DIR) / "diec.exe"
-    if not exe.is_file():
-        return _skipped("diec", "C:\\Tools\\die\\diec.exe missing")
+    exe = DIEC_EXE
+    if not exe or not exe.is_file():
+        return _skipped("diec", "diec.exe not found (C:\\Tools\\die or PATH)")
     rc, out, err = _run([str(exe), "-j", sample], timeout)
     if rc != 0:
         return {"ok": False, "error": (err or out)[-200:], "tool": "diec"}
@@ -192,9 +243,9 @@ def diec(sample: str, timeout: int = 300) -> dict:
 
 
 def ilspy(sample: str, timeout: int = 600) -> dict:
-    exe = Path(ILSPY)
-    if not exe.is_file():
-        return _skipped("ilspycmd", "dotnet tool not installed")
+    exe = Path(ILSPY) if ILSPY else None
+    if not exe or not exe.is_file():
+        return _skipped("ilspycmd", "ilspycmd not installed (dotnet tool or C:\\Tools\\ilspycmd)")
     rc, out, err = _run([str(exe), sample, "-lc", "20"], timeout)
     if rc != 0:
         return {"ok": False, "error": (err or out)[-200:], "tool": "ilspy"}
@@ -336,11 +387,11 @@ def _specific_match(matches: list[str]) -> bool:
 
 def yarascan(sample: str, timeout: int = 600) -> dict:
     yr = None
-    for cand in (r"C:\Tools\yr\yr.exe", "yr"):
+    for cand in [c for c in YR_CANDS if c]:
         try:
-            p = subprocess.run([cand if cand != "yr" else "yr", "--version"],
+            p = subprocess.run([str(cand), "--version"],
                                capture_output=True, text=True, timeout=15)
-            yr = cand if p.returncode == 0 else yr
+            yr = str(cand) if p.returncode == 0 else yr
             if yr:
                 break
         except FileNotFoundError:
@@ -411,8 +462,8 @@ def yarascan(sample: str, timeout: int = 600) -> dict:
 
 
 def strings(sample: str, timeout: int = 300) -> dict:
-    exe = Path(STRINGS64)
-    if not exe.is_file():
+    exe = Path(STRINGS64) if STRINGS64 else None
+    if not exe or not exe.is_file():
         return _skipped("strings64")
     rc, out, err = _run([str(exe), "-accepteula", "-nobanner", "-n", "8", sample],
                         timeout)
@@ -1083,9 +1134,9 @@ def r2_decompile(sample: str, function_addrs: list | None = None,
                  timeout: int = 600) -> dict:
     """radare2 disassembly per function (asm — 2nd engine alongside Ghidra).
     Port of RevAI v2_lib.r2_decompile (pdf, not pseudo-C)."""
-    exe = Path(r"C:\Tools\radare2\radare2.exe")
-    if not exe.is_file():
-        return _skipped("r2", "C:\\Tools\\radare2\\radare2.exe missing")
+    exe = R2_EXE
+    if not exe or not exe.is_file():
+        return _skipped("r2", "radare2.exe not found (C:\\Tools\\radare2 or PATH)")
     out: dict = {"r2_ok": False, "disassembly": {}, "engine": "pdf (disasm)"}
     size = Path(sample).stat().st_size if Path(sample).is_file() else 0
     out["size_bytes"] = size
@@ -1114,9 +1165,9 @@ def r2_decompile(sample: str, function_addrs: list | None = None,
 
 def upx_unpack(sample: str, timeout: int = 120) -> dict:
     """Detect + unpack UPX-packed binaries (writes <sample>.unpacked)."""
-    exe = Path(r"C:\Tools\upx\upx.exe")
-    if not exe.is_file():
-        return _skipped("upx", "C:\\Tools\\upx\\upx.exe missing")
+    exe = UPX_EXE
+    if not exe or not exe.is_file():
+        return _skipped("upx", "upx.exe not found (C:\\Tools\\upx or PATH)")
     rc, probe, err = _run([str(exe), "-t", sample], timeout)
     is_packed = rc == 0
     out = {"is_packed": is_packed, "probe": (probe or "")[:200]}
@@ -1198,8 +1249,8 @@ def dotnet_analyze(sample: str, timeout: int = 600) -> dict:
             out["module_name"] = mod.rows[0].Name
     except Exception:
         pass
-    ilspy = Path.home() / ".dotnet" / "tools" / "ilspycmd.exe"
-    if ilspy.is_file():
+    ilspy = Path(ILSPY) if ILSPY else None
+    if ilspy and ilspy.is_file():
         # v11 System.CommandLine: bare assembly decompiles to stdout
         rc, il_out, err = _run([str(ilspy), sample], timeout)
         lines = (il_out or "").splitlines()

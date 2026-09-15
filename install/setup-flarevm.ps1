@@ -136,6 +136,14 @@ else { Manual "FlareVM base not detected (no chocolatey). Install FlareVM via it
 
 $ghidra = Get-ChildItem "C:\Tools" -Directory -ErrorAction SilentlyContinue |
     Where-Object Name -match "^ghidra_\d" | Select-Object -First 1
+if (-not $ghidra) {
+    # FlareVM 2026: the `ghidra` choco package installs under ProgramData
+    $gdRoot = "C:\ProgramData\chocolatey\lib\ghidra\tools"
+    if (Test-Path $gdRoot) {
+        $ghidra = Get-ChildItem $gdRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object Name -match "^ghidra_\d" | Select-Object -First 1
+    }
+}
 if ($ghidra) {
     Ok "Ghidra -> $($ghidra.FullName)"
     $extDir = Join-Path $ghidra.FullName "Ghidra\Extensions"
@@ -250,22 +258,45 @@ if ($idaResolved) {
 # --- 3b. free static tooling (FlareVM base ships some; detect + instruct) -----
 Write-Host ""
 Write-Host "--- Free static tooling ---"
-foreach ($t in @(
-        @("C:\Tools\capa\capa.exe", "capa (REQUIRED free; pip fallback auto-used)"),
-        @("C:\Tools\capa-rules", "capa-rules dir (REQUIRED free; mandiant/capa-rules)"),
-        @("C:\Tools\die\diec.exe", "Detect It Easy diec (REQUIRED free)"),
-        @("C:\Tools\yr\yr.exe", "yara-x scanner (REQUIRED free)"),
-        @("C:\Tools\yara-rules", "curated YARA rules dir (REQUIRED free)"),
-        @("C:\Tools\scdbg\scdbg.exe", "scdbg shellcode emulator (free)"),
-        @("C:\Tools\upx\upx.exe", "UPX (free; upx_unpack + packed test fixtures)"),
-        @("C:\Tools\radare2\radare2.exe", "radare2 (free)"),
-        @("C:\Tools\goresym\goresym.exe", "goresym (free; Go samples only)"),
-        @("C:\Tools\sysinternals\strings64.exe", "Sysinternals strings64 (free)"))) {
-    if (Test-Path $t[0]) { Ok "$($t[1]) present" }
-    else { Manual "Install $($t[1]) at $($t[0]) - FlareVM base covers some; stage via ops\provision_tools.ps1 (host) or see docs\TOOL-PATHS.md." }
+# Tool locations drift between FlareVM releases (2026: yara-x -> Tools\yara-x,
+# UPX -> Tools\upx\upx-<ver>\, ilspycmd -> Tools\ilspycmd) - resolve + PATH.
+function Resolve-Tool([string[]]$paths, [string[]]$names) {
+    foreach ($p in $paths) { if ($p -and (Test-Path $p)) { return $p } }
+    foreach ($n in $names) {
+        $c = Get-Command $n -ErrorAction SilentlyContinue
+        if ($c -and $c.Source) { return $c.Source }
+    }
+    return $null
 }
-$ilspy = "$env:USERPROFILE\.dotnet\tools\ilspycmd.exe"
-if (Test-Path $ilspy) { Ok "ilspycmd (.NET) present" }
+foreach ($t in @(
+        @("capa (REQUIRED free; pip fallback auto-used)", @("C:\Tools\capa\capa.exe"), @("capa.exe")),
+        @("capa-rules dir (REQUIRED free; mandiant/capa-rules)", @("C:\Tools\capa-rules"), @()),
+        @("Detect It Easy diec (REQUIRED free)", @("C:\Tools\die\diec.exe"), @("diec.exe")),
+        @("yara-x scanner (REQUIRED free)", @("C:\Tools\yr\yr.exe", "C:\Tools\yara-x\yr.exe"), @("yr.exe", "yara-x.exe")),
+        @("curated YARA rules dir (REQUIRED free)", @("C:\Tools\yara-rules"), @()),
+        @("scdbg shellcode emulator (free)", @("C:\Tools\scdbg\scdbg.exe"), @("scdbg.exe")),
+        @("Sysinternals strings64 (free)", @("C:\Tools\sysinternals\strings64.exe"), @("strings64.exe")))) {
+    $hit = Resolve-Tool $t[1] $t[2]
+    if ($hit) { Ok "$($t[0]) present -> $hit" }
+    else { Manual "Install $($t[0]) - run install\flarevm\flarevm-postfix.ps1 (online) or stage via ops\provision_tools.ps1 (host); see docs\TOOL-PATHS.md." }
+}
+# UPX ships in a versioned subdir on FlareVM 2026
+$upxHit = Resolve-Tool @("C:\Tools\upx\upx.exe") @("upx.exe")
+if (-not $upxHit) {
+    $upxHit = Get-ChildItem "C:\Tools\upx" -Recurse -Filter "upx.exe" -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty FullName
+}
+if ($upxHit) { Ok "UPX (free) present -> $upxHit" }
+else { Manual "Install UPX - run install\flarevm\flarevm-postfix.ps1 or stage via ops\provision_tools.ps1." }
+# radare2 is absent from FlareVM 2026 package sets - optional
+$r2Hit = Resolve-Tool @("C:\Tools\radare2\radare2.exe") @("radare2.exe", "r2.exe")
+if ($r2Hit) { Ok "radare2 (free, optional) present -> $r2Hit" }
+else { Info "radare2 not present (optional; absent in FlareVM 2026 - r2_decompile degrades)" }
+$goHit = Resolve-Tool @("C:\Tools\goresym\goresym.exe", "C:\Tools\GoReSym\GoReSym.exe") @("GoReSym.exe", "goresym.exe")
+if ($goHit) { Ok "goresym (free; Go samples only) present -> $goHit" }
+else { Manual "Install goresym - stage via ops\provision_tools.ps1." }
+$ilspyHit = Resolve-Tool @("$env:USERPROFILE\.dotnet\tools\ilspycmd.exe", "C:\Tools\ilspycmd\ilspycmd.exe") @("ilspycmd.exe")
+if ($ilspyHit) { Ok "ilspycmd (.NET) present -> $ilspyHit" }
 else { Manual "Install ILSpy CLI: dotnet tool install -g ilspycmd (see docs\TOOL-PATHS.md)." }
 
 $x64 = "C:\Tools\x64dbg\release\x64\x64dbg.exe"
@@ -347,11 +378,15 @@ if (Test-Path $x64) {
     }
 } else { Manual "REQUIRED (free): install x64dbg to C:\Tools\x64dbg - run the FlareVM base installer (brings it) or download the release; then re-run setup. docs\PREREQUISITES.md." }
 
-foreach ($t in @(@("C:\Tools\fakenet\fakenet3.5\fakenet.exe", "FakeNet-NG (REQUIRED free)"),
-                 @("C:\Tools\sysinternals\Procmon64.exe", "Procmon (REQUIRED free)"),
-                 @("C:\ProgramData\chocolatey\bin\pe-sieve.exe", "pe-sieve (REQUIRED free)"),
-                 @("C:\Tools\hollows_hunter\hollows_hunter.exe", "hollows_hunter (REQUIRED free)"))) {
-    if (Test-Path $t[0]) { Ok "$($t[1]) present" } else { Manual "REQUIRED: install $($t[1]) at $($t[0]) - FlareVM base covers most; else ops\provision_tools.ps1 stages it from the host. docs\PREREQUISITES.md." }
+foreach ($t in @(@("FakeNet-NG (REQUIRED free)", @("C:\Tools\fakenet\fakenet3.5\fakenet.exe"), @("fakenet.exe")),
+                 @("Procmon (REQUIRED free)", @("C:\Tools\sysinternals\Procmon64.exe"), @("Procmon64.exe")),
+                 @("procdump", @("C:\Tools\sysinternals\Procdump64.exe", "C:\Tools\sysinternals\procdump64.exe"), @("procdump64.exe")),
+                 @("cdb (classic debugger; WinDbg MCP/post-mortem)", @("C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe", "C:\Program Files\Windows Kits\10\Debuggers\x64\cdb.exe"), @("cdb.exe")),
+                 @("pe-sieve (REQUIRED free)", @("C:\ProgramData\chocolatey\bin\pe-sieve.exe"), @("pe-sieve.exe", "pe-sieve64.exe")),
+                 @("hollows_hunter (REQUIRED free)", @("C:\Tools\hollows_hunter\hollows_hunter.exe"), @("hollows_hunter.exe", "hollows_hunter64.exe")))) {
+    $hit = Resolve-Tool $t[1] $t[2]
+    if ($hit) { Ok "$($t[0]) present -> $hit" }
+    else { Manual "REQUIRED: install $($t[0]) - run install\flarevm\flarevm-postfix.ps1 (online) or stage via ops\provision_tools.ps1 (host). docs\PREREQUISITES.md." }
 }
 
 # --- 4. repo-owned: autostart + task ------------------------------------------
