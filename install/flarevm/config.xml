@@ -1,0 +1,303 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!--
+ Copyright 2017 Google LLC
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+<config>
+  <envs>
+    <env name="VM_COMMON_DIR" value="%ProgramData%\_VM" />
+    <env name="TOOL_LIST_DIR" value="%UserProfile%\Desktop\Tools" />
+    <env name="RAW_TOOLS_DIR" value="%SystemDrive%\Tools" />
+  </envs>
+  <packages>
+    <package name="capesolo.vm" />
+    <package name="ollydbg.plugin.ollydumpex.vm" />
+    <package name="ollydbg.plugin.scyllahide.vm" />
+    <package name="ollydbg.vm" />
+    <package name="ollydbg2.plugin.ollydumpex.vm" />
+    <package name="ollydbg2.plugin.scyllahide.vm" />
+    <package name="ollydbg2.vm" />
+    <package name="ttd.vm" />
+    <package name="windbg.vm" />
+    <package name="x64dbg.plugin.dbgchild.vm" />
+    <package name="x64dbg.plugin.ollydumpex.vm" />
+    <package name="x64dbg.plugin.scyllahide.vm" />
+    <package name="x64dbg.plugin.x64dbgpy.vm" />
+    <package name="x64dbg.vm" />
+    <package name="idr.vm" />
+    <package name="binaryninja.vm" />
+    <package name="cutter.vm" />
+    <package name="ghidra.vm" />
+    <package name="hcli.vm" />
+    <package name="idafree.vm" />
+    <package name="idapro.vm" />
+    <package name="didier-stevens-beta.vm" />
+    <package name="didier-stevens-suite.vm" />
+    <package name="ezviewer.vm" />
+    <package name="microsoft-office.vm" />
+    <package name="offvis.vm" />
+    <package name="onenoteanalyzer.vm" />
+    <package name="pdfstreamdumper.vm" />
+    <package name="codetrack.vm" />
+    <package name="de4dot-cex.vm" />
+    <package name="de4dotex.vm" />
+    <package name="dnlib.vm" />
+    <package name="dnspyex.vm" />
+    <package name="dotdumper.vm" />
+    <package name="dotnet-6.vm" />
+    <package name="dotnet-8.vm" />
+    <package name="dotnet-9.vm" />
+    <package name="extreme_dumper.vm" />
+    <package name="garbageman.vm" />
+    <package name="ilspy.vm" />
+    <package name="ilspycmd.vm" />
+    <package name="net-reactor-slayer.vm" />
+    <package name="psnotify.vm" />
+    <package name="rundotnetdll.vm" />
+    <package name="sfextract.vm" />
+    <package name="bindiff.vm" />
+    <package name="die.vm" />
+    <package name="exeinfope.vm" />
+    <package name="exiftool.vm" />
+    <package name="file.vm" />
+    <package name="floss.vm" />
+    <package name="hasher.vm" />
+    <package name="hashmyfiles.vm" />
+    <package name="magika.vm" />
+    <package name="stringsifter.vm" />
+    <package name="goresym.vm" />
+    <package name="gostringungarbler.vm" />
+    <package name="010editor.vm" />
+    <package name="hxd.vm" />
+    <package name="imhex.vm" />
+    <package name="ida.plugin.capa.vm" />
+    <package name="ida.plugin.comida.vm" />
+    <package name="ida.plugin.cyberchef.vm" />
+    <package name="ida.plugin.delphihelper.vm" />
+    <package name="ida.plugin.dereferencing.vm" />
+    <package name="ida.plugin.diaphora.vm" />
+    <package name="ida.plugin.flare.vm" />
+    <package name="ida.plugin.flare-emu.vm" />
+    <package name="ida.plugin.hashdb.vm" />
+    <package name="ida.plugin.hrtng.vm" />
+    <package name="ida.plugin.ifl.vm" />
+    <package name="ida.plugin.lighthouse.vm" />
+    <package name="ida.plugin.sigmaker.vm" />
+    <package name="ida.plugin.xray.vm" />
+    <package name="ida.plugin.xrefer.vm" />
+    <package name="ifpstools.vm" />
+    <package name="innoextract.vm" />
+    <package name="innounp.vm" />
+    <package name="isd.vm" />
+    <package name="apktool.vm" />
+    <package name="bytecodeviewer.vm" />
+    <package name="dex2jar.vm" />
+    <package name="jadx.vm" />
+    <package name="openjdk.vm" />
+    <package name="recaf.vm" />
+    <package name="js-beautify.vm" />
+    <package name="js-deobfuscator.vm" />
+    <package name="malware-jail.vm" />
+    <package name="nodejs.vm" />
+    <package name="obfuscator-io-deobfuscator.vm" />
+    <package name="hollowshunter.vm" />
+    <package name="pesieve.vm" />
+    <package name="processdump.vm" />
+    <package name="fakenet-ng.vm" />
+    <package name="fiddler.vm" />
+    <package name="internet_detector.vm" />
+    <package name="networkminer.vm" />
+    <package name="nmap.vm" />
+    <package name="npcap.vm" />
+    <package name="openvpn.vm" />
+    <package name="powercat.vm" />
+    <package name="putty.vm" />
+    <package name="streamdivert.vm" />
+    <package name="telnet.vm" />
+    <package name="windump.vm" />
+    <package name="wireshark.vm" />
+    <package name="advanced-installer.vm" />
+    <package name="asar.vm" />
+    <package name="autoit-ripper.vm" />
+    <package name="mal_unpack.vm" />
+    <package name="pkg-unpacker.vm" />
+    <package name="uniextract2.vm" />
+    <package name="unipacker.vm" />
+    <package name="upx.vm" />
+    <package name="dependencywalker.vm" />
+    <package name="dll-to-exe.vm" />
+    <package name="explorersuite.vm" />
+    <package name="pdbs.pdbresym.vm" />
+    <package name="pe_detective.vm" />
+    <package name="pe_unmapper.vm" />
+    <package name="peanatomist.vm" />
+    <package name="pebear.vm" />
+    <package name="peid.vm" />
+    <package name="pestudio.vm" />
+    <package name="setdllcharacteristics.vm" />
+    <package name="7zip.vm" />
+    <package name="chrome.extensions.vm" />
+    <package name="cmder.vm" />
+    <package name="cygwin.vm" />
+    <package name="dokan.vm" />
+    <package name="googlechrome.vm" />
+    <package name="ipython.vm" />
+    <package name="nasm.vm" />
+    <package name="notepadplusplus.vm" />
+    <package name="notepadpp.plugin.compare.vm" />
+    <package name="notepadpp.plugin.jstool.vm" />
+    <package name="notepadpp.plugin.xmltools.vm" />
+    <package name="tor-browser.vm" />
+    <package name="vcbuildtools.vm" />
+    <package name="vcredist140.vm" />
+    <package name="visualstudio.vm" />
+    <package name="vscode.extension.jupyter.vm" />
+    <package name="vscode.extension.python.vm" />
+    <package name="vscode.vm" />
+    <package name="windows-terminal.vm" />
+    <package name="libraries.python3.vm" />
+    <package name="poetry.vm" />
+    <package name="pycdas.vm" />
+    <package name="pycdc.vm" />
+    <package name="pylingual.vm" />
+    <package name="python3.vm" />
+    <package name="uncompyle6.vm" />
+    <package name="unpy2exe.vm" />
+    <package name="unpyc3.vm" />
+    <package name="uv.vm" />
+    <package name="reg_export.vm" />
+    <package name="regcool.vm" />
+    <package name="registry_explorer.vm" />
+    <package name="regshot.vm" />
+    <package name="total-registry.vm" />
+    <package name="blobrunner.vm" />
+    <package name="blobrunner64.vm" />
+    <package name="scdbg.vm" />
+    <package name="sclauncher.vm" />
+    <package name="sclauncher64.vm" />
+    <package name="shellcode_launcher.vm" />
+    <package name="angr.vm" />
+    <package name="apimonitor.vm" />
+    <package name="binwalk.vm" />
+    <package name="bstrings.vm" />
+    <package name="capa.vm" />
+    <package name="capa-explorer-web.vm" />
+    <package name="cryptotester.vm" />
+    <package name="cyberchef.vm" />
+    <package name="keystone.vm" />
+    <package name="map.vm" />
+    <package name="pdbresym.vm" />
+    <package name="pma-labs.vm" />
+    <package name="procdot.vm" />
+    <package name="rat-king-parser.vm" />
+    <package name="resourcehacker.vm" />
+    <package name="rpcview.vm" />
+    <package name="sqlitebrowser.vm" />
+    <package name="sysinternals.vm" />
+    <package name="systeminformer.vm" />
+    <package name="vnc-viewer.vm" />
+    <package name="winscp.vm" />
+    <package name="yara.vm" />
+    <package name="yara-x.vm" />
+    <package name="vbdec.vm" />
+    <package name="vb-decompiler-lite.vm" />
+    <package name="dotnet3.5" />
+    <package name="vcredist-all" />
+  </packages>
+  <apps>
+    <!--
+        INFO:
+        Removes installed AppX packages. Try:
+        $packages = Get-AppxPackage
+        $packages.Name
+        FORMAT:
+        <app name="APP_NAME"/>
+        -->
+  </apps>
+  <services>
+    <!--
+        INFO:
+        Sets Services to "Manual" startup type. Try:
+        $services = Get-WmiObject -Query "SELECT * FROM Win32_Service WHERE StartMode='Auto'" | Get-Service
+        $services.Name
+        FORMAT:
+        <service name="SERVICE_NAME"/>
+        -->
+  </services>
+  <tasks>
+    <!--
+        INFO:
+        Disables Scheduled Tasks. Try:
+        $tasks = Get-ScheduledTask
+        $tasks.TaskName
+        FORMAT:
+        <task name="DESCRIPTIVE_NAME" value="TASK_NAME"/>
+        -->
+  </tasks>
+  <path-items>
+    <!--
+        INFO:
+        Removes files and folders from the system
+        FORMAT:
+        <path-item name="DESCRIPTIVE_NAME" type="dir/file" path="DIR_PATH/FILE_PATH"/>
+        -->
+  </path-items>
+  <registry-items>
+    <!--
+        INFO:
+        Makes custom edits to the registry
+        FORMAT:
+        <registry-item name="DESCRIPTIVE_NAME" path="REG_PATH" value="REG_VALUE" type="TYPE" data="NEW_DATA"/>
+        -->
+    <registry-item name="Show full directory path in Explorer title bar" path="HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState" value="FullPath" type="DWord" data="1" />
+    <registry-item name="Show known file extensions" path="HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" value="HideFileExt" type="DWord" data="0" />
+    <registry-item name="Show hidden files" path="HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" value="Hidden" type="DWord" data="1" />
+    <registry-item name="Disable SmartScreen" path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" value="EnableSmartScreen" type="DWord" data="0" />
+    <registry-item name="Disable Microsoft Edge Phishing Filter" path="HKLM:\SOFTWARE\Policies\Microsoft\MicrosoftEdge\PhishingFilter" value="EnabledV9" type="DWord" data="0" />
+    <registry-item name="Disable Windows Firewall (Standard Profile)" path="HKLM:\SOFTWARE\Policies\Microsoft\WindowsFirewall\StandardProfile" value="EnableFirewall" type="DWord" data="0" />
+    <registry-item name="Add ZoomIt to Windows Start" path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\run" value="ZoomIt" type="String" data="C:\Tools\sysinternals\ZoomIt64.exe" />
+    <registry-item name="Don't display ZoomIt GUI on login" path="HKCU:\Software\Sysinternals\ZoomIt" value="OptionsShown" type="DWord" data="1" />
+    <registry-item name="Hide the .lnk extension" path="HKLM:\SOFTWARE\Classes\lnkfile" value="NeverShowExt" type="String" data=" " />
+    <!-- Set dark mode
+        <registry-item name="Set Dark Mode on System" path="HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" value="SystemUsesLightTheme" type="DWord" data="0"/>
+        <registry-item name="Set Dark Mode on Apps" path="HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" value="AppsUseLightTheme" type="DWord" data="0"/>
+        -->
+  </registry-items>
+  <locales>
+    <!--
+        INFO:
+        Install extra system locales. Useful to analyse malware that behave differently depending on the locale.
+        FORMAT:
+        <locale name="DESCRIPTIVE_NAME" lang="LANGUAGE_VALUE"/>
+        -->
+    <locale name="Chinese" lang="zh-CN" />
+    <locale name="English (United Kingdom)" lang="en-GB" />
+    <locale name="German (Germany)" lang="de-DE" />
+    <locale name="Russian" lang="ru-RU" />
+    <locale name="Spanish (Spain)" lang="es-ES" />
+    <locale name="Ukrainian" lang="uk-UA" />
+    <locale name="Brazilian Portuguese" lang="pt-BR" />
+  </locales>
+  <custom-items>
+    <!--
+        INFO:
+        Performs custom commands
+        FORMAT:
+        <custom-item name="DESCRIPTIVE_NAME"> <cmd value="PS_COMMAND"/> ... </custom-item>
+        -->
+    <custom-item name="Disabling Windows Firewall">
+      <cmd value="Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False" />
+    </custom-item>
+  </custom-items>
+</config>

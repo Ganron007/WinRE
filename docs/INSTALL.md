@@ -90,7 +90,9 @@ command re-applies everything to a fresh/reverted VM -
 
 1. Build the VM: Windows 10/11 on an **isolated network**, FlareVM base
    installed, plus the "you provide" list above (commercial tools per
-   [`PREREQUISITES.md`](PREREQUISITES.md)).
+   [`PREREQUISITES.md`](PREREQUISITES.md)). Recommended: the WinRE-patched
+   installer + fixture in [`install/flarevm/`](../install/flarevm/README.md)
+   (fixes default-install failure modes; adds classic `cdb.exe`).
 2. Sync the repo from the control plane:
 
    ```powershell

@@ -48,6 +48,13 @@ Start from a **Windows 10/11 VM on an isolated/host-only network**.
    installer** (`install.ps1`) — it brings most required free tools
    (x64dbg, FakeNet-NG, Sysinternals, pe-sieve/hollows_hunter, Python).
    Install Ghidra now too, and let pip pull the Python deps.
+   > **Recommended:** use the WinRE-patched installer in
+   > [`install/flarevm/`](../install/flarevm/README.md) with the fixture
+   > `config.xml` — a real default install (Sep 2026) finished with ~60/193
+   > packages failed (pinned-dependency cascades + dead upstream URLs) and
+   > FlareVM now ships the *Store* WinDbg (no classic `cdb.exe`, which WinRE
+   > needs). Vanilla FLARE-VM works too: run `flarevm-postfix.ps1` from the
+   > same folder afterwards, or just let step 3 report what is missing.
 2. **Air-gap**: switch the VM to host-only networking.
 3. **Run `install/setup-flarevm.ps1`** on the VM: it *ensures* the complete
    required set exists (verifies every tool, builds the x64dbg MCP plugin
