@@ -53,6 +53,13 @@ Info "OS: $($cv.Caption) $($cv.Version)"
 Write-Host ""
 Write-Host "--- Python ---"
 $py = "C:\Python313\python.exe"
+if (-not (Test-Path $py)) {
+    $resolved = (& py -3.13 -c "import sys; print(sys.executable)" 2>$null)
+    if ($resolved -and (Test-Path $resolved.Trim())) {
+        $py = $resolved.Trim()
+        Warn "python resolved via py -3.13 -> $py (preferred: C:\Python313 all-users)"
+    }
+}
 if (Test-Path $py) {
     $v = & $py --version 2>&1
     Ok "python -> $py ($v)"

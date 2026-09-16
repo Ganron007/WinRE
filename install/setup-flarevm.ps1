@@ -75,6 +75,27 @@ foreach ($d in @("C:\WinRE", "C:\WinRE\winre", "C:\WinRE\tools", "C:\WinRE\logs"
 Write-Host ""
 Write-Host "--- Python ---"
 $py = "C:\Python313\python.exe"
+if (-not (Test-Path $py)) {
+    # Self-heal for public users: FlareVM base ships Python 3.11; WinRE needs
+    # 3.13 all-users at C:\Python313 (baked into MCP launcher + helpers).
+    $pyCmd = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyCmd) {
+        Act "install Python 3.13 (all users) via chocolatey"
+        if (-not $CheckMode) {
+            if (Get-Command choco -ErrorAction SilentlyContinue) {
+                & choco install python313 -y --no-progress 2>$null | Out-Null
+            }
+            if (-not (Test-Path $py) -and $pyCmd) {
+                # launcher fallback: resolve the 3.13 interpreter path
+                $resolved = (& py -3.13 -c "import sys; print(sys.executable)" 2>$null)
+                if ($resolved -and (Test-Path $resolved.Trim())) {
+                    $py = $resolved.Trim()
+                    Info "using py -3.13 interpreter at $py (preferred: C:\Python313 all-users)"
+                }
+            }
+        }
+    }
+}
 if (Test-Path $py) { Ok "python -> $py" }
 else {
     Fail "python missing at $py"
@@ -128,6 +149,14 @@ if (Test-Path $py) {
             if ($stv3) { Ok "setuptools $($stv3.Trim()) (<81)" } else { Warn "setuptools<81 still not importable" }
         }
     } else { Ok "setuptools $($stv.Trim()) (<81)" }
+}
+
+if (Test-Path $py) {
+    & $py -m pip --version 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Act "bootstrap pip (ensurepip)"
+        if (-not $CheckMode) { & $py -m ensurepip --upgrade 2>$null | Out-Null }
+    }
 }
 
 # --- 3. commercial/static tools: detect + instruct ----------------------------
