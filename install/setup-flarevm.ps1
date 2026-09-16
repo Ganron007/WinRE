@@ -239,11 +239,31 @@ if ($ghidra) {
                 New-Item -ItemType Directory -Force -Path $extDir | Out-Null
                 $tmp = Join-Path $env:TEMP "LibGhidraHost-$(Get-Random)"
                 Expand-Archive -Path (Join-Path $stagedSql "LibGhidraHost.zip") -DestinationPath $tmp -Force
-                # zip may contain a top-level folder; normalize
+                # normalize: find a dir carrying lib/ (top-level or nested one level)
                 $inner = Get-ChildItem $tmp -Directory | Where-Object { Test-Path (Join-Path $_.FullName "lib") } | Select-Object -First 1
-                $src = if ($inner) { $inner.FullName } else { $tmp }
-                Copy-Item $src (Join-Path $extDir "LibGhidraHost") -Recurse -Force
-                Remove-Item $tmp -Recurse -Force -EA SilentlyContinue
+                if (-not $inner) {
+                    # double-zipped artifact (observed): unwrap a single inner zip
+                    $innerZip = Get-ChildItem $tmp -Filter *.zip | Select-Object -First 1
+                    if ($innerZip) {
+                        $tmp2 = "$tmp-2"
+                        Expand-Archive -Path $innerZip.FullName -DestinationPath $tmp2 -Force
+                        $inner = Get-ChildItem $tmp2 -Directory -EA SilentlyContinue |
+                            Where-Object { Test-Path (Join-Path $_.FullName "lib") } | Select-Object -First 1
+                        if ($inner) { $tmp = $tmp2 }
+                    }
+                }
+                $target = Join-Path $extDir "LibGhidraHost"
+                if ($inner) {
+                    Copy-Item $inner.FullName $target -Recurse -Force
+                } else {
+                    # flat layout (lib/, extension.properties at root)
+                    New-Item -ItemType Directory -Force -Path $target | Out-Null
+                    Copy-Item (Join-Path $tmp "*") $target -Recurse -Force
+                }
+                if (-not (Test-Path (Join-Path $target "lib"))) {
+                    Warn "LibGhidraHost extraction looks wrong (no lib/) - check internal\reapply\sql\LibGhidraHost.zip"
+                }
+                Remove-Item $tmp, "$tmp-2" -Recurse -Force -EA SilentlyContinue
             }
         } else {
             Manual "LibGhidraHost extension missing - stage it (ops\provision_tools.ps1) or build: libghidra/ghidra-extension -> gradle installExtension (docs\SQL-GHIDRA.md)."
@@ -309,11 +329,13 @@ $idaResolved = $idaCands | Where-Object { Test-Path (Join-Path $_ "idat.exe") } 
 if ($idaResolved) {
     Ok "IDA -> $idaResolved"
     $idasqlPath = Join-Path $idaResolved "idasql.exe"
-    if (Test-Path $idasqlPath) { Ok "idasql present" }
-    elseif (Test-Path "C:\Tools-staged\idasql.exe") {
+    $stagedIda = @("C:\Tools-staged\sql\idasql.exe", "C:\Tools-staged\idasql.exe") |
+    Where-Object { Test-Path $_ } | Select-Object -First 1
+if (Test-Path $idasqlPath) { Ok "idasql present" }
+    elseif ($stagedIda) {
         Act "install idasql.exe -> $idaResolved"
         if (-not $CheckMode) {
-            Copy-Item "C:\Tools-staged\idasql.exe" $idasqlPath -Force
+            Copy-Item $stagedIda $idasqlPath -Force
             if (Test-Path $idasqlPath) { Ok "idasql installed (from staged copy)" }
             else { Manual "copy failed - place idasql.exe next to idat.exe manually" }
         }
