@@ -62,6 +62,8 @@ JAVA_HOME = os.environ.get(
 
 HOST = "127.0.0.1"
 PORT_DEFAULT = int(os.environ.get("GHIDRASQL_PORT", "18080"))
+REGISTRY = Path(os.environ.get("WINRE_GHIDRASQL_REGISTRY",
+                               r"C:\WinRE\logs\ghidrasql-servers.json"))
 STARTUP_TIMEOUT = 240     # s; first start loads .gpr + opens program
 PROJECT_TIMEOUT = 900     # s; analyzeHeadless import+analysis of a new sample
 QUERY_TIMEOUT = 900
@@ -192,7 +194,18 @@ class GhidraSqlClient:
         proj = ensure_project(sample_p)
         if not proj.get("ok"):
             raise RuntimeError(proj.get("error"))
-        base_url = self._ensure_server(proj)
+        try:
+            base_url = self._ensure_server(proj)
+        except RuntimeError as e:
+            if "not found in project" not in str(e):
+                raise
+            # corrupt project (program lost): rebuild once, self-healed
+            import shutil
+            shutil.rmtree(proj["project_dir"], ignore_errors=True)
+            proj = ensure_project(sample_p)
+            if not proj.get("ok"):
+                raise RuntimeError(proj.get("error"))
+            base_url = self._ensure_server(proj)
 
         req = urllib.request.Request(
             f"{base_url}/query", data=sql.encode("utf-8"),
@@ -242,36 +255,55 @@ class GhidraSqlClient:
                 "session_id": proj["project_name"],
                 "audit_path": str(AUDIT_LOG)}
 
-    def close(self, session_id: str) -> None:
+    def close(self, session_id: str, force: bool = False) -> None:
+        """By default the server is LEFT RUNNING (reuse is required: killing a
+        server that holds an open Ghidra project can roll it back). force=True
+        is used only by the post-run sweep."""
         entry = self._servers.pop(session_id, None)
         if not entry:
             return
-        pid = entry["proc"].pid
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                       stdin=subprocess.DEVNULL, capture_output=True)
-        proj_dir = Path(entry["project_dir"])
-        for lp in proj_dir.glob("*.lock*"):
-            try:
-                lp.unlink()
-            except OSError:
-                pass
+        if not force:
+            return
+        proc = entry.get("proc")
+        if proc is not None and proc.poll() is None:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           stdin=subprocess.DEVNULL, capture_output=True)
+        _registry_del(session_id)
 
-    def close_all(self) -> None:
+    def close_all(self, force: bool = False) -> None:
+        force = force or os.environ.get("WINRE_SQL_KILL", "").strip() in ("1", "true", "yes")
         for sid in list(self._servers):
-            self.close(sid)
+            self.close(sid, force=force)
 
     # ---- internal ---------------------------------------------------------
     def _ensure_server(self, proj: dict) -> str:
         sid = proj["project_name"]
         entry = self._servers.get(sid)
-        if entry and entry["proc"].poll() is None:
+        if entry and entry.get("proc") is not None and entry["proc"].poll() is None:
             if _probe(f"{entry['base_url']}/health/deep", 2.0):
                 return entry["base_url"]
             self.close(sid)
+        elif entry and entry.get("proc") is None:
+            # reused server from another helper: still alive?
+            if _probe(f"{entry['base_url']}/health/deep", 2.0):
+                return entry["base_url"]
+            _registry_del(sid)
 
-        # single-tenant (RevAI behaviour): only one ghidrasql may hold a
-        # project; kill leftovers and clear stale locks before starting.
-        _kill_all_servers()
+        # (a) another helper process may already serve this project: reuse it.
+        # Killing a server that holds an open Ghidra project can lose/roll
+        # back the program (observed), so reuse is mandatory.
+        reg = _registry_get(sid)
+        if reg and _probe(f"http://{self.host}:{reg['port']}/health/deep", 2.0):
+            self._servers[sid] = {"proc": None,
+                                  "base_url": f"http://{self.host}:{reg['port']}",
+                                  "project_dir": proj["project_dir"],
+                                  "reused": True}
+            return self._servers[sid]["base_url"]
+
+        # (b) no live server for THIS project; other servers may hold other
+        # projects open -> only kill when explicitly allowed (post-run sweep).
+        if os.environ.get("WINRE_SQL_KILL", "").strip() in ("1", "true", "yes"):
+            _kill_all_servers()
         for lp in Path(proj["project_dir"]).glob("*.lock*"):
             try:
                 lp.unlink()
@@ -314,11 +346,45 @@ class GhidraSqlClient:
             if _probe(f"{base_url}/health/deep", 1.5):
                 self._servers[sid] = {"proc": proc, "base_url": base_url,
                                       "project_dir": proj["project_dir"]}
+                _registry_put(sid, port, proc.pid, proj["project_dir"])
                 return base_url
             time.sleep(0.5)
         self.close(sid)
         raise RuntimeError(
             f"ghidrasql server did not become healthy within {STARTUP_TIMEOUT}s")
+
+
+def _registry_get(sid: str) -> dict | None:
+    try:
+        data = json.loads(REGISTRY.read_text(encoding="utf-8"))
+        return data.get(sid)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _registry_put(sid: str, port: int, pid: int, project_dir: str) -> None:
+    try:
+        REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if REGISTRY.exists():
+            try:
+                data = json.loads(REGISTRY.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                data = {}
+        data[sid] = {"port": port, "pid": pid, "project_dir": project_dir,
+                     "ts": time.time()}
+        REGISTRY.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _registry_del(sid: str) -> None:
+    try:
+        data = json.loads(REGISTRY.read_text(encoding="utf-8"))
+        data.pop(sid, None)
+        REGISTRY.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    except (OSError, json.JSONDecodeError):
+        pass
 
 
 def _kill_all_servers() -> None:

@@ -700,12 +700,14 @@ def sink_sites(sample: str, timeout: int = 300) -> dict:
                 funcs = []
     if not isinstance(funcs, list):
         funcs = []
-    top = sorted(funcs, key=lambda f: f.get("size", 0), reverse=True)[:40]
+    top = sorted(funcs, key=lambda f: f.get("size", 0) or 0, reverse=True)[:40]
     sites: list[dict] = []
     # disassemble each and look for calls to the sink imports
     for f in top:
         addr = f.get("offset")
-        name = f.get("name", f"f_{addr:x}")
+        if addr is None:
+            continue  # r2 entries without an address cannot be disassembled
+        name = f.get("name") or f"f_{addr:x}"
         rc2, out2, _ = _run(
             [str(r2), "-2", "-q", "-c", f"pd 200 @ {addr}", sample],
             min(timeout, 60))

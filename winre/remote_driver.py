@@ -997,6 +997,16 @@ def _final_sweep(cfg: dict, *, dynamic: bool, debug: bool) -> dict:
             out["process_sweep"] = r.returncode == 0
     except Exception as e:
         out["sweep_error"] = str(e)[:150]
+    try:
+        # SQL servers are kept alive across helpers during the run (reuse is
+        # required: killing a server holding an open Ghidra project can roll
+        # the project back). Close them only now, after all SQL usage.
+        images = ["ghidrasql.exe", "idasql.exe"]
+        cmd = " & ".join(f"taskkill /F /IM {i} /T 2>nul" for i in images)
+        r = ssh_run(cfg, f"{cmd} & exit /b 0", timeout=60)
+        out["sql_sweep"] = r.returncode == 0
+    except Exception as e:
+        out["sql_sweep_error"] = str(e)[:150]
     return out
 
 
