@@ -423,6 +423,22 @@ def _specific_match(matches: list[str]) -> bool:
     return any(not _generic_literal(m) for m in matches)
 
 
+
+# Packer/compressor family rules (incl. auto-generated CADRE_v2_* packer
+# rules) fire on any packed legitimate binary. They are evidence, never a
+# decisive verdict signal.
+_YARA_PACKER_HINTS = (
+    "nspack", "upack", "aspack", "mpress", "fsg", "pecompact", "petite",
+    "upx", "themida", "enigm", "vmprotect", "packman", "kkrunchy", "mew",
+    "packed", "packer", "compressor", "np pack",
+)
+
+
+def _packer_rule(name: str) -> bool:
+    low = str(name).lower()
+    return any(h in low for h in _YARA_PACKER_HINTS)
+
+
 def yarascan(sample: str, timeout: int = 600) -> dict:
     yr = None
     for cand in [c for c in YR_CANDS if c]:
@@ -448,6 +464,7 @@ def yarascan(sample: str, timeout: int = 600) -> dict:
     hits: list[str] = []
     high: list[str] = []
     generic: list[str] = []
+    packer: list[str] = []
     detail: dict = {}
     bad = 0
     for rf in yar_files:
@@ -474,7 +491,11 @@ def yarascan(sample: str, timeout: int = 600) -> dict:
                            if isinstance(s, dict)]
                 if matched:
                     detail[rule] = [t[:60] for t in matched[:4]]
-                if not matched or _specific_match(matched):
+                if _packer_rule(rule):
+                    # packer/compressor family (or auto-gen packer rule) -
+                    # packed legit binaries hit these constantly
+                    packer.append(rule)
+                elif not matched or _specific_match(matched):
                     high.append(rule)   # no printed strings (hex/imphash/pe) = specific
                 else:
                     generic.append(rule)
@@ -494,6 +515,7 @@ def yarascan(sample: str, timeout: int = 600) -> dict:
             break
     return {"ok": True, "tool": "yarascan", "hits": hits[:40],
             "high_signal": high[:40], "generic": generic[:40],
+            "packer_signal": packer[:40],
             "match_detail": detail,
             "total": len(hits), "rules_scanned": len(yar_files),
             "rules_failed": bad}
@@ -586,6 +608,103 @@ def pe_import_signals(sample: str, timeout: int = 300) -> dict:
             "signals": signals,
             "strong_signals": strong, "strong_count": len(strong),
             "hint": "PE import high-signal map (pefile). Not capa."}
+
+
+# ── Threat intel / known-tool triage (triage-stage, offline) ────────────────
+# Security tools (Sysinternals, forensic suites, RE tooling) legitimately use
+# process-injection, debug and clipboard APIs. Identifying them as known tools
+# early prevents "security tool mistaken for malware" verdicts.
+# Malcat's kesakode (online reputation, when the MCP server has a key) is
+# merged by the quick helper; this function is fully offline.
+
+_PUBLISHER_MARKERS = (
+    "microsoft", "sysinternals", "google", "mozilla", "apple", "adobe",
+    "oracle", "vmware", "zimtech", "eric zimmerman", "sans", "sleuthkit",
+    "belkasoft", "x-ways", "magnet forensics", "axiom", "cellebrite",
+    "accessdata", "exterro", "guidance software", "open source developer",
+    "radare", "hex-rays", "vector 35", "binary ninja",
+)
+_SECURITY_TOOL_MARKERS = (
+    "sysinternals", "process explorer", "process monitor", "procmon",
+    "procexp", "autoruns", "tcpview", "portmon", "vmmap", "rammap",
+    "sigcheck", "strings64", "sysmon", "process hacker", "systeminformer",
+    "procmon64", "procdump", "dumpit", "winpmem", "pe-sieve",
+    "hollows_hunter", "volatility", "sleuthkit", "autopsy", "ftk imager",
+    "kape", "evtxecmd", "recmd", "mftecmd", "amcacheparser", "srumecmd",
+    "bstrings", "jlcmd", "lecmd", "exiftool", "wireshark", "tshark",
+    "networkminer", "fiddler", "fakenet", "nmap", "hashcat",
+    "john the ripper", "ida pro", "ida64", "ghidra", "radare2", "x64dbg",
+    "windbg", "dnspy", "de4dot", "pestudio", "pe-bear", "die ",
+    "detect it easy", "binwalk", "capa", "floss", "yara", "cyberchef",
+    "forensic", "incident response", "malware analysis", "threat hunting",
+    "dfir", "soc ", "siem",
+)
+
+
+def threat_intel(sample: str, timeout: int = 120) -> dict:
+    """Known-tool / publisher identification for triage (offline)."""
+    from pathlib import Path as _P
+    t0 = time.time()
+    out: dict = {"ok": True, "tool": "threat_intel", "known_tool": False,
+                 "vendor": None, "publisher_markers": [],
+                 "tool_markers": [], "signer": "", "signed": False,
+                 "is_dotnet": False, "kesakode": None, "reasons": []}
+    try:
+        import pefile
+        pe = pefile.PE(sample, fast_load=True)
+        pe.parse_data_directories(
+            directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_SECURITY"],
+                         pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR"]])
+        out["signed"] = bool(pe.OPTIONAL_HEADER.DATA_DIRECTORY[
+            pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_SECURITY"]].VirtualAddress)
+        out["is_dotnet"] = bool(pe.OPTIONAL_HEADER.DATA_DIRECTORY[
+            pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR"]].VirtualAddress)
+        vi = []
+        try:
+            for fi in (pe.FileInfo or []):
+                for entry in fi:
+                    if hasattr(entry, "StringTable"):
+                        for st in entry.StringTable:
+                            vi.extend([v.decode(errors="replace")
+                                       for v in (st.entries or {}).values()])
+        except Exception:
+            pass
+        pe.close()
+        vi_text = " ".join(vi).lower()
+        out["version_info_keys_found"] = bool(vi)
+    except Exception as e:
+        out["pe_error"] = str(e)[:120]
+        vi_text = ""
+    if out["signed"]:
+        try:
+            ps = ("(Get-AuthenticodeSignature -LiteralPath "
+                  f"'{sample}').SignerCertificate.Subject")
+            r = _run(["powershell", "-NoProfile", "-Command", ps], 30)
+            out["signer"] = (r[1] or "").strip()
+        except Exception:
+            pass
+    text = ""
+    try:
+        with _P(sample).open("rb") as fh:
+            text = fh.read(4 * 1024 * 1024).decode("latin-1", "ignore").lower()
+    except OSError:
+        pass
+    hay = text + " " + vi_text + " " + (out["signer"] or "").lower()
+    out["publisher_markers"] = sorted({m for m in _PUBLISHER_MARKERS if m in hay})[:6]
+    out["tool_markers"] = sorted({m.strip() for m in _SECURITY_TOOL_MARKERS if m in hay})[:8]
+    if out["signer"]:
+        out["vendor"] = out["signer"].split("CN=")[-1].split(",")[0][:60]
+    # known tool when: signed by a known publisher OR strong security-tool markers
+    if any(m in (out["signer"] or "").lower() for m in _PUBLISHER_MARKERS):
+        out["known_tool"] = True
+        out["reasons"].append(f"signed by known vendor: {out['vendor']}")
+    elif out["tool_markers"]:
+        out["known_tool"] = True
+        out["reasons"].append("security-tool markers: " +
+                              ", ".join(out["tool_markers"][:4]))
+    out["duration_s"] = round(time.time() - t0, 2)
+    return out
+
 
 
 # ── API-hash resolver detection (KB: AMAT Track 8 Miniduke / MalTrak Emotet) ─
@@ -1449,6 +1568,7 @@ def main() -> int:
                   "strings": strings,
                   "pe_import_signals": pe_import_signals,
                   "api_hash_resolver": api_hash_resolver,
+                  "threat_intel": threat_intel,
                   "signature_match": signature_match,
                   "xor_string_search": xor_string_search,
                   "olevba": olevba_analyze, "peepdf": peepdf_analyze,
@@ -1479,7 +1599,8 @@ def main() -> int:
     if a.tool == "all":
         core = ("capa", "floss", "lief", "diec", "yarascan", "strings",
                 "pe_import_signals", "api_hash_resolver", "xor_string_search",
-                "crypto_constants", "mitigations", "ioc_extract")
+                "crypto_constants", "mitigations", "ioc_extract",
+                "threat_intel")
         out = {t: TOOL_FUNCS[t](a.sample) for t in core}
     elif a.tool == "signature_match":
         # signature_match is the odd tool: first param is func_name, no sample

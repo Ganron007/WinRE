@@ -1056,6 +1056,14 @@ def _curated_yara_hits(quick: dict | None, findings: dict) -> list[str]:
     seen: set = set()
     out: list[str] = []
     for n in names:
+        low = str(n).lower()
+        # Auto-generated CADRE_v2_* rules and packer/compressor family rules
+        # routinely match packed legitimate binaries - not floor-worthy.
+        if low.startswith("cadre_v2_") or any(h in low for h in (
+                "nspack", "upack", "aspack", "mpress", "fsg", "pecompact",
+                "petite", "upx", "themida", "enigm", "vmprotect", "packman",
+                "kkrunchy", "mew", "packed", "packer", "compressor")):
+            continue
         if n not in seen:
             seen.add(n)
             out.append(n)

@@ -210,7 +210,7 @@ try:
     st = run(tools / "flare_static_tools.py", "all", str(sample), timeout=2700)
     if isinstance(st, dict):
         for k in ("capa", "floss", "diec", "yarascan", "strings",
-                  "pe_import_signals", "api_hash_resolver"):
+                  "pe_import_signals", "api_hash_resolver", "threat_intel"):
             v = st.get(k)
             if isinstance(v, dict):
                 out[k] = v
@@ -219,6 +219,34 @@ try:
             out["pe"] = pe
 except Exception as e:
     out["static_tools_error"] = str(e)[:120]
+
+# threat-intel enrichment: Malcat kesakode + publisher from the file view
+try:
+    ti = out.get("threat_intel")
+    mc_file = ((out.get("malcat") or {}).get("file") or {})
+    if isinstance(ti, dict) and isinstance(mc_file, dict):
+        ks = mc_file.get("kesakode_verdict")
+        if ks is not None:
+            ti["kesakode"] = ks
+            try:
+                import json as _json
+                ks_txt = _json.dumps(ks).lower()
+                if "hacktool" in ks_txt or "securitytool" in ks_txt \
+                        or "security tool" in ks_txt or "toolware" in ks_txt:
+                    ti["known_tool"] = True
+                    ti.setdefault("reasons", []).append("malcat kesakode: tool tag")
+            except Exception:
+                pass
+        md = mc_file.get("metadata")
+        if isinstance(md, dict):
+            comp = str(md.get("company") or md.get("Company") or "")
+            prod = str(md.get("product") or md.get("Product") or "")
+            if comp:
+                ti["malcat_company"] = comp[:60]
+            if prod:
+                ti["malcat_product"] = prod[:60]
+except Exception:
+    pass
 
 i64 = sample.with_suffix(sample.suffix + ".i64")
 if i64.is_file():

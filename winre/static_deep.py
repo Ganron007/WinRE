@@ -99,8 +99,25 @@ def _rules_verdict(ev: dict) -> dict:
         high = _as_hit_names(yh.get("high_signal"))
     else:
         high = hits  # legacy output (no specificity classifier)
+    pk = _as_hit_names(yh.get("packer_signal"))
+    if pk:
+        reasons.append("packer-family yara (info): "
+                       + ", ".join(str(h).split()[0][:45] for h in pk[:3]))
     my = _as_hit_names(ev.get("malcat_yara"))
-    if high or my:
+    _ti_known = bool(_dict_of(ev.get("threat_intel")).get("known_tool"))
+    _yara_suppressed = False
+    if _ti_known and (high or my):
+        # Auto-generated CADRE_v2 rules (packers/installers/compilers) match
+        # legitimately on packed security tools. Without an independent
+        # decisive hit, keep them as evidence only.
+        _decisive = list(my) + [h for h in high
+                                if not str(h).startswith("CADRE_v2_")]
+        if not _decisive:
+            if high:
+                reasons.append("yara (auto-gen; known tool): "
+                               + ", ".join(str(h).split()[0][:50] for h in high[:3]))
+            _yara_suppressed = True
+    if (high or my) and not _yara_suppressed:
         names = [str(h).split()[0][:60] for h in (high[:3] + my[:3])]
         reasons.append("yara hits: " + ", ".join(names))
         return {"verdict": "malicious", "confidence": "high",
@@ -139,7 +156,8 @@ def _rules_verdict(ev: dict) -> dict:
     # managed assemblies: high-entropy metadata sections and API-hash-shaped
     # 4-byte constants are normal - do not let those generic signals fire
     is_dotnet = bool(pe.get("is_dotnet")) or bool(
-        _dict_of(ev.get("pe")).get("is_dotnet"))
+        _dict_of(ev.get("pe")).get("is_dotnet")) or bool(
+        _dict_of(ev.get("threat_intel")).get("is_dotnet"))
     xor_ev = _dict_of(ev.get("xor_string_search"))
     xors = xor_ev.get("candidates") or []
     forged = False
@@ -217,7 +235,8 @@ def _rules_verdict(ev: dict) -> dict:
     # Signed known-vendor tool whose ONLY signal is dual-use imports
     # (CreateRemoteThread / WriteProcessMemory are core to Sysinternals-class
     # utilities). Honest downgrade with an explicit evidence note.
-    _signer = ""
+    _ti = _dict_of(ev.get("threat_intel"))
+    _signer = str(_ti.get("signer") or "")
     for _k in ("pe_parse", "pe"):
         _signer = str(_dict_of(ev.get(_k)).get("signer") or "") or _signer
         if _signer:
@@ -225,12 +244,21 @@ def _rules_verdict(ev: dict) -> dict:
     _known = any(v in _signer.lower() for v in (
         "microsoft", "google", "mozilla", "apple", "adobe", "oracle",
         "vmware", "zimtech"))
-    if reasons and _known and all(r.startswith("high-signal imports:") for r in reasons):
+    _known_tool = bool(_ti.get("known_tool")) or _known
+    if reasons and _known_tool:
+        # Threat intel: legitimate security/forensic tooling (Sysinternals,
+        # Zimmerman tools, RE suites) uses dual-use APIs and packing. Decisive
+        # signals already returned above; remaining suspicion-only reasons are
+        # downgraded with the identification kept in evidence.
+        note = ("threat-intel: known security tool"
+                + (" (" + "; ".join(str(x) for x in (_ti.get("reasons") or [])[:2]) + ")"
+                   if _ti.get("reasons") else "")
+                + (f" | signer: {_signer[:60]}" if _signer else ""))
         return {"verdict": "unknown", "confidence": "low",
-                "summary": ("Signed vendor tool with dual-use imports only "
-                            "(no behavioral indicators)."),
-                "key_evidence": reasons + [f"signer: {_signer[:80]}"],
-                "rules_fired": ["signed-dual-use"]}
+                "summary": ("Known security tool / vendor - dual-use indicators "
+                            "only (no behavioral indicators)."),
+                "key_evidence": reasons + [note],
+                "rules_fired": ["known-tool" if _ti.get("known_tool") else "signed-dual-use"]}
 
     if reasons:
         return {"verdict": "suspicious", "confidence": "medium",
@@ -498,6 +526,8 @@ def run_static_deep_dive(sample_name: str, sha: str, *,
             ev.setdefault("malcat_yara", mcq["yara_hits"])
         if mcq.get("anomalies"):
             ev.setdefault("malcat_anomalies", mcq["anomalies"])
+    if isinstance(q, dict) and isinstance(q.get("threat_intel"), dict):
+        ev.setdefault("threat_intel", q["threat_intel"])
 
     try:
         verdict = _calibrate(_rules_verdict(ev), ev)
