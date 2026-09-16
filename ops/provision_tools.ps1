@@ -143,6 +143,21 @@ Write-Host ""
 #   idasql.exe      : licensed (allthingsida/idasql) - drop your copy at
 #                     dist\provision\idasql.exe; it is staged to C:\Tools-staged
 #                     and setup installs it next to idat.exe.
+# radare2 (2nd disasm engine; dropped from FlareVM 2026 package sets)
+$r2Zip = Join-Path $stage "radare2.zip"
+if (Test-Path $r2Zip) { Write-Host "  [OK] radare2.zip staged (cached)" -ForegroundColor Green }
+else {
+    Write-Host "  [GET ] radare2 (official Windows build) ..."
+    try {
+        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/radareorg/radare2/releases/latest" -UseBasicParsing -TimeoutSec 120
+        $asset = $rel.assets | Where-Object { $_.name -match '(w64|win64).*\.zip$' } | Select-Object -First 1
+        if ($asset) {
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $r2Zip -UseBasicParsing -TimeoutSec 900
+            Write-Host "  [OK] radare2 staged ($($asset.name))" -ForegroundColor Green
+        } else { Write-Host "  [WARN] no w64 asset in latest radare2 release" -ForegroundColor Yellow }
+    } catch { Write-Host "  [WARN] radare2 download failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+
 # --- SQL-first artifacts (Ghidra SQL + IDA SQL) --------------------------------
 # idasql is a FREE public release (github.com/allthingsida/idasql) - the archive
 # is version-matched to the installed IDA (9.2/9.3/9.4). We stage the CLI as

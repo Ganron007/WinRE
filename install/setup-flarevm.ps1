@@ -24,11 +24,12 @@
     Usage (ON the FlareVM, after syncing the repo via ops\sync_to_flare.ps1):
       powershell -ExecutionPolicy Bypass -File C:\WinRE\install\setup-flarevm.ps1
       powershell -ExecutionPolicy Bypass -File C:\WinRE\install\setup-flarevm.ps1 -CheckMode   # dry-run, changes nothing
-      powershell -ExecutionPolicy Bypass -File C:\WinRE\install\setup-flarevm.ps1 -DisableUAC # reboot required
+      # UAC is DISABLED by default (lab VM); pass -KeepUAC to leave it on. Reboot after the change.
 #>
 param(
     [switch]$CheckMode,
-    [switch]$DisableUAC
+    [switch]$KeepUAC,
+    [switch]$DisableUAC   # legacy no-op: UAC-off is now the default
 )
 
 $ErrorActionPreference = "Continue"
@@ -403,6 +404,24 @@ function Resolve-Tool([string[]]$paths, [string[]]$names) {
     }
     return $null
 }
+# radare2 (2nd disasm engine: r2_decompile in agentic + deterministic deep).
+# FlareVM 2026 dropped the package; provision_tools.ps1 stages the official
+# Windows build as C:\Tools-staged\radare2.zip and setup installs it here.
+if (Test-Path "C:\Tools\radare2\radare2.exe") { Ok "radare2 present -> C:\Tools\radare2\radare2.exe" }
+elseif (Test-Path "C:\Tools-staged\radare2.zip") {
+    Act "install radare2 -> C:\Tools\radare2"
+    if (-not $CheckMode) {
+        $tmp = Join-Path $env:TEMP "radare2-stage"
+        Remove-Item $tmp -Recurse -Force -EA SilentlyContinue
+        Expand-Archive -Path "C:\Tools-staged\radare2.zip" -DestinationPath $tmp -Force
+        New-Item -ItemType Directory -Force -Path "C:\Tools\radare2" | Out-Null
+        $binDir = Get-ChildItem $tmp -Recurse -Directory -Filter "bin" -EA SilentlyContinue | Select-Object -First 1
+        $exe = Get-ChildItem $tmp -Recurse -Filter "radare2.exe" -EA SilentlyContinue | Select-Object -First 1
+        if ($exe) { Copy-Item (Join-Path $exe.DirectoryName "*") "C:\Tools\radare2" -Recurse -Force }
+        elseif ($binDir) { Copy-Item (Join-Path $binDir.FullName "*") "C:\Tools\radare2" -Recurse -Force }
+        Remove-Item $tmp -Recurse -Force -EA SilentlyContinue
+    }
+}
 foreach ($t in @(
         @("capa (REQUIRED free; pip fallback auto-used)", @("C:\Tools\capa\capa.exe"), @("capa.exe")),
         @("capa-rules dir (REQUIRED free; mandiant/capa-rules)", @("C:\Tools\capa-rules"), @()),
@@ -603,21 +622,19 @@ Write-Host ""
 Write-Host "--- UAC / debugger elevation ---"
 $uacKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
 $enableLua = (Get-ItemProperty -Path $uacKey -Name EnableLUA -ErrorAction SilentlyContinue).EnableLUA
-if ($DisableUAC) {
-    if ($enableLua -eq 0) { Ok "UAC already disabled (EnableLUA=0)" }
-    else {
-        Act "disable UAC (EnableLUA=0; ConsentPromptBehaviorAdmin=0; PromptOnSecureDesktop=0)"
-        if (-not $CheckMode) {
-            Set-ItemProperty -Path $uacKey -Name EnableLUA -Value 0 -Type DWord
-            Set-ItemProperty -Path $uacKey -Name ConsentPromptBehaviorAdmin -Value 0 -Type DWord
-            Set-ItemProperty -Path $uacKey -Name PromptOnSecureDesktop -Value 0 -Type DWord
-        }
-        Manual "REBOOT the VM so UAC-off takes effect, THEN take/refresh the snapshot."
-    }
+if ($KeepUAC) {
+    if ($enableLua -eq 0) { Ok "UAC disabled (EnableLUA=0)" }
+    else { Warn "UAC enabled (-KeepUAC): manual x64dbg launches will prompt (task launches are Highest)." }
 } elseif ($enableLua -eq 0) {
     Ok "UAC disabled (EnableLUA=0) - x64dbg manual launches run elevated silently"
 } else {
-    Warn "UAC enabled: task-launched x64dbg is elevated with no prompt; manual launches will prompt. Re-run with -DisableUAC (then reboot) to silence."
+    Act "disable UAC (EnableLUA=0; ConsentPromptBehaviorAdmin=0; PromptOnSecureDesktop=0)"
+    if (-not $CheckMode) {
+        Set-ItemProperty -Path $uacKey -Name EnableLUA -Value 0 -Type DWord
+        Set-ItemProperty -Path $uacKey -Name ConsentPromptBehaviorAdmin -Value 0 -Type DWord
+        Set-ItemProperty -Path $uacKey -Name PromptOnSecureDesktop -Value 0 -Type DWord
+    }
+    Manual "REBOOT the VM so UAC-off takes effect, THEN take/refresh the snapshot."
 }
 
 # --- 7. verify -----------------------------------------------------------------
