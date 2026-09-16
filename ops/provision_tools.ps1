@@ -143,8 +143,45 @@ Write-Host ""
 #   idasql.exe      : licensed (allthingsida/idasql) - drop your copy at
 #                     dist\provision\idasql.exe; it is staged to C:\Tools-staged
 #                     and setup installs it next to idat.exe.
-if (Test-Path (Join-Path $stage "idasql.exe")) { Write-Host "  [OK] idasql.exe staged (licensed copy provided)" }
-else { Write-Host "  [NOTE] idasql.exe not staged - place your licensed copy at dist\provision\idasql.exe" -ForegroundColor DarkGray }
+# --- SQL-first artifacts (Ghidra SQL + IDA SQL) --------------------------------
+# idasql is a FREE public release (github.com/allthingsida/idasql) - the archive
+# is version-matched to the installed IDA (9.2/9.3/9.4). We stage the CLI as
+# idasql.exe plus the raw zip for reference. The Ghidra side (LibGhidraHost
+# extension + ghidrasql 0.0.6) is built once on a build VM and kept in
+# internal\reapply\sql (gitignored) - see docs\SQL-GHIDRA.md for the build path.
+$sqlSrc = Join-Path $repo "internal\reapply\sql"
+$sqlStage = Join-Path $stage "sql"
+New-Item -ItemType Directory -Force -Path $sqlStage | Out-Null
+foreach ($f in @("LibGhidraHost.zip", "ghidrasql.exe")) {
+    $srcF = Join-Path $sqlSrc $f
+    if (Test-Path $srcF) {
+        Copy-Item $srcF (Join-Path $sqlStage $f) -Force
+        Write-Host "  [OK] $f staged (from internal\reapply\sql)" -ForegroundColor Green
+    } else {
+        Write-Host "  [WARN] $f missing in internal\reapply\sql - build it (docs\SQL-GHIDRA.md)" -ForegroundColor Yellow
+    }
+}
+$idasqlZip = Get-ChildItem $sqlSrc -Filter "idasql-v*-ida93.zip" -EA SilentlyContinue | Select-Object -First 1
+if (-not $idasqlZip) {
+    $u = "https://github.com/allthingsida/idasql/releases/download/v0.0.18.1/idasql-v0.0.18.1-ida93.zip"
+    $out = Join-Path $sqlStage "idasql-v0.0.18.1-ida93.zip"
+    Write-Host "  [GET ] idasql (IDA 9.3 build) ..."
+    try { Invoke-WebRequest -Uri $u -OutFile $out -UseBasicParsing -TimeoutSec 600 } catch { Write-Host "  [FAIL] idasql download: $($_.Exception.Message)" -ForegroundColor Yellow }
+    $idasqlZip = Get-Item $out -EA SilentlyContinue
+} else {
+    Copy-Item $idasqlZip.FullName (Join-Path $sqlStage $idasqlZip.Name) -Force
+}
+if ($idasqlZip -and (Test-Path $idasqlZip.FullName)) {
+    $tmp = Join-Path $stage "_idasql_x"
+    Remove-Item $tmp -Recurse -Force -EA SilentlyContinue
+    Expand-Archive -Path $idasqlZip.FullName -DestinationPath $tmp -Force
+    $cli = Get-ChildItem $tmp -Recurse -Filter "idasql.exe" | Where-Object FullName -match "windows-x86_64\\cli" | Select-Object -First 1
+    if ($cli) {
+        Copy-Item $cli.FullName (Join-Path $sqlStage "idasql.exe") -Force
+        Write-Host "  [OK] idasql.exe staged (free release; matches IDA 9.3)" -ForegroundColor Green
+    }
+    Remove-Item $tmp -Recurse -Force -EA SilentlyContinue
+}
 
 Write-Host "--- Staging to VM (C:\Tools-staged) ---" -ForegroundColor Cyan
 if (-not $FlareHost) { Write-Host "[WARN] FLARE_HOST not set - staging locally only ($stage)" -ForegroundColor Yellow }

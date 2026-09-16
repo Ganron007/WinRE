@@ -1,479 +1,119 @@
 ﻿#!/usr/bin/env python3
-"""flare_ghidra_sql.py — Windows Ghidra SQL wrapper.
+"""flare_ghidra_sql.py - Ghidra SQL for WinRE (REAL engine, no stubs).
 
-Ports the Remnux ghidra_sql_client.py lineage to Windows so the
-deep-dive agent can ask the same SQL queries against Ghidra on the
-FlareVM execution plane.
+Architecture (mirrors RevAI exactly):
 
-Two execution paths, chosen at health-check time:
+    flare_ghidra_sql.py  (this file: canonical queries + thin adapter)
+        -> tools/ghidra_sql_client.py  (GhidraSqlClient)
+            -> POST http://127.0.0.1:18080/query
+                -> ghidrasql --http  (SQLite-backed SQL engine)
+                    -> LibGhidraHost RPC inside Ghidra headless
 
-  A. analyzeHeadless + Java post-script (GhidraSql.java) — matches the
-     Remnux-lineage contract exactly, no extra server process. Slower per
-     query (~30s JVM cold start for big PEs) but stateless.
+Requirements (installed by install/setup-flarevm.ps1 from staged artifacts):
+    C:\\Tools\\ghidrasql\\ghidrasql.exe
+    <Ghidra>\\Ghidra\\Extensions\\LibGhidraHost   (built extension)
+    JDK 21 (temurin21) pinned in Ghidra's launch.properties
+    VMARGS=-Duser.name=flare-vm pinned in launch.properties (project ownership)
 
-  B. LibGhidraHost HTTP server (`java -jar GhidraSql.jar --port 19301`)
-     — fast multi-query, requires the extension to be built for Windows.
-     Used when --serve is passed.
-
-Spec: docs/SQL-GHIDRA.md (this repo).
-
-Usage (PowerShell on Flare-VM):
-    python C:\\WinRE\\tools\\flare_ghidra_sql.py health
-    python C:\\WinRE\\tools\\flare_ghidra_sql.py "SELECT count(*) FROM funcs" --file C:\\samples\\foo.exe --json
-    python C:\\WinRE\\tools\\flare_ghidra_sql.py --serve --port 19301
-    # then:
-    #   curl -X POST http://127.0.0.1:19301/query -H "Content-Type: application/json" ^
-    #        -d "{\"file\":\"C:\\\\samples\\\\foo.exe\",\"sql\":\"SELECT count(*) FROM funcs\"}"
+Output shape (unchanged for callers such as the remote quick helper):
+    {"ok": true, "columns": [...], "rows": [[...], ...], "row_count": n,
+     "table": "<canonical name>", "mode": "sql", "engine": "ghidrasql-http"}
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import shutil
-import subprocess
 import sys
-import tempfile
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Paths (override with env: GHIDRA_HOME, GHIDRA_SQL_JAR, GHIDRA_CACHE_DIR)
-# Auto-detect falls back across the FlareVM choco layout, C:\tools, and the
-# local repo layout so the tool works regardless of install method.
-# ---------------------------------------------------------------------------
-def _find_ghidra_home() -> Path:
-    env = os.environ.get("GHIDRA_HOME")
-    if env:
-        return Path(env)
-    candidates = [
-        Path(r"C:\tools\ghidra_12.2_PUBLIC"),
-        Path(r"C:\tools\ghidra_12.1.3_PUBLIC"),
-        Path(r"C:\tools\ghidra_12.1.2_PUBLIC"),
-        Path(r"C:\ProgramData\chocolatey\lib\ghidra\tools\ghidra_12.1.2_PUBLIC"),
-        Path(r"C:\ProgramData\chocolatey\lib\ghidra\tools\ghidra_12.1.3_PUBLIC"),
-        Path(r"C:\tools\ghidra"),
-        Path(r"C:\ghidra"),
-    ]
-    for c in candidates:
-        if (c / "support" / "analyzeHeadless.bat").is_file():
-            return c
-    # last resort: anything with analyzeHeadless.bat under C:\tools (depth 2)
-    try:
-        hits = list(Path(r"C:\tools").glob("ghidra*_PUBLIC/support/analyzeHeadless.bat"))
-        if hits:
-            return hits[0].parents[1]
-    except OSError:
-        pass
-    return candidates[0]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-
-GHIDRA_HOME = _find_ghidra_home()
-HEADLESS_BAT = GHIDRA_HOME / "support" / "analyzeHeadless.bat"
-LIB_HOST_JAR = Path(os.environ.get(
-    "GHIDRA_SQL_JAR",
-    str(GHIDRA_HOME / "Ghidra" / "Extensions" / "LibGhidraHost" / "lib" / "GhidraSql.jar"),
-))
-CACHE_DIR = Path(os.environ.get("GHIDRA_CACHE_DIR", r"C:\WinRE\cache\ghidra"))
-HERE = Path(__file__).resolve().parent
-SCRIPTS_DIR = HERE / "ghidra_scripts"
-GHIDRA_SQL_JAVA = SCRIPTS_DIR / "GhidraSql.java"
+from ghidra_sql_client import (  # noqa: E402
+    GhidraSqlClient,
+    health as client_health,
+)
 
 CANONICAL_QUERIES = {
-    "funcs":      "SELECT name, addr AS address, size FROM funcs ORDER BY size DESC LIMIT 20",
-    "imports":    "SELECT name, module FROM imports ORDER BY module",
-    "strings":    ("SELECT content, addr AS address FROM strings "
-                   "WHERE content LIKE '%http%' OR content LIKE '%cmd%' LIMIT 50"),
-    "data_items": "SELECT addr AS address, size, type FROM data_items LIMIT 20",
-    "segments":   "SELECT name, start, end, perm FROM segments",
+    "funcs": "SELECT name, address, size FROM funcs ORDER BY size DESC LIMIT 20",
+    "imports": "SELECT name, module FROM imports ORDER BY module",
+    "strings": ("SELECT content, address FROM strings "
+                "WHERE content LIKE '%http%' OR content LIKE '%cmd%' LIMIT 50"),
+    "data_items": "SELECT address, size, type FROM data_items LIMIT 20",
+    "segments": "SELECT name, start_address, end_address, permissions FROM segments",
 }
 
 
-# ---------------------------------------------------------------------------
-# Health
-# ---------------------------------------------------------------------------
+def _resolve(sql: str) -> tuple[str, str | None]:
+    """Accept @name shortcuts or raw SQL."""
+    if sql.startswith("@") and sql[1:] in CANONICAL_QUERIES:
+        name = sql[1:]
+        return CANONICAL_QUERIES[name], name
+    return sql, None
+
+
 def health() -> dict:
-    """Probe Ghidra + LibGhidraHost + CADRE PE Loader presence."""
-    out: dict = {
-        "ok": True,
-        "ghidra_home": str(GHIDRA_HOME),
-        "analyze_headless": HEADLESS_BAT.is_file(),
-        "lib_ghidra_host": False,
-        "cadre_pe_loader": False,
-        "java": shutil.which("java") or shutil.which("javaw"),
-    }
-    if HEADLESS_BAT.is_file():
-        out["ok"] = True
-    else:
-        out["ok"] = False
-        out["error"] = f"analyzeHeadless.bat not found at {HEADLESS_BAT}"
-
-    if LIB_HOST_JAR.is_file():
-        out["lib_ghidra_host"] = True
-    # CADRE PE Loader — heuristic check on Extensions/CADRE or env override
-    cadre = os.environ.get("GHIDRA_CADRE_DIR")
-    if cadre and Path(cadre).is_dir():
-        out["cadre_pe_loader"] = True
-    else:
-        for cand in (GHIDRA_HOME / "Ghidra" / "Extensions" / "CADRE",
-                     GHIDRA_HOME / "Ghidra" / "Extensions" / "CADRE PE Loader"):
-            if cand.is_dir():
-                out["cadre_pe_loader"] = True
-                out["cadre_pe_loader_path"] = str(cand)
-                break
-
-    if not out["java"]:
-        out["ok"] = False
-        out["error"] = out.get("error", "java not on PATH")
+    h = client_health()
+    out = {"ok": h.get("ok", False), "ghidra_home": h.get("ghidra_home"),
+           "ghidrasql": h.get("ghidrasql"),
+           "lib_ghidra_host": h.get("lib_ghidra_host"),
+           "engine": "ghidrasql-http"}
+    if not out["ok"]:
+        out["error"] = h.get("error")
     return out
 
 
-# ---------------------------------------------------------------------------
-# Path A — analyzeHeadless.bat + Java post-script
-# ---------------------------------------------------------------------------
-def _loader_name() -> str:
-    """Loader override for analyzeHeadless.
-
-    The CADRE PE Loader can hang Ghidra 12.1.x when the extension is present
-    but not correctly registered for that Ghidra build (the batch then sits at
-    its 'Press any key to continue' prompt). So it is NEVER forced by default:
-      - GHIDRA_LOADER=<name>     explicit override (operator knows best)
-      - WINRE_GHIDRA_CADRE=1     opt-in: 'CADRE PE Loader' when installed
-      - default: '' -> Ghidra auto-detects (built-in PE loader)
-    """
-    forced = (os.environ.get("GHIDRA_LOADER") or "").strip()
-    if forced:
-        return forced
-    if (os.environ.get("WINRE_GHIDRA_CADRE", "").strip().lower()
-            not in ("1", "true", "yes")):
-        return ""
-
-    def _valid_cadre(dir_: Path) -> bool:
-        try:
-            if not dir_.is_dir():
-                return False
-            return any(p.is_file() and p.suffix == ".jar" for p in dir_.rglob("*"))
-        except OSError:
-            return False
-
-    env_dir = os.environ.get("GHIDRA_CADRE_DIR")
-    if env_dir and _valid_cadre(Path(env_dir)):
-        return "CADRE PE Loader"
-    for cand in (GHIDRA_HOME / "Ghidra" / "Extensions" / "CADRE",
-                 GHIDRA_HOME / "Ghidra" / "Extensions" / "CADRE PE Loader"):
-        if _valid_cadre(cand):
-            return "CADRE PE Loader"
-    return ""
-
-
-def run_query_headless(sql: str, sample: Path, timeout: int = 420,
-                       persist: bool = False) -> dict:
-    """Run one SQL via analyzeHeadless + GhidraSql.java post-script.
-
-    Returns:
-        dict {ok, rows, columns, row_count, error, mode, elapsed_s}
-    """
-    h = health()
-    if not h["ok"]:
-        return {"ok": False, "error": h.get("error"), "mode": "headless"}
-    if not sample.is_file():
-        return {"ok": False, "error": f"sample missing: {sample}", "mode": "headless"}
-    if not GHIDRA_SQL_JAVA.is_file():
-        return {"ok": False,
-                "error": f"GhidraSql.java missing: {GHIDRA_SQL_JAVA} "
-                         f"(rebuild LibGhidraHost or restore the post-script from upstream)",
-                "mode": "headless"}
-
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    proj = tempfile.mkdtemp(prefix="winre-ghidra-", dir=str(CACHE_DIR))
-    proj_name = f"winre-{sample.stem}"
-    t0 = time.time()
-    # NOTE: analyzeHeadless.bat mangles SQL args via cmd re-parsing (parens,
-    # `>`, `*`). Pass the SQL through the GHIDRA_SQL_QUERY env var and have
-    # GhidraSql.java read it; the batch only receives a sentinel arg.
-    # The .bat launcher (via LaunchSupport) is the only reliable entry point —
-    # direct `java ghidra.app.util.headless.AnalyzeHeadless` fails on 12.1.3
-    # (no main; requires ghidra.Ghidra launcher setup).
-    cmd = [
-        str(HEADLESS_BAT),
-        proj, proj_name,
-        "-import", str(sample),
-    ]
-    loader = _loader_name()
-    if loader:
-        cmd += ["-loader", loader]
-    cmd += [
-        "-scriptPath", str(SCRIPTS_DIR),
-        "-postScript", "GhidraSql.java", "GHIDRA_SQL_QUERY",
-        "-deleteProject",
-    ]
-    # Analysis: packed samples (RevAI-parity requirement) need Ghidra's
-    # auto-analysis or getFunctionManager() yields ~0 functions. Default ON;
-    # WINRE_GHIDRA_ANALYZE=0 opts out for quick-only re-runs on big binaries.
-    if os.environ.get("WINRE_GHIDRA_ANALYZE", "1").strip().lower() not in ("0", "false", "no"):
-        # -noanalysis omitted -> analyzeHeadless performs auto-analysis
-        pass
-    else:
-        cmd.append("-noanalysis")
-    env = os.environ.copy()
-    env["GHIDRA_SQL_QUERY"] = sql
-    # Heap sizing: default 2G is slow on 16GB hosts; let operators override
-    # via GHIDRA_HEADLESS_MAXMEM (e.g. 8G for a 16GB box). Favor an explicit
-    # opt-in over assuming a large heap.
-    if os.environ.get("GHIDRA_HEADLESS_MAXMEM"):
-        env["GHIDRA_HEADLESS_MAXMEM"] = os.environ["GHIDRA_HEADLESS_MAXMEM"]
-    if persist:
-        # -w is not a real flag; persist is implemented inside the Java
-        # post-script by reading args. We add a marker arg instead.
-        cmd.insert(-2, "-postScript")
-        cmd.insert(-2, f"GhidraSqlPersist.java GHIDRA_SQL_QUERY")
-
+def run_query(sql: str, sample: str, timeout: int = 900,
+              max_rows: int = 200) -> dict:
+    """Execute SQL through the real engine. Raises on engine/SQL errors."""
+    sql, table = _resolve(sql)
+    client = GhidraSqlClient()
     try:
-        # stdin=DEVNULL: Ghidra's .bat launcher ends with an interactive
-        # `pause` when the JVM fails to start; without a closed stdin this
-        # subprocess would hang until the timeout instead of reporting the
-        # real error (observed: JDK mismatch + CADRE loader on 12.1.2).
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=env,
-                              stdin=subprocess.DEVNULL,
-                              timeout=timeout, encoding="utf-8", errors="replace")
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"analyzeHeadless timeout {timeout}s "
-                                      f"(launcher or analysis stuck; check "
-                                      f"java >= 21 and JAVA_HOME)",
-                "mode": "headless", "elapsed_s": round(time.time() - t0, 1)}
-    except FileNotFoundError as e:
-        return {"ok": False, "error": f"java/analyzeHeadless not invokable: {e}",
-                "mode": "headless"}
-
-    if proc.returncode != 0:
-        tail = ((proc.stdout or "") + "\n" + (proc.stderr or ""))[-1200:]
-        return {"ok": False, "error": f"analyzeHeadless rc={proc.returncode}: {tail}",
-                "returncode": proc.returncode, "mode": "headless",
-                "elapsed_s": round(time.time() - t0, 1)}
-
-    # GhidraSql.java prints a JSON blob on stdout; Ghidra's own INFO lines may
-    # interleave or wrap it, so scan for a balanced { ... } object anywhere.
-    payload = None
-    out = proc.stdout or ""
-    start = out.find("{")
-    if start >= 0:
-        depth = 0
-        in_str = False
-        esc = False
-        for i in range(start, len(out)):
-            c = out[i]
-            if in_str:
-                if esc:
-                    esc = False
-                elif c == "\\":
-                    esc = True
-                elif c == '"':
-                    in_str = False
-                continue
-            if c == '"':
-                in_str = True
-            elif c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        payload = json.loads(out[start : i + 1])
-                    except json.JSONDecodeError:
-                        payload = None
-                    break
-    if payload is None:
-        return {"ok": False,
-                "error": "GhidraSql.java did not emit a JSON line; "
-                         "check postScript logs in analyzeHeadless output",
-                "stdout_tail": (proc.stdout or "")[-400:],
-                "mode": "headless",
-                "elapsed_s": round(time.time() - t0, 1)}
-
-    payload.setdefault("mode", "headless")
-    payload.setdefault("elapsed_s", round(time.time() - t0, 1))
-    return payload
-
-
-# ---------------------------------------------------------------------------
-# Path B — LibGhidraHost HTTP server
-# ---------------------------------------------------------------------------
-def _start_libhost(db_path: Path, port: int) -> subprocess.Popen:
-    """Start `java -jar GhidraSql.jar --program <i64> --port <port>` detached."""
-    cmd = [
-        shutil.which("java") or "java",
-        "-jar", str(LIB_HOST_JAR),
-        "--program", str(db_path),
-        "--port", str(port),
-    ]
-    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace")
-
-
-def query_http(db_path: str, sql: str, port: int = 19301,
-               timeout: int = 60) -> dict:
-    """Run one query against a LibGhidraHost server (assumed already running)."""
-    body = json.dumps({"sql": sql}).encode("utf-8")
-    req = urllib.request.Request(
-        f"http://127.0.0.1:{port}/query",
-        data=body, headers={"Content-Type": "application/json"}, method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return {"ok": True, "mode": "libhost", **(json.loads(r.read()))}
-    except urllib.error.URLError as e:
-        return {"ok": False, "error": f"libhost unreachable on :{port}: {e}",
-                "mode": "libhost"}
-
-
-# ---------------------------------------------------------------------------
-# HTTP serve mode (libhost front-end OR an inline shim around headless)
-# Uses stdlib http.server so the VM needs no flask install (VM is offline).
-# ---------------------------------------------------------------------------
-def serve(port: int, mode: str) -> int:
-    """Run a tiny HTTP server. mode='libhost' expects LibGhidraHost already
-    up on the same port; mode='shim' runs headless per request (slow but
-    no extra setup)."""
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-    import urllib.parse
-
-    class _Handler(BaseHTTPRequestHandler):
-        def log_message(self, format, *args):  # noqa: N802
-            sys.stderr.write("[flare_ghidra_sql] " + (format % args) + "\n")
-
-        def _reply(self, code: int, payload: dict):
-            data = json.dumps(payload).encode("utf-8")
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-
-        def do_GET(self):  # noqa: N802
-            if self.path == "/health":
-                self._reply(200, health())
-            else:
-                self._reply(404, {"ok": False, "error": "not found"})
-
-        def do_POST(self):  # noqa: N802
-            if self.path != "/query":
-                self._reply(404, {"ok": False, "error": "not found"})
-                return
-            length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(length) if length else b""
-            try:
-                body = json.loads(raw or b"{}")
-            except json.JSONDecodeError as e:
-                self._reply(400, {"ok": False, "error": str(e)})
-                return
-            sql = body.get("sql")
-            file_ = body.get("file")
-            if not sql or not file_:
-                self._reply(400, {"ok": False, "error": "sql and file required"})
-                return
-            if mode == "libhost":
-                result = query_http(file_, sql, port=port)
-            else:
-                result = run_query_headless(sql, Path(file_), timeout=300,
-                                            persist=bool(body.get("persist")))
-            self._reply(200, result)
-
-    print(f"[flare_ghidra_sql] serving on 127.0.0.1:{port} mode={mode}", flush=True)
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
+        res = client.ghidra_query(sample, sql, max_rows=max_rows)
     finally:
-        httpd.shutdown()
-    return 0
+        client.close_all()
+    rows = [[r.get(c) for c in res["columns"]] for r in res["rows"]]
+    out = {"ok": True, "columns": res["columns"], "rows": rows,
+           "row_count": res["row_count"],
+           "total_row_count": res["total_row_count"],
+           "truncated": res["truncated"],
+           "mode": "sql", "engine": "ghidrasql-http"}
+    if table:
+        out["table"] = table
+    return out
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-def _print_table(result: dict) -> None:
-    if not result.get("ok"):
-        print(f"ERROR: {result.get('error', 'unknown')}", file=sys.stderr)
-        return
-    cols = result.get("columns") or []
-    rows = result.get("rows") or []
-    if not cols:
-        print("(no columns)")
-        return
-    col_w = [max(len(str(c)), 12) for c in cols]
-    for r in rows:
-        vals = list(r.values()) if isinstance(r, dict) else r
-        for i, v in enumerate(vals):
-            if i < len(col_w):
-                col_w[i] = max(col_w[i], len(str(v)))
-    sep = "+" + "+".join("-" * (w + 2) for w in col_w) + "+"
-    print(sep)
-    print("| " + " | ".join(str(c).ljust(w) for c, w in zip(cols, col_w)) + " |")
-    print(sep)
-    for r in rows:
-        vals = list(r.values()) if isinstance(r, dict) else r
-        print("| " + " | ".join(str(v).ljust(w) for v, w in zip(vals, col_w)) + " |")
-    print(sep)
-    print(f"{result.get('row_count', len(rows))} row(s)  "
-          f"mode={result.get('mode', '?')}  "
-          f"elapsed={result.get('elapsed_s', '?')}s")
+def _serve(port: int) -> int:
+    """Start a ghidrasql --http for the probe project (used by ops)."""
+    print(json.dumps({"error": "serve is managed by tools/ghidra_sql_client.py "
+                               "(lazy per-project start)"}))
+    return 1
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Flare-VM Ghidra SQL wrapper")
+def _main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(description="Ghidra SQL for WinRE (real ghidrasql engine)")
     sub = ap.add_subparsers(dest="cmd", required=True)
-
-    p_health = sub.add_parser("health", help="check tool availability")
-    p_health.add_argument("--json", action="store_true")
-
-    p_q = sub.add_parser("query", help="run one SQL against a sample")
-    p_q.add_argument("sql", help="SQL string OR @funcs|@imports|@strings|@data_items|@segments")
-    p_q.add_argument("--file", required=True, help="PE/ELF/binary path")
+    sub.add_parser("health")
+    p_q = sub.add_parser("query")
+    p_q.add_argument("sql", help="SQL or @funcs/@imports/@strings/@data_items/@segments")
+    p_q.add_argument("--file", required=True, help="sample path on the VM")
+    p_q.add_argument("--max-rows", type=int, default=200)
     p_q.add_argument("--json", action="store_true")
-    p_q.add_argument("--mode", choices=["headless", "libhost"], default="headless")
-    p_q.add_argument("--port", type=int, default=19301)
-    p_q.add_argument("--persist", "-w", action="store_true",
-                     help="persist renames/comments (LibGhidraHost only)")
-    p_q.add_argument("--timeout", type=int, default=420)
-
-    p_serve = sub.add_parser("serve", help="HTTP server (POST /query)")
-    p_serve.add_argument("--port", type=int, default=19301)
-    p_serve.add_argument("--mode", choices=["libhost", "shim"], default="shim")
-
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     if args.cmd == "health":
         h = health()
-        print(json.dumps(h, indent=2) if args.json else
-              "\n".join(f"  {k}: {v}" for k, v in h.items()))
-        return 0 if h.get("ok") else 1
+        print(json.dumps(h, indent=2))
+        return 0 if h["ok"] else 1
 
-    if args.cmd == "serve":
-        return serve(args.port, args.mode)
-
-    # query
-    sql = args.sql
-    if sql.startswith("@"):
-        key = sql.lstrip("@")
-        if key not in CANONICAL_QUERIES:
-            print(f"ERROR: unknown canonical query '{key}'. "
-                  f"Choose from {list(CANONICAL_QUERIES)}", file=sys.stderr)
-            return 2
-        sql = CANONICAL_QUERIES[key]
-    if args.mode == "libhost":
-        result = query_http(args.file, sql, port=args.port, timeout=args.timeout)
-    else:
-        result = run_query_headless(sql, Path(args.file), timeout=args.timeout,
-                                    persist=args.persist)
-    if args.json:
-        print(json.dumps(result, indent=2, default=str))
-    else:
-        _print_table(result)
-    return 0 if result.get("ok") else 1
+    try:
+        out = run_query(args.sql, args.file, max_rows=args.max_rows)
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)[:500],
+                          "mode": "sql", "engine": "ghidrasql-http"}))
+        return 1
+    print(json.dumps(out))
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_main(sys.argv[1:]))

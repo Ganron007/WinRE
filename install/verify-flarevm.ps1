@@ -118,15 +118,46 @@ if ($ghidra) {
         Where-Object Name -match "CADRE" | Select-Object -First 1
     if ($loader) { Ok "CADRE PE loader extension -> $($loader.Name)" }
     else { Fail "CADRE PE loader extension not in Ghidra\Extensions (see docs\PREREQUISITES.md)" }
-    if (Test-Path "C:\WinRE\tools\ghidra_scripts\GhidraSql.java") {
-        Ok "GhidraSql.java post-script present (headless SQL)"
-    } else {
-        Warn "GhidraSql.java missing under C:\WinRE\tools\ghidra_scripts (ghidra_query headless unavailable)"
-    }
+    # SQL-first gate: REAL engine only (LibGhidraHost + ghidrasql + JDK21 pin).
     if (Test-Path (Join-Path $ghidra.FullName "Ghidra\Extensions\LibGhidraHost")) {
-        Ok "LibGhidraHost present (optional :19301 serve mode)"
+        Ok "LibGhidraHost extension present"
     } else {
-        Info "LibGhidraHost absent (optional; headless SQL is the default - docs\SQL-GHIDRA.md)"
+        Fail "LibGhidraHost extension missing - Ghidra SQL unavailable (run setup; docs\SQL-GHIDRA.md)"
+    }
+    if (Test-Path "C:\Tools\ghidrasql\ghidrasql.exe") {
+        Ok "ghidrasql engine -> C:\Tools\ghidrasql\ghidrasql.exe"
+        $grsVer = (& C:\Tools\ghidrasql\ghidrasql.exe --version 2>&1 | Select-Object -First 1)
+        if ($grsVer) { Info "ghidrasql $($grsVer.Trim())" }
+        # live SQL semantics check (WHERE + ORDER BY) on a small benign probe
+        $probe = @("C:\samples\calc.exe", "C:\samples\notepad.exe") |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
+        if (-not $probe) {
+            $probe = "C:\samples\_sqlprobe.exe"
+            Copy-Item "$env:windir\system32\calc.exe" $probe -Force -EA SilentlyContinue
+            $probe = if (Test-Path $probe) { $probe } else { $null }
+        }
+        if ($probe -and (Test-Path "C:\WinRE\tools\flare_ghidra_sql.py")) {
+            $out = & C:\Python313\python.exe "C:\WinRE\tools\flare_ghidra_sql.py" query `
+                "SELECT name, size FROM funcs WHERE size > 150 ORDER BY size DESC LIMIT 3" `
+                --file $probe 2>&1 | Out-String
+            try { $j = $out | ConvertFrom-Json } catch { $j = $null }
+            if ($j -and $j.ok) {
+                $sizes = @()
+                foreach ($row in @($j.rows)) { $sizes += [int](@($row)[-1]) }
+                $sorted = $true
+                for ($k = 1; $k -lt $sizes.Count; $k++) {
+                    if ($sizes[$k] -gt $sizes[$k - 1]) { $sorted = $false; break }
+                }
+                $filtered = ($sizes.Count -gt 0) -and -not (@($sizes | Where-Object { $_ -le 150 }).Count -gt 0)
+                if ($sorted -and $filtered) { Ok "Ghidra SQL semantics OK (WHERE/ORDER BY honored; $($sizes -join ', '))" }
+                else { Fail "Ghidra SQL returned wrong semantics (sizes=[$($sizes -join ', ')] sorted=$sorted filtered=$filtered) - engine broken" }
+            } else {
+                $msg = if ($j) { $j.error } else { ($out.Trim() -split "`n" | Select-Object -Last 1) }
+                Fail "Ghidra SQL live query failed: $($msg -replace '\s+',' ')"
+            }
+        } else { Warn "no benign probe sample available for the Ghidra SQL live check" }
+    } else {
+        Fail "ghidrasql engine missing - Ghidra SQL-first is NOT installed (run setup; docs\SQL-GHIDRA.md)"
     }
 } else {
     Fail "Ghidra not found under C:\Tools\ghidra_* (see docs\PREREQUISITES.md)"
@@ -166,8 +197,22 @@ $idaDir = if ($env:WINRE_IDA_DIR) { $env:WINRE_IDA_DIR } else { "C:\Program File
 if (Test-Path (Join-Path $idaDir "ida.exe")) { Ok "IDA Professional -> $idaDir" }
 elseif (Test-Path (Join-Path $idaDir "idat.exe")) { Ok "IDA Professional (idat) -> $idaDir" }
 else { Warn "IDA not found at $idaDir (optional: deep stage degrades to Ghidra+Malcat)" }
-if (Test-Path (Join-Path $idaDir "idasql.exe")) { Ok "idasql.exe present" }
-else { Warn "idasql.exe missing at $idaDir (ida_query tool disabled)" }
+if (Test-Path (Join-Path $idaDir "idasql.exe")) {
+    Ok "idasql.exe present -> $(Join-Path $idaDir 'idasql.exe')"
+    $idaProbe = @("C:\samples\calc.exe", "C:\samples\notepad.exe") |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($idaProbe -and (Test-Path "C:\WinRE\tools\ida_sql_client.py")) {
+        $out = & C:\Python313\python.exe "C:\WinRE\tools\ida_sql_client.py" query `
+            "SELECT name, size FROM funcs WHERE size > 150 ORDER BY size DESC LIMIT 3" `
+            --file $idaProbe 2>&1 | Out-String
+        try { $j = $out | ConvertFrom-Json } catch { $j = $null }
+        if ($j -and $j.ok) { Ok "IDA SQL live query OK (rows=$($j.row_count))" }
+        else {
+            $msg = if ($j) { $j.error } else { ($out.Trim() -split "`n" | Select-Object -Last 1) }
+            Warn "IDA SQL live query failed: $($msg -replace '\s+',' ')"
+        }
+    }
+} else { Warn "idasql.exe missing next to idat.exe (free release: github.com/allthingsida/idasql - provision_tools.ps1 auto-stages)" }
 
 Write-Host ""
 Write-Host "--- x64dbg + MCP plugin ---"

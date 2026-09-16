@@ -116,6 +116,13 @@ $idasql = @(
 if ($idasql) { Get-File $idasql "C:/Tools-staged/" }
 else { Write-Host "  [NOTE] idasql.exe not staged - drop your licensed copy at internal\reapply\idasql.exe to auto-install" }
 
+Write-Host "`n--- 2c. stage SQL-first artifacts -> C:\Tools-staged\sql ---"
+Invoke-VM "New-Item -ItemType Directory -Force -Path C:\Tools-staged\sql | Out-Null; 'ok'" 60 | Out-Null
+$sqlDir = Join-Path $repo "internal\reapply\sql"
+if (Test-Path $sqlDir) {
+    Get-ChildItem $sqlDir -File | ForEach-Object { Get-File $_.FullName "C:/Tools-staged/sql/" }
+} else { Write-Host "  [NOTE] internal\reapply\sql missing - LibGhidraHost.zip/ghidrasql.exe/idasql not staged (docs\SQL-GHIDRA.md)" -ForegroundColor DarkGray }
+
 # --- 3. offline wheels --------------------------------------------------------
 Write-Host "`n--- 3. stage offline wheels -> C:\Tools-staged\wheels ---"
 $wheels = Join-Path $repo "internal\reapply\wheels"

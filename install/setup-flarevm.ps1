@@ -197,17 +197,58 @@ if ($ghidra) {
     }
     if ($loader) { Ok "CADRE PE loader -> $($loader.Name)" }
     else { Manual "Copy the CADRE PE loader into $extDir (stage RevAI\extensions\cadre-pe-loader via ops\reapply_after_revert.ps1, or build RevEng\Tools\cadre-ghidra-loader)." }
-    # SQL surface: headless path is SELF-CONTAINED in the repo (GhidraSql.java);
-    # LibGhidraHost (:19301 serve) is optional.
-    if (Test-Path "C:\WinRE\tools\ghidra_scripts\GhidraSql.java") {
-        Ok "Ghidra SQL headless path ready (repo GhidraSql.java)"
-    } else {
-        Warn "GhidraSql.java missing under C:\WinRE\tools\ghidra_scripts - ghidra_query headless path unavailable"
+    # SQL-first (RevAI parity): Ghidra SQL is served by the real engine -
+    # LibGhidraHost extension (RPC host) + ghidrasql.exe (SQLite SQL, HTTP
+    # :18080). No fallback stub. Staged artifacts live under
+    # C:\Tools-staged\sql\ (LibGhidraHost.zip, ghidrasql.exe).
+    $stagedSql = @("C:\Tools-staged\sql", "C:\Tools-staged") |
+        Where-Object { Test-Path (Join-Path $_ "LibGhidraHost.zip") } | Select-Object -First 1
+    if (-not (Test-Path (Join-Path $extDir "LibGhidraHost"))) {
+        if ($stagedSql) {
+            Act "install LibGhidraHost extension -> $extDir\LibGhidraHost"
+            if (-not $CheckMode) {
+                New-Item -ItemType Directory -Force -Path $extDir | Out-Null
+                $tmp = Join-Path $env:TEMP "LibGhidraHost-$(Get-Random)"
+                Expand-Archive -Path (Join-Path $stagedSql "LibGhidraHost.zip") -DestinationPath $tmp -Force
+                # zip may contain a top-level folder; normalize
+                $inner = Get-ChildItem $tmp -Directory | Where-Object { Test-Path (Join-Path $_.FullName "lib") } | Select-Object -First 1
+                $src = if ($inner) { $inner.FullName } else { $tmp }
+                Copy-Item $src (Join-Path $extDir "LibGhidraHost") -Recurse -Force
+                Remove-Item $tmp -Recurse -Force -EA SilentlyContinue
+            }
+        } else {
+            Manual "LibGhidraHost extension missing - stage it (ops\provision_tools.ps1) or build: libghidra/ghidra-extension -> gradle installExtension (docs\SQL-GHIDRA.md)."
+        }
     }
-    if (Test-Path (Join-Path $extDir "LibGhidraHost")) {
-        Ok "LibGhidraHost present (optional :19301 serve mode)"
-    } else {
-        Info "LibGhidraHost not installed (optional; headless SQL is the default - docs\SQL-GHIDRA.md)"
+    if (Test-Path (Join-Path $extDir "LibGhidraHost")) { Ok "LibGhidraHost (Ghidra SQL host) present" }
+    else { Warn "LibGhidraHost NOT installed - ghidra_query will fail (SQL-first requires it)" }
+
+    $stagedGrs = @("C:\Tools-staged\sql\ghidrasql.exe", "C:\Tools-staged\ghidrasql.exe") |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not (Test-Path "C:\Tools\ghidrasql\ghidrasql.exe")) {
+        if ($stagedGrs) {
+            Act "install ghidrasql.exe -> C:\Tools\ghidrasql"
+            if (-not $CheckMode) {
+                New-Item -ItemType Directory -Force -Path "C:\Tools\ghidrasql" | Out-Null
+                Copy-Item $stagedGrs "C:\Tools\ghidrasql\ghidrasql.exe" -Force
+            }
+        } else {
+            Manual "ghidrasql.exe missing - stage it (ops\provision_tools.ps1) or build ghidrasql 0.0.6 against libghidra main (docs\SQL-GHIDRA.md)."
+        }
+    }
+    if (Test-Path "C:\Tools\ghidrasql\ghidrasql.exe") {
+        Ok "ghidrasql engine -> C:\Tools\ghidrasql\ghidrasql.exe"
+    } else { Warn "ghidrasql engine NOT installed - ghidra_query will fail (SQL-first requires it)" }
+
+    # Project ownership: Ghidra records the project owner from java user.name;
+    # SSH vs Task Scheduler contexts differ in case (flare-vm vs FLARE-VM) and
+    # a mismatch aborts the headless host with NotOwnerException. Pin it.
+    $lp = Join-Path $ghidra.FullName "support\launch.properties"
+    if ((Test-Path $lp) -and -not (Select-String -Path $lp -Pattern "user\.name=flare-vm" -Quiet)) {
+        Act "pin Ghidra VMARGS=-Duser.name=flare-vm (project ownership)"
+        if (-not $CheckMode) {
+            Add-Content -Path $lp -Value "VMARGS=-Duser.name=flare-vm" -Encoding ASCII
+        }
     }
 } else { Manual "Install Ghidra 11/12.x to C:\Tools\ghidra_<version> (docs\PREREQUISITES.md)." }
 
@@ -248,7 +289,7 @@ if ($idaResolved) {
             else { Manual "copy failed - place idasql.exe next to idat.exe manually" }
         }
     } else {
-        Manual "idasql.exe missing (licensed; allthingsida/idasql): place it next to idat.exe in $idaResolved, or drop it at C:\Tools-staged\idasql.exe - setup installs it."
+        Manual "idasql.exe missing (IDA SQL; FREE release github.com/allthingsida/idasql): run ops\provision_tools.ps1 on the host (auto-downloads + stages), or place a copy at C:\Tools-staged\idasql.exe - setup installs it next to idat.exe."
     }
     # license-flavor resolution (same order IDA itself uses: profile first).
     # A stale FREE license in AppData SHADOWS a real PRO license in the

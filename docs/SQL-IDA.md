@@ -1,69 +1,48 @@
-# SQL-IDA — Windows (FlareVM)
+# SQL-IDA — Windows (FlareVM) — REAL ENGINE
 
-> **Status:** EXISTS (Flare) + HTTP WRAPPER (Phase 3, 2026-08-31) — `winre/idasql_server.py` on port 19300.  
-> **Sources:** `Tools/flarevm-deploy/flarevm_ida_query.py`, `flarevm_toolset.py`, `SURVEY.md:26`.
+> **Status: REAL (2026-09-15).** SQL-first IDA access, mirroring RevAI: the
+> free `idasql` engine runs against the `.i64` and is driven by
+> `tools/ida_sql_client.py`. No stub, no license gate — `idasql` is a public
+> release (`github.com/allthingsida/idasql`), version-matched to the IDA build.
 
-## 1. Current state
+```
+tools/ida_sql_client.py  (IdaSqlClient)
+  -> POST http://127.0.0.1:19300/query        (SQL as text/plain; persistent reads)
+  -> idasql -s <file>.i64 -w -q "<SQL>"       (persisting writes)
+      -> idat -A -c -o<file>.i64              (creates the .i64 on first use)
+```
 
-| File (vendored in `tools/`) | Function |
-|-----------------------------|----------|
-| `flarevm_ida_query.py` | `idasql.exe v0.0.17` one-shot SQL → JSON/HTTP, verified `607 funcs, 30 imports` (`SURVEY.md:34`) |
-| `flarevm_bn_query.py` | BN Python API wrapper (pending `V1.8[ ]` license) |
-| `flarevm_toolset.py` | Unified CLI `health | ida | bn` (`SURVEY.md:92`) |
+Port: HTTP `:19300` bound to `127.0.0.1`.
 
-Install paths `SURVEY.md:31`: `C:\Program Files\IDA Professional 9.3\idat.exe`, `idasql.exe`, `C:\Python313\python.exe`.
+## Install (free release, auto-provisioned)
 
-## 2. CLI (already working — no rebuild)
+| Component | Location | How |
+|---|---|---|
+| idasql CLI | `<IDA>\idasql.exe` next to `idat.exe` | staged by `ops/provision_tools.ps1` (downloads `idasql-v0.0.18.1-ida93.zip` from GitHub releases) → installed by `install/setup-flarevm.ps1` |
+| IDA plugin (optional, GUI) | `<IDA>\plugins\{idasql.dll,ida-plugin.json}` | same archive (`windows-x86_64/plugin/`) |
+
+Version matrix: pick the archive matching the installed IDA (9.2/9.3/9.4);
+IDA 9.3 is the WinRE default. `idasql v0.0.18.1` verified on this VM.
+
+## Verification (no stubs)
 
 ```powershell
-python C:\WinRE\tools\flarevm_toolset.py health
-# expect: ido_ida: ok, bninja: pending
-
-python C:\WinRE\tools\flarevm_ida_query.py "SELECT count(*) AS funcs FROM funcs" --file C:\samples\blobrunner.exe --json
-# {"rows": [{"funcs": 607}]}
-
-python C:\WinRE\tools\flarevm_toolset.py ida "SELECT name, module FROM imports LIMIT 5" --file C:\samples\foo.i64 --json
-python C:\WinRE\tools\flarevm_toolset.py ida "SELECT count(*) FROM funcs" --file C:\samples\foo.i64 --http --port 19300
+C:\Python313\python.exe C:\WinRE\tools\ida_sql_client.py health
+C:\Python313\python.exe C:\WinRE\tools\ida_sql_client.py query `
+  "SELECT address FROM funcs WHERE size > 150 ORDER BY size DESC LIMIT 3" `
+  --file C:\samples\calc.exe
 ```
 
-Supported SQL (`SURVEY.md:110`): full `SELECT * FROM funcs|imports|strings|segments|xrefs` + `UPDATE funcs SET name` + `INSERT INTO bookmarks/comments` with `-w` persist.
+`install\verify-flarevm.ps1` runs the same live query and warns on failure.
 
-## 3. HTTP wrapper spec (NEW — to build)
+Client API: `ida_query(sample, sql, max_rows=200)` — read-only policy enforced
+(`validate_readonly_sql`); `ida_write(sample, sql)` for persisting updates via
+`-w`; `.i64` auto-created with `idat -A -c`. Audit trail:
+`C:\WinRE\logs\ida-sql-audit.jsonl`.
 
-Mirror the Linux `idasql` HTTP pattern so the deep-dive agent's ToolRegistry can call it remotely:
-
-```python
-# C:\WinRE\winre\idasql_server.py — tiny FastAPI / Flask wrapper
-# POST /query {"file": "C:\\samples\\foo.i64", "sql": "SELECT ...", "persist": false}
-# → {"ok": true, "rows": [...]}
-
-from flask import Flask, request, jsonify
-import subprocess, json, tempfile
-
-IDASQL = r"C:\Program Files\IDA Professional 9.3\idasql.exe"
-
-@app.post("/query")
-def query():
-    body = request.json
-    sql = body["sql"]
-    f = body["file"]
-    # one-shot: idasql.exe --json --file <i64> "SELECT ..."
-    proc = subprocess.run([IDASQL, "--json", "--file", f, sql], capture_output=True, text=True, timeout=60)
-    return jsonify(json.loads(proc.stdout))
-```
-
-Run as service: `python C:\WinRE\winre\idasql_server.py --port 19300` (lab-net only). RevEng already has Linux `ida_sql_client.py` HTTP client — Windows side just needs the server.
-
-BN wrapper reuse: `flarevm_bn_query.py` translates `SELECT ... FROM funcs WHERE size > N` to BN API (`SURVEY.md:118`). Keep CLI identical; HTTP endpoint `POST /bn/query` optional (guard `if bn_available()`).
-
-## 4. Verification
-
-```powershell
-python C:\WinRE\tools\flarevm_toolset.py ida "SELECT name FROM funcs WHERE size > 100 LIMIT 3" --file C:\samples\foo.i64 --json
-curl -X POST http://127.0.0.1:19300/query -H "Content-Type: application/json" -d "{\"file\":\"C:\\samples\\foo.i64\",\"sql\":\"SELECT count(*) FROM imports\"}"
-# expect: {"ok": true, "rows": [{"count(*)": 30}]}
-```
-
-## References
-
-- `Tools/flarevm-deploy/SURVEY.md:26`, `Tools/flarevm-deploy/README.md`, `CHECKLIST.md:V1.6` IDA verified.
+Notes:
+- `tools/flarevm_ida_query.py` remains as the one-shot CLI (also real SQL via
+  `idasql -s … -q …`) used by older helpers; new code should prefer the client
+  (persistent server, ~ms per query after first load).
+- Writes invalidate a running HTTP server (it caches the database): the client
+  closes the server after `ida_write`.

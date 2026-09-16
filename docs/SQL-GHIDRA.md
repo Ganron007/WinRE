@@ -1,142 +1,86 @@
-﻿# SQL-Ghidra — Windows (FlareVM)
+﻿# SQL-Ghidra — Windows (FlareVM) — REAL ENGINE
 
-> **Status:** EXISTS — `tools/flare_ghidra_sql.py` (Phase 1, 2026-08-31). Two paths: `headless` (analyzeHeadless + `GhidraSql.java` post-script) and `libhost` (LibGhidraHost HTTP).  
-> **Goal:** the Windows SQL surface for Ghidra — analyzeHeadless + a Java
-> post-script, with the LibGhidraHost RPC extension as the server-mode option.
-
-## 1. What exists to copy
-
-| Provenance | What it provides |
-|------------|------------------|
-| `ghidra_sql_client.py` (Remnux lineage) | wrapper pattern: `ensure_ghidra`, `run_ghidra_query(sql, timeout)`, `health` |
-| `quick_scan` GHIDRA_EVIDENCE (Remnux lineage) | 5 canonical queries (see §3) |
-| CADRE PE Loader (Apache 2.0) | installed under Ghidra `Ghidra\Extensions\CADRE` (Windows) and `Ghidra/Extensions/CADRE` (Linux) |
-
-LibGhidraHost extension: fetched upstream; the wrapper auto-detects the
-extension jar under `Ghidra\Extensions\LibGhidraHost`.
-
-## 2. Windows layout
+> **Status: REAL (2026-09-15).** SQL-first Ghidra access, mirroring RevAI's
+> architecture. There is **no fallback stub** — without the engine, queries
+> fail loudly.
 
 ```
-C:\tools\ghidra_12.2_PUBLIC\          # or C:\ghidra — detect via GHIDRA_HOME / registry
-  support\analyzeHeadless.bat
-  Ghidra\Features\Base\ghidra_scripts\
-  Ghidra\Extensions\
-    LibGhidraHost\                    # copy from RevEng build or rebuild with Gradle
-    CADRE\                            # CADRE PE Loader
-C:\WinRE\tools\flare_ghidra_sql.py   # new — this spec
-C:\WinRE\cache\ghidra\               # per-sample project dir (gitignored)
+tools/flare_ghidra_sql.py  (canonical queries)
+  -> tools/ghidra_sql_client.py  (GhidraSqlClient: lazy start, read-only gate)
+      -> POST http://127.0.0.1:18080/query          (SQL as text/plain)
+          -> ghidrasql --http  (SQLite-backed SQL engine, ghidrasql 0.0.6)
+              -> LibGhidraHost extension  (RPC host inside Ghidra headless)
+                  -> Ghidra project per sample (analyzeHeadless import+analysis)
 ```
 
-Install:
+Ports: HTTP `:18080`, LibGhidraHost RPC `:18090` (both `127.0.0.1`).
+One Ghidra project per sample, cached under `C:\WinRE\cache\ghidra\<sha16>\`.
+
+## Installed artifacts
+
+| Component | Location | Notes |
+|---|---|---|
+| LibGhidraHost extension | `<Ghidra>\Ghidra\Extensions\LibGhidraHost` | built from `0xeb/libghidra` (`gradle installExtension`) |
+| ghidrasql engine | `C:\Tools\ghidrasql\ghidrasql.exe` | built v0.0.6 from `0xeb/ghidrasql` + `0xeb/libxsql` |
+| JDK pin | `<Ghidra>\support\launch.properties` | `JAVA_HOME_OVERRIDE=<temurin21>` (Ghidra 12 hangs on JDK 25) |
+| Ownership pin | `<Ghidra>\support\launch.properties` | `VMARGS=-Duser.name=flare-vm` (project ownership; SSH vs Task Scheduler case mismatch aborts with `NotOwnerException`) |
+
+Staged offline copies live in `internal\reapply\sql\` (`LibGhidraHost.zip`,
+`ghidrasql.exe`) and are installed by `install\setup-flarevm.ps1`
+(also staged to `C:\Tools-staged\sql\` by `ops\reapply_after_revert.ps1` /
+`ops\provision_tools.ps1`).
+
+## Build from source (air-gapped recipe, verified 2026-09-15)
+
+1. Fetch: `libghidra` (main), `ghidrasql` (main, VERSION 0.0.6), `libxsql`
+   (main), `cpp-httplib` v0.16.3, `protobuf` v29.3 + its vendored
+   `third_party/abseil-cpp` `4a2c6336` (protobuf 29.3 is built as a
+   subproject, gencode 5.29.3).
+2. Normalize source mtimes to a fixed date (avoids CMake `generate.stamp`
+   re-run loops on Windows), apply libghidra's
+   `cpp/cmake/PatchProtobufCMake.cmake` manually (FetchContent override
+   skips `PATCH_COMMAND`).
+3. Extension: patch the staged `ghidra-extension/build.gradle`
+   (`mavenCentral()` → a file:// maven repo holding `protobuf-java-4.29.3`
+   with a minimal standalone POM), then
+   `gradle --offline installExtension -PGHIDRA_INSTALL_DIR=<ghidra>`.
+4. SDK: `cmake -G "Visual Studio 17 2022" -A x64` on `libghidra/cpp` with
+   `-DFETCHCONTENT_SOURCE_DIR_CPP_HTTPLIB=<httplib>` and
+   `-DFETCHCONTENT_SOURCE_DIR_PROTOBUF=<protobuf>`;
+   `--build --config Release --target install` → `C:\Tools\libghidra-sdk`.
+5. ghidrasql: patch its `CMakeLists.txt` httplib block to
+   `add_subdirectory(<cpp-httplib>)` (or pre-create the target) and the
+   `cpp_httplib` declare to `SOURCE_DIR <cpp-httplib>`. A stale-RevEng
+   snapshot fails to compile (expects `HeadlessOptions`); ghidrasql **main**
+   is required. Configure with `-DGHIDRASQL_LIBXSQL_DIR=<libxsql main>`
+   `-DGHIDRASQL_LIBGHIDRA_DIR=<libghidra/cpp>` `-DGHIDRASQL_WITH_MCP=OFF`
+   (fastmcpp fetch is not needed for HTTP SQL). Build → `bin\Release\ghidrasql.exe`.
+6. Run long builds detached with **Task Scheduler** — Win32-OpenSSH kills the
+   session's process tree on disconnect.
+
+## Verification (no stubs)
 
 ```powershell
-# 1. Verify Ghidra (setup detects C:\Tools\ghidra_*)
-dir C:\Tools\ghidra*\support\analyzeHeadless.bat
-# 2. Headless SQL: NOTHING to install - GhidraSql.java ships in this repo
-#    (C:\WinRE\tools\ghidra_scripts\GhidraSql.java); sync + setup is enough.
-# 3. CADRE PE loader (required by verify; platform-provided - not public):
-#    stage the BUILT extension and setup installs it:
-#      copy RevAI\extensions\cadre-pe-loader -> C:\Tools-staged\cadre-pe-loader
-#      (or build RevEng\Tools\cadre-ghidra-loader via build.sh)
-#    -> <ghidra>\Ghidra\Extensions\CADRE
-# 4. LibGhidraHost (OPTIONAL - serve mode :19301 only): copy the built
-#    extension from RevEng or rebuild with Gradle ->
-#    <ghidra>\Ghidra\Extensions\LibGhidraHost (wrapper auto-detects
-#    ...\lib\GhidraSql.jar). Headless is the default path.
+C:\Python313\python.exe C:\WinRE\tools\ghidra_sql_client.py health
+C:\Python313\python.exe C:\WinRE\tools\flare_ghidra_sql.py query `
+  "SELECT name, size FROM funcs WHERE size > 150 ORDER BY size DESC LIMIT 5" `
+  --file C:\samples\calc.exe
 ```
 
-## 3. Canonical queries (must match Remnux)
+`install\verify-flarevm.ps1` runs the same WHERE/ORDER semantics gate and
+FAILs if the engine is missing or ordering/filtering is wrong.
 
-Canonical query set (with the `address` → `addr` compatibility fix):
+Failure signatures and fixes:
 
-```sql
--- 1. funcs
-SELECT name, addr AS address, size FROM funcs ORDER BY size DESC LIMIT 20;
+| Symptom | Cause | Fix |
+|---|---|---|
+| `NotOwnerException: Project is owned by <user>` | `java user.name` differs between project creation and host start (case) | pin `VMARGS=-Duser.name=flare-vm`; delete `*.lock*` in the project dir |
+| launcher sits 420s then timeout | JDK 25 or batch `pause` on error | pin `JAVA_HOME_OVERRIDE` to JDK 21; helper closes stdin (`DEVNULL`) |
+| `generate.stamp is out-of-date` loop | source mtimes newer than build stamps | normalize source mtimes, wipe build dir |
+| httplib fetched during configure | `FETCHCONTENT_SOURCE_DIR_*` cleared by declare | `add_subdirectory` the local tree / `SOURCE_DIR` in the declare |
 
--- 2. imports
-SELECT name, module FROM imports ORDER BY module;
-
--- 3. strings (high-signal)
-SELECT content, addr AS address FROM strings WHERE content LIKE '%http%' OR content LIKE '%cmd%' LIMIT 50;
-
--- 4. data_items (entry, sections entropy via LIEF elsewhere)
-SELECT addr AS address, size, type FROM data_items LIMIT 20;
-
--- 5. segments
-SELECT name, start, end, perm FROM segments;
-```
-
-Add on Windows (same client):
-
-```sql
-SELECT count(*) FROM xrefs WHERE to_addr = 0x401000;
-SELECT * FROM funcs WHERE size > 100;
-```
-
-## 4. `flare_ghidra_sql.py` spec (new file to build)
-
-```python
-# C:\WinRE\tools\flare_ghidra_sql.py
-# Usage mirrors Linux client:
-#   python flare_ghidra_sql.py health
-#   python flare_ghidra_sql.py "SELECT count(*) FROM funcs" --file C:\samples\foo.exe --json
-#   python flare_ghidra_sql.py --serve --port 19301   # HTTP for MCP
-
-import subprocess, json, tempfile, pathlib
-
-GHIDRA_HOME = os.environ.get("GHIDRA_HOME", r"C:\tools\ghidra_12.2_PUBLIC")
-HEADLESS = pathlib.Path(GHIDRA_HOME) / "support" / "analyzeHeadless.bat"
-
-def run_ghidra_query(sql: str, sample: Path, timeout=120) -> dict:
-    with tempfile.TemporaryDirectory() as proj:
-        cmd = [
-            str(HEADLESS), proj, "WinRE",
-            "-import", str(sample),
-            "-loader", "CADRE PE Loader",   # fallback to "PE Loader" if CADRE missing
-            "-scriptPath", str(Path(__file__).parent / "ghidra_scripts"),
-            "-postScript", "GhidraSql.java", sql,
-            "-noanalysis", "-deleteProject"
-        ]
-        # alternative: LibGhidraHost headless via java -jar ghidra-sql.jar --program ...
-        proc = subprocess.run(cmd, capture_output=True, timeout=timeout, text=True)
-        return json.loads(proc.stdout)  # {ok, rows, error}
-
-# CLI: health | query | --serve (Flask/FastAPI tiny HTTP like Linux ghidrasql)
-```
-
-Notes:
-
-- Windows `analyzeHeadless.bat` args differ from Linux `analyzeHeadless` shell — use `proj` + `WinRE` naming.
-- Prefer `LibGhidraHost` Java server if built: `java -cp GhidraSql.jar com.cadre.LibGhidraHost --port 19301` then `POST /query {sql}` — same as Linux `ghidrasql` HTTP.
-- Keep `CADRE PE Loader` fallback (packed samples need import recovery `V9.12`).
-
-## 5. Windows quirks to document while building
-
-- `addr` vs `address` — the Linux CLI uses the `addr` column (aliased `AS address` for parity).
-- Timeout `120s` for `cff_detect` parity (`V2.37` fix: `cfg_edges` per-func).
-- Project `deleteProject` after each query to avoid `C:\WinRE\cache\ghidra` bloat.
-- Long paths: `C:\samples\` not `C:\Users\FLARE-VM\Downloads\` (spaces).
-
-## 6. Verification on Flare
-
-```powershell
-python C:\WinRE\tools\flare_ghidra_sql.py health
-# expect: {"ok": true, "ghidra_home": "C:\\tools\\ghidra_12.2_PUBLIC", "lib_host": "ok", "cadre_loader": "ok"}
-
-python C:\WinRE\tools\flare_ghidra_sql.py "SELECT count(*) as funcs FROM funcs" --file C:\samples\foo.exe --json
-# expect: {"ok": true, "rows": [{"funcs": 607}]}
-
-# parity
-# parity runner lives in the internal tree (ops, not shipped)
-# expect: OK=4 FAIL=0
-```
-
-## 7. What this doc is NOT
-
-- Not the Linux (Remnux-side) Ghidra SQL client — that remains separate.
-- Not replacing `speakeasy` emulation — Ghidra SQL is static, not dynamic.
-
-## References
-
-- Remnux-lineage `ghidra_sql_client.py` + LibGhidraHost upstream project.
+Client API: `ghidra_query(sample, sql, max_rows=200)` returns
+`{columns, rows:[dict], row_count, total_row_count, truncated, source,
+session_id, audit_path}`; read-only SQL policy (single SELECT / WITH…SELECT)
+is enforced in `ghidra_sql_client.validate_readonly_sql`. Audit trail:
+`C:\WinRE\logs\ghidra-sql-audit.jsonl`.

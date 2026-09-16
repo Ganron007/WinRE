@@ -70,3 +70,13 @@ Optional: `pyghidra` + `GHIDRA_INSTALL_DIR` → faster `ghidra_decompile`
   `WINRE_IDA_DIR`/`IDASQL` and re-run `verify-flarevm.ps1`. The pipeline
   probes Pro 9.3 → Free 9.3 → 8.3 → `C:\Tools\IDA*` in that order before
   skipping.
+
+## Ghidra SQL (real engine)
+
+| Component | Expected default | Env override | Used by |
+|---|---|---|---|
+| `ghidrasql.exe` (SQLite SQL engine + HTTP) | `C:\Tools\ghidrasql\ghidrasql.exe` | `GHIDRASQL_BIN`, `GHIDRASQL_PORT` (default 18080) | `tools/ghidra_sql_client.py`, `tools/flare_ghidra_sql.py` |
+| LibGhidraHost extension (RPC host) | `<Ghidra>\Ghidra\Extensions\LibGhidraHost` | `GHIDRA_HOME` | same; pinned `JAVA_HOME_OVERRIDE` (temurin21) + `VMARGS=-Duser.name=flare-vm` |
+| `idasql.exe` (IDA SQL engine, FREE) | `<IDA>\idasql.exe` | `IDASQL` / `WINRE_IDASQL`, `IDASQL_PORT` (default 19300) | `tools/ida_sql_client.py`, `tools/flarevm_ida_query.py` |
+| Ghidra project cache | `C:\WinRE\cache\ghidra\<sha16>\` | `WINRE_GHIDRA_CACHE` | per-sample analyzeHeadless import + ghidrasql server |
+| SQL audit trail | `C:\WinRE\logs\{ghidra,ida}-sql-audit.jsonl` | `WINRE_GHIDRA_SQL_AUDIT`, `WINRE_IDA_SQL_AUDIT` | every SQL executed (full result) |

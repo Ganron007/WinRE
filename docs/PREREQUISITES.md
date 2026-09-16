@@ -64,13 +64,24 @@ Start from a **Windows 10/11 VM on an isolated/host-only network**.
    `ops/provision_tools.ps1` (downloads Ghidra/x64dbg/zig/pe-sieve on the
    internet-connected host, scps to `C:\Tools-staged\` on the VM).
 
+### Ghidra SQL (LibGhidraHost + ghidrasql) - SQL-first
+
+Ghidra querying in WinRE is REAL SQL (no stub): the LibGhidraHost extension
+(RPC host) + `ghidrasql.exe` (SQLite engine, HTTP :18080). Artifacts are staged
+offline in `internal\reapply\sql\` (`LibGhidraHost.zip`, `ghidrasql.exe`)
+and installed by `install\setup-flarevm.ps1`; `verify-flarevm.ps1` runs a live
+WHERE/ORDER BY gate. IDA side: `idasql.exe` is a FREE release
+(github.com/allthingsida/idasql) auto-staged by `ops\provision_tools.ps1`.
+Build/repair details: `docs\SQL-GHIDRA.md` + `docs\SQL-IDA.md`.
+
 ### Ghidra JDK (required for headless analysis)
 
 Ghidra 12 needs a supported JDK (21). FlareVM 2026 ships OpenJDK 25, which
 makes Ghidra's launcher fail and then hang at its batch \pause\ (every
 \ghidra_query\ burns the full timeout). \install/setup-flarevm.ps1\ detects
 this and pins a supported JDK via \support\\launch.properties(\JAVA_HOME_OVERRIDE=...\), installing \	emurin21\ when chocolatey is
-available; \erify-flarevm.ps1\ reports the pin. Manual fix:
+available; \
+erify-flarevm.ps1\ reports the pin. Manual fix:
 
 \\powershell
 choco install temurin21 -y
