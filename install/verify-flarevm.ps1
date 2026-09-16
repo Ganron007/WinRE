@@ -263,6 +263,26 @@ if (-not $upxHit) {
 }
 if ($upxHit) { Ok "UPX -> $upxHit" } else { Fail "UPX missing (FlareVM base / provision_tools.ps1)" }
 Test-Tool "radare2" @("C:\Tools\radare2\radare2.exe") @("radare2.exe", "r2.exe") "optional - absent in FlareVM 2026; r2_decompile degrades" -Optional
+# r2 smoke: an installed-but-broken r2 must fail HERE, not mid-pipeline
+$r2Hit = Resolve-Tool @("C:\Tools\radare2\radare2.exe") @("radare2.exe", "r2.exe")
+if ($r2Hit) {
+    $r2v = (& $r2Hit -v 2>&1 | Select-Object -First 1)
+    if ($r2v -match "radare2") { Ok "radare2 smoke: $($r2v.Trim())" }
+    else { Fail "radare2 present but not runnable: $r2Hit" }
+}
+# sink_sites smoke (r2-assisted deep tool): catches r2-integration regressions
+$probeSql = @("C:\samples\calc.exe", "C:\samples\notepad.exe") |
+    Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $probeSql -and (Test-Path "C:\samples\_sqlprobe.exe")) { $probeSql = "C:\samples\_sqlprobe.exe" }
+if ($r2Hit -and $probeSql -and (Test-Path "C:\WinRE\tools\kb_gap_tools.py")) {
+    $sinkOut = (& C:\Python313\python.exe "C:\WinRE\tools\kb_gap_tools.py" sink_sites $probeSql --json 2>&1 | Out-String)
+    try { $sj = $sinkOut | ConvertFrom-Json } catch { $sj = $null }
+    if ($sj -and $sj.ok) { Ok "sink_sites smoke OK (functions_scanned=$($sj.functions_scanned))" }
+    else {
+        $m = if ($sj) { $sj.error } else { "$sinkOut" }
+        Fail "sink_sites smoke failed: $($m -replace '\s+',' ')".Substring(0, [Math]::Min(220, "sink_sites smoke failed: $($m -replace '\s+',' ')".Length))
+    }
+}
 Test-Tool "goresym" @("C:\Tools\goresym\goresym.exe", "C:\Tools\GoReSym\GoReSym.exe") @("GoReSym.exe", "goresym.exe") "hasherezade releases (Go only)"
 Test-Tool "strings64" @("C:\Tools\sysinternals\strings64.exe") @("strings64.exe") "run install\flarevm\flarevm-postfix.ps1 (FlareVM base)"
 $ilspyHit = Resolve-Tool @("$env:USERPROFILE\.dotnet\tools\ilspycmd.exe", "C:\Tools\ilspycmd\ilspycmd.exe") @("ilspycmd.exe")
