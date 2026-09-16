@@ -247,6 +247,8 @@ class IdaSqlClient:
                 return entry["base_url"]
             self.close(sid)
 
+        subprocess.run(["taskkill", "/F", "/IM", "idasql.exe"],
+                       stdin=subprocess.DEVNULL, capture_output=True)
         port = self.port
         while _port_in_use(port, self.host):
             port += 1

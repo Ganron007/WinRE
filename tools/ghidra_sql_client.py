@@ -130,9 +130,19 @@ def ensure_project(sample: Path, timeout: int = PROJECT_TIMEOUT) -> dict:
         return {"ok": False, "error": "Ghidra install not found (GHIDRA_HOME)"}
     proj_dir, proj_name, prog_name, sha = _project_paths(sample)
     gpr = proj_dir / f"{proj_name}.gpr"
+    ok_marker = proj_dir / ".winre_program_ok"
+    if gpr.exists() and not ok_marker.exists():
+        # A hard-killed headless host can leave a project with data but no
+        # program (observed: OpenProgram failed -> program not found). The
+        # marker is written only after a query actually succeeded; without it
+        # the project is treated as corrupt and rebuilt.
+        _kill_all_servers()
+        import shutil
+        shutil.rmtree(proj_dir, ignore_errors=True)
     if gpr.exists():
         return {"ok": True, "created": False, "project_dir": str(proj_dir),
-                "project_name": proj_name, "program": prog_name, "sha256": sha}
+                "project_name": proj_name, "program": prog_name, "sha256": sha,
+                "ok_marker": str(ok_marker)}
     proj_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["JAVA_HOME"] = JAVA_HOME
@@ -219,6 +229,11 @@ class GhidraSqlClient:
         except OSError:
             pass
 
+        try:
+            (Path(proj["project_dir"]) / ".winre_program_ok").write_text(
+                time.strftime("%Y-%m-%dT%H:%M:%S"), encoding="ascii")
+        except OSError:
+            pass
         truncated = len(row_dicts) > max_rows
         out_rows = row_dicts[:max_rows]
         return {"ok": True, "columns": columns, "rows": out_rows,
@@ -254,6 +269,14 @@ class GhidraSqlClient:
                 return entry["base_url"]
             self.close(sid)
 
+        # single-tenant (RevAI behaviour): only one ghidrasql may hold a
+        # project; kill leftovers and clear stale locks before starting.
+        _kill_all_servers()
+        for lp in Path(proj["project_dir"]).glob("*.lock*"):
+            try:
+                lp.unlink()
+            except OSError:
+                pass
         port = self.port
         while _port_in_use(port, self.host):
             port += 1
@@ -271,6 +294,7 @@ class GhidraSqlClient:
                "--program", proj["program"],
                "--http", "--port", str(port), "--bind", self.host,
                "--rpc-port", str(port + 10),
+               "--readonly",
                "--max-runtime", str(SERVER_LIFETIME)]
         proc = subprocess.Popen(
             cmd, stdin=subprocess.DEVNULL, stdout=log_fh,
@@ -295,6 +319,13 @@ class GhidraSqlClient:
         self.close(sid)
         raise RuntimeError(
             f"ghidrasql server did not become healthy within {STARTUP_TIMEOUT}s")
+
+
+def _kill_all_servers() -> None:
+    """Single-tenant cleanup: stop any leftover ghidrasql.exe (hard kill is
+    safe because sessions run read-only)."""
+    subprocess.run(["taskkill", "/F", "/IM", "ghidrasql.exe"],
+                   stdin=subprocess.DEVNULL, capture_output=True)
 
 
 def _port_in_use(port: int, host: str) -> bool:
