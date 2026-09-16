@@ -192,6 +192,14 @@ else {
         scp @scpArgs $_.FullName "${User}@${FlareHost}:C:/Tools-staged/" 2>$null
         Write-Host "  staged: $($_.Name)"
     }
+    # SQL-first artifacts keep their own subdir (setup looks there first)
+    if (Test-Path $sqlStage) {
+        ssh @scpArgs "${User}@${FlareHost}" "cmd /c mkdir C:\Tools-staged\sql" 2>$null | Out-Null
+        Get-ChildItem $sqlStage -File | ForEach-Object {
+            scp @scpArgs $_.FullName "${User}@${FlareHost}:C:/Tools-staged/sql/" 2>$null
+            Write-Host "  staged: sql\$($_.Name)"
+        }
+    }
 }
 
 Write-Host ""
