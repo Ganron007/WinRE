@@ -150,7 +150,12 @@ else {
     Write-Host "  [GET ] radare2 (official Windows build) ..."
     try {
         $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/radareorg/radare2/releases/latest" -UseBasicParsing -TimeoutSec 120
-        $asset = $rel.assets | Where-Object { $_.name -match '(w64|win64).*\.zip$' } | Select-Object -First 1
+        # prefer the classic distribution zip (radare2-<ver>-w64.zip);
+        # r2blob-*.zip is the new single-file bundle (different layout)
+        $asset = $rel.assets | Where-Object { $_.name -match '^radare2-.*-w64\.zip$' } | Select-Object -First 1
+        if (-not $asset) {
+            $asset = $rel.assets | Where-Object { $_.name -match '(w64|win64).*\.zip$' } | Select-Object -First 1
+        }
         if ($asset) {
             Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $r2Zip -UseBasicParsing -TimeoutSec 900
             Write-Host "  [OK] radare2 staged ($($asset.name))" -ForegroundColor Green
