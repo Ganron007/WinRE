@@ -671,6 +671,21 @@ def sink_sites(sample: str, timeout: int = 300) -> dict:
     if not r2.is_file():
         return _skipped("sink_sites", "radare2 not installed")
     try:
+        import pefile
+        _pe = pefile.PE(sample, fast_load=True)
+        _pe.parse_data_directories(
+            directories=[pefile.DIRECTORY_ENTRY[
+                "IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR"]])
+        _managed = bool(_pe.OPTIONAL_HEADER.DATA_DIRECTORY[14].VirtualAddress)
+        _pe.close()
+    except Exception:
+        _managed = False
+    if _managed:
+        return {"ok": True, "tool": "sink_sites", "functions_scanned": 0,
+                "sites": [],
+                "skipped": "managed/.NET assembly (native call-site disasm not applicable)"}
+    deadline = time.time() + min(timeout, 180)
+    try:
         size = Path(sample).stat().st_size
     except OSError:
         size = 0
@@ -704,13 +719,16 @@ def sink_sites(sample: str, timeout: int = 300) -> dict:
     sites: list[dict] = []
     # disassemble each and look for calls to the sink imports
     for f in top:
+        remaining = deadline - time.time()
+        if remaining <= 5:
+            break  # overall budget exhausted (slow non-native disasm)
         addr = f.get("offset")
         if addr is None:
             continue  # r2 entries without an address cannot be disassembled
         name = f.get("name") or f"f_{addr:x}"
         rc2, out2, _ = _run(
             [str(r2), "-2", "-q", "-c", f"pd 200 @ {addr}", sample],
-            min(timeout, 60))
+            int(min(60, remaining)))
         if rc2 != 0:
             continue
         for line in (out2 or "").splitlines():

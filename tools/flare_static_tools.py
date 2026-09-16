@@ -187,7 +187,8 @@ def lief_parse(sample: str, timeout: int = 300) -> dict:
         pe = pefile.PE(sample, fast_load=True)
         pe.parse_data_directories(
             directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"],
-                         pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_SECURITY"]])
+                         pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_SECURITY"],
+                         pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR"]])
         imports = []
         for imp in (getattr(pe, "DIRECTORY_ENTRY_IMPORT", None) or []):
             fns = [(getattr(e, "name", b"") or b"").decode("ascii", "replace")
@@ -199,6 +200,18 @@ def lief_parse(sample: str, timeout: int = 300) -> dict:
                      "entropy": round(s.get_entropy(), 2)} for s in pe.sections]
         has_sig = bool(pe.OPTIONAL_HEADER.DATA_DIRECTORY[
             pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_SECURITY"]].VirtualAddress)
+        is_dotnet = bool(pe.OPTIONAL_HEADER.DATA_DIRECTORY[
+            pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR"]].VirtualAddress)
+        signer = ""
+        if has_sig:
+            try:
+                ps = ("(Get-AuthenticodeSignature -LiteralPath "
+                      f"'{sample}').SignerCertificate.Subject")
+                r = _run(["powershell", "-NoProfile", "-Command", ps], 25)
+                signer = (r[1] or "").strip()
+            except Exception:
+                signer = ""
+
         info = {}
         try:
             for fi in (pe.FileInfo or []):
@@ -211,6 +224,8 @@ def lief_parse(sample: str, timeout: int = 300) -> dict:
             pass
         return {"ok": True, "tool": "pefile",
                 "machine": hex(pe.FILE_HEADER.Machine),
+                "is_dotnet": is_dotnet,
+                "signer": signer,
                 "entrypoint": pe.OPTIONAL_HEADER.AddressOfEntryPoint,
                 "imports": imports,
                 "sections": sections,
@@ -337,6 +352,21 @@ def _is_generic_dll(low: str) -> bool:
     return False
 
 
+def _is_dotnet(sample: str) -> bool:
+    """True for managed assemblies (COM descriptor data directory present)."""
+    try:
+        import pefile
+        pe = pefile.PE(sample, fast_load=True)
+        pe.parse_data_directories(
+            directories=[pefile.DIRECTORY_ENTRY[
+                "IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR"]])
+        val = bool(pe.OPTIONAL_HEADER.DATA_DIRECTORY[14].VirtualAddress)
+        pe.close()
+        return val
+    except Exception:
+        return False
+
+
 def _generic_literal(text: str) -> bool:
     """True when a matched YARA pattern is non-distinctive (common noise).
 
@@ -377,6 +407,14 @@ def _generic_literal(text: str) -> bool:
         return True  # opcode run + stray lowercase ("x ATAUAVH")
     if _YARA_API_SHAPE.match(s) and len(s) < 48:
         return True  # CamelCase WinAPI-shaped identifier
+    if re.match(r"^v\d+\.\d+(\.\d+)?$", low):
+        return True  # .NET framework version string (v4.0.30319)
+    if low.startswith("#") and low[1:] in (
+            "strings", "us", "blob", "~", "guid", "methods", "fields",
+            "custom", "pdb", "ti"):
+        return True  # .NET metadata stream names (#Strings, #US, #Blob...)
+    if re.fullmatch(r"[hmsdmy]{1,4}([:/\-.][hmsdmy]{1,4})+", low):
+        return True  # date/time format literals (hh:mm:ss, yyyy-mm-dd)
     return False
 
 
@@ -1067,6 +1105,9 @@ def speakeasy_emulate(sample: str, timeout: int = 900) -> dict:
     if head != b"MZ":
         return {"ok": False, "skipped": True,
                 "reason": "not_applicable:only PE emulated"}
+    if _is_dotnet(sample):
+        return _skipped("speakeasy",
+                        "managed/.NET assembly (native emulation not applicable)")
     script = (
         "import sys\n"
         "import json\n"
@@ -1152,6 +1193,9 @@ def r2_decompile(sample: str, function_addrs: list | None = None,
     exe = R2_EXE
     if not exe or not exe.is_file():
         return _skipped("r2", "radare2.exe not found (C:\\Tools\\radare2 or PATH)")
+    if _is_dotnet(sample):
+        return _skipped("r2_decompile",
+                        "managed/.NET assembly (native disasm not applicable)")
     out: dict = {"r2_ok": False, "disassembly": {}, "engine": "pdf (disasm)"}
     size = Path(sample).stat().st_size if Path(sample).is_file() else 0
     out["size_bytes"] = size
@@ -1168,7 +1212,8 @@ def r2_decompile(sample: str, function_addrs: list | None = None,
             if len(function_addrs) >= 5:
                 break
         if not function_addrs:
-            return {**out, "error": "could not auto-discover function addresses"}
+            return {**out, "ok": True, "disassembly": {},
+                    "skipped": "no functions discoverable (stripped/unknown format)"}
     for addr in function_addrs[:5]:
         rc, pdf_out, err = _run([str(exe), "-q", "-c", f"pdf @ {addr}", sample],
                                 timeout)

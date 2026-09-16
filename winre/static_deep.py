@@ -42,6 +42,12 @@ EXFIL_CAPA = {
     "steal credentials", "keylogging", "screenshot", "clipboard",
     "exfiltrate", "upload data",
 }
+# UI conveniences (screenshot/clipboard) exist in every GUI utility; an exfil
+# cluster must include at least one STRONG indicator (credentials/keylogging/
+# exfiltrate/upload) to fire. Observed FP: MS-signed procexp.exe.
+EXFIL_STRONG = {
+    "steal credentials", "keylogging", "exfiltrate", "upload data",
+}
 
 
 def _norm(s: str) -> str:
@@ -116,7 +122,8 @@ def _rules_verdict(ev: dict) -> dict:
             return {"verdict": "malicious", "confidence": "medium",
                     "summary": "Ransomware-family capability cluster (capa).",
                     "key_evidence": reasons, "rules_fired": ["capa-ransomware-cluster"]}
-        if len(exfil_hits) >= 2:
+        exfil_strong = {c for c in caps if any(k in c for k in EXFIL_STRONG)}
+        if len(exfil_hits) >= 2 and exfil_strong:
             reasons.append("capa exfil cluster: " + ", ".join(sorted(exfil_hits)[:5]))
             return {"verdict": "malicious", "confidence": "medium",
                     "summary": "Exfiltration capability cluster (capa).",
@@ -129,6 +136,10 @@ def _rules_verdict(ev: dict) -> dict:
                 and (s.get("entropy") or 0) >= 7.0]
     packed = bool(high_ent) or "pack" in json.dumps(
         ev.get("diec") or {}).lower()
+    # managed assemblies: high-entropy metadata sections and API-hash-shaped
+    # 4-byte constants are normal - do not let those generic signals fire
+    is_dotnet = bool(pe.get("is_dotnet")) or bool(
+        _dict_of(ev.get("pe")).get("is_dotnet"))
     xor_ev = _dict_of(ev.get("xor_string_search"))
     xors = xor_ev.get("candidates") or []
     forged = False
@@ -167,12 +178,12 @@ def _rules_verdict(ev: dict) -> dict:
         reasons.append("high-signal imports: " + ", ".join(
             s.get("label", "?") for s in sigs[:5] if isinstance(s, dict)))
     ahr = _dict_of(ev.get("api_hash_resolver"))
-    if ahr.get("signal"):
+    if ahr.get("signal") and not is_dotnet:
         reasons.append(
             f"api-hash resolver present: {ahr.get('unique_functions', 0)} "
             f"APIs resolved at runtime by hash "
             f"(e.g. {', '.join((ahr.get('functions') or [])[:3])})")
-    if packed or high_ent:
+    if (packed or high_ent) and not is_dotnet:
         reasons.append(f"packed/high-entropy ({len(high_ent)} sections >= 7.0)")
     if forged:
         reasons.append("version metadata looks forged")
@@ -192,6 +203,8 @@ def _rules_verdict(ev: dict) -> dict:
             continue
         lvl = int(a.get("level") or 0)
         text = (str(a.get("name") or "") + " " + str(a.get("desc") or "")).lower()
+        if "timedatestamp" in text.replace(" ", ""):
+            continue  # clock skew / reproducible builds: non-notable
         if lvl >= 4 or any(k in text for k in _NOTABLE):
             notable.append(a)
     # Malcat anomalies corroborate other signals but NEVER fire alone: stock
@@ -201,12 +214,30 @@ def _rules_verdict(ev: dict) -> dict:
     if notable and (packed or high_ent or forged or sigs or ahr.get("signal")):
         reasons.append("malcat notable anomalies: " + ", ".join(
             str(a.get("name")) for a in notable[:4]))
+    # Signed known-vendor tool whose ONLY signal is dual-use imports
+    # (CreateRemoteThread / WriteProcessMemory are core to Sysinternals-class
+    # utilities). Honest downgrade with an explicit evidence note.
+    _signer = ""
+    for _k in ("pe_parse", "pe"):
+        _signer = str(_dict_of(ev.get(_k)).get("signer") or "") or _signer
+        if _signer:
+            break
+    _known = any(v in _signer.lower() for v in (
+        "microsoft", "google", "mozilla", "apple", "adobe", "oracle",
+        "vmware", "zimtech"))
+    if reasons and _known and all(r.startswith("high-signal imports:") for r in reasons):
+        return {"verdict": "unknown", "confidence": "low",
+                "summary": ("Signed vendor tool with dual-use imports only "
+                            "(no behavioral indicators)."),
+                "key_evidence": reasons + [f"signer: {_signer[:80]}"],
+                "rules_fired": ["signed-dual-use"]}
+
     if reasons:
         return {"verdict": "suspicious", "confidence": "medium",
                 "summary": "Suspicious static indicators, no decisive match.",
                 "key_evidence": reasons, "rules_fired": ["suspicious-singles"]}
 
-    if packed or high_ent:
+    if (packed or high_ent) and not is_dotnet:
         # packed/encrypted with no decisive hit: static output is UNRELIABLE
         # (KB: packer triage gates static conclusions). Say so explicitly.
         return {"verdict": "unknown", "confidence": "low",
