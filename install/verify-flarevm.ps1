@@ -201,6 +201,12 @@ if (Test-Path (Join-Path $idaDir "idasql.exe")) {
     Ok "idasql.exe present -> $(Join-Path $idaDir 'idasql.exe')"
     $idaProbe = @("C:\samples\calc.exe", "C:\samples\notepad.exe") |
         Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $idaProbe) {
+        # virgin VM: use a benign OS binary as the SQL probe (read-only copy)
+        New-Item -ItemType Directory -Force -Path "C:\samples" | Out-Null
+        Copy-Item "$env:windir\system32\notepad.exe" "C:\samples\_sqlprobe_ida.exe" -Force -EA SilentlyContinue
+        if (Test-Path "C:\samples\_sqlprobe_ida.exe") { $idaProbe = "C:\samples\_sqlprobe_ida.exe" }
+    }
     if ($idaProbe -and (Test-Path "C:\WinRE\tools\ida_sql_client.py")) {
         $out = & C:\Python313\python.exe "C:\WinRE\tools\ida_sql_client.py" query `
             "SELECT name, size FROM funcs WHERE size > 150 ORDER BY size DESC LIMIT 3" `

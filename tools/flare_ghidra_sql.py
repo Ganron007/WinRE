@@ -34,12 +34,12 @@ from ghidra_sql_client import (  # noqa: E402
 )
 
 CANONICAL_QUERIES = {
-    "funcs": "SELECT name, address, size FROM funcs ORDER BY size DESC LIMIT 20",
+    "funcs": "SELECT name, addr AS address, size FROM funcs ORDER BY size DESC LIMIT 20",
     "imports": "SELECT name, module FROM imports ORDER BY module",
-    "strings": ("SELECT content, address FROM strings "
+    "strings": ("SELECT content, addr AS address FROM strings "
                 "WHERE content LIKE '%http%' OR content LIKE '%cmd%' LIMIT 50"),
-    "data_items": "SELECT address, size, type FROM data_items LIMIT 20",
-    "segments": "SELECT name, start_address, end_address, permissions FROM segments",
+    "data_items": "SELECT addr AS address, size, data_type AS type FROM data_items LIMIT 20",
+    "segments": "SELECT name, start_addr, end_addr, perm FROM segments",
 }
 
 

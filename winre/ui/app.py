@@ -871,10 +871,10 @@ def create_app() -> "Flask":
     # Default args for single-tool fire (tools needing inputs get a sane
     # default; the UI lets the analyst override with raw JSON).
     _TOOL_DEFAULT_ARGS = {
-        "ghidra_query": {"sql": "SELECT name, address, size FROM funcs "
+        "ghidra_query": {"sql": "SELECT name, addr AS address, size FROM funcs "
                                 "ORDER BY size DESC LIMIT 20",
                          "max_rows": 20},
-        "ida_query": {"sql": "SELECT name, address, size FROM funcs LIMIT 20"},
+        "ida_query": {"sql": "SELECT name, addr AS address, size FROM funcs LIMIT 20"},
         "malcat_functions": {"count": 10},
     }
 

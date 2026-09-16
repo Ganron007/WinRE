@@ -394,11 +394,11 @@ def run_static_deep_dive(sample_name: str, sha: str, *,
     _run("script_decode")
     _run("sink_sites")
     # 3. SQL surfaces
-    _run("ghidra_query", sql="SELECT name, address, size FROM funcs ORDER BY size DESC LIMIT 20",
+    _run("ghidra_query", sql="SELECT name, addr AS address, size FROM funcs ORDER BY size DESC LIMIT 20",
          max_rows=20)
-    _run("ghidra_query", sql="SELECT content, address FROM strings LIMIT 25",
+    _run("ghidra_query", sql="SELECT content, addr AS address FROM strings LIMIT 25",
          max_rows=25)
-    _run("ida_query", sql="SELECT name, address, size FROM funcs LIMIT 20")
+    _run("ida_query", sql="SELECT name, addr AS address, size FROM funcs LIMIT 20")
     # 4. strings (plain, decoded, encoded)
     _run("strings_tool")
     _run("floss")
