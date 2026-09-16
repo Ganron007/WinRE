@@ -15,10 +15,15 @@
       - Zig toolchain zip           -> C:\Tools-staged\zig.zip (MCP plugin build)
       - pe-sieve + hollows_hunter   -> C:\Tools-staged\ (if choco missing on VM)
 
+    VM-first: anything the FlareVM baseline already ships (x64dbg, DIE,
+    GoReSym, scdbg, yara-x, hollows_hunter, Ghidra via choco, ...) is
+    detected and skipped - we only stage the genuine gaps (zig, radare2,
+    idasql, SQL-first artifacts, Python wheels).
+
     Downloads go to <repo>\dist\provision\ on the host first (gitignored),
-    so re-runs skip completed downloads. URLs are pinned to release pages
-    of each project; if a URL 404s the script tells you which one to fetch
-    manually - nothing is fatal.
+    so re-runs skip completed downloads. GitHub asset URLs are resolved via
+    the API (release asset names drift); a final 'DOWNLOAD FAILURES' line
+    names anything that still needs a manual fetch.
 
     Usage (host):
       powershell -ExecutionPolicy Bypass -File ops\provision_tools.ps1 [-Skip existing]
@@ -60,19 +65,90 @@ function Get-File([string]$url, [string]$out) {
     }
 }
 
+# VM-first inventory: anything the FlareVM baseline already ships is skipped
+# (public users start from FlareVM; we only stage the genuine gaps).
+function Get-VmHas([string[]]$paths) {
+    $json = ConvertTo-Json @($paths) -Compress
+    $body = "`$paths = ConvertFrom-Json '$json'; for (`$i = 0; `$i -lt `$paths.Count; `$i++) { if (Test-Path -LiteralPath `$paths[`$i]) { 'EX' + `$i } }"
+    $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($body))
+    $sshArgs = @("-i", $SshKey, "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes")
+    $out = ssh @sshArgs "${User}@${FlareHost}" "powershell -NoProfile -EncodedCommand $enc" 2>$null
+    $has = @{}
+    for ($i = 0; $i -lt $paths.Count; $i++) { $has[$paths[$i]] = $false }
+    foreach ($line in ($out -split "`n")) {
+        if ($line -match '^EX(\d+)\s*$') {
+            $idx = [int]$Matches[1]
+            if ($idx -lt $paths.Count) { $has[$paths[$idx]] = $true }
+        }
+    }
+    $found = @($paths | Where-Object { $has[$_] }).Count
+    Write-Host "  [VM ] baseline inventory: $found/$($paths.Count) tool paths present" -ForegroundColor DarkGray
+    return $has
+}
+
+$vmHas = Get-VmHas @(
+    "C:\Tools\x64dbg\release\x64\x64dbg.exe",
+    "C:\Tools\die\diec.exe",
+    "C:\Tools\GoReSym\GoReSym.exe",
+    "C:\Tools\scdbg\scdbg.exe",
+    "C:\Tools\yara-x\yr.exe",
+    "C:\Tools\hollows_hunter\hollows_hunter.exe",
+    "C:\Tools\malcat\bin",
+    "C:\Tools\radare2\radare2.exe",
+    "C:\Tools\zig\zig.exe",
+    "C:\Program Files\IDA Professional 9.3\idat.exe",
+    "C:\ProgramData\chocolatey\lib\ghidra\tools"
+)
+
 Write-Host "=== Provision required free tools (host -> VM staging) ===" -ForegroundColor Cyan
 
-# Ghidra: latest release zip from ghidra-sre GitHub
+# Ghidra: FlareVM ships it via chocolatey; only stage when the VM lacks it.
 $ghidraVer = "11.3.2"
-$ghidraOk = Get-File "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${ghidraVer}_build/ghidra_${ghidraVer}_PUBLIC_20250415.zip" `
-    (Join-Path $stage "ghidra_${ghidraVer}_PUBLIC.zip")
+if ($vmHas["C:\ProgramData\chocolatey\lib\ghidra\tools"]) {
+    Write-Host "  [SKIP] Ghidra (FlareVM choco install present on VM)" -ForegroundColor DarkGray
+    $ghidraOk = $true
+} else {
+    $ghidraOk = Get-File "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${ghidraVer}_build/ghidra_${ghidraVer}_PUBLIC_20250415.zip" `
+        (Join-Path $stage "ghidra_${ghidraVer}_PUBLIC.zip")
+}
 
-# x64dbg: latest snapshot zip (asset name varies; try both)
-$x64Ok = Get-File "https://github.com/x64dbg/x64dbg/releases/download/snapshot/x64dbg.zip" `
-    (Join-Path $stage "x64dbg.zip")
-if (-not $x64Ok) {
-    $x64Ok = Get-File "https://github.com/x64dbg/x64dbg/releases/latest/download/x64dbg.zip" `
+# x64dbg: snapshot release asset names are VERSIONED (snapshot_YYYY-MM-DD_HH-MM.zip),
+# so a guessed static URL breaks whenever upstream re-cuts the snapshot. Resolve
+# the current asset through the GitHub API, then fall back to pinned known assets.
+function Get-GitHubAsset([string]$repoSlug, [string]$tag, [string]$pattern, [string]$out) {
+    if (Test-Path $out) { Write-Host "  [SKIP] $(Split-Path $out -Leaf) (exists)" -ForegroundColor DarkGray; return $true }
+    $url = $null
+    $apiUrl = if ($tag -eq "latest") {
+        "https://api.github.com/repos/$repoSlug/releases/latest"
+    } else {
+        "https://api.github.com/repos/$repoSlug/releases/tags/$tag"
+    }
+    try {
+        $rel = Invoke-RestMethod -Uri $apiUrl `
+            -Headers @{ "User-Agent" = "winre-provision" } -TimeoutSec 30
+        $asset = $rel.assets | Where-Object { $_.name -match $pattern } | Select-Object -First 1
+        if ($asset) { $url = $asset.browser_download_url }
+    } catch {
+        Write-Host "  [warn] GitHub API lookup failed for $repoSlug@$tag : $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+    if (-not $url) { return $false }
+    return (Get-File $url $out)
+}
+
+if ($vmHas["C:\Tools\x64dbg\release\x64\x64dbg.exe"]) {
+    Write-Host "  [SKIP] x64dbg (FlareVM provides C:\Tools\x64dbg + pluginsdk)" -ForegroundColor DarkGray
+    $x64Ok = $true
+} else {
+    $x64Ok = Get-GitHubAsset "x64dbg/x64dbg" "snapshot" '^snapshot_\d{4}-\d{2}-\d{2}.+\.zip$' `
         (Join-Path $stage "x64dbg.zip")
+}
+if (-not $x64Ok) {
+    foreach ($u in @(
+            "https://github.com/x64dbg/x64dbg/releases/download/snapshot/snapshot_2025-03-15_15-57.zip",
+            "https://github.com/x64dbg/x64dbg/releases/download/snapshot/x64dbg.zip")) {
+        $x64Ok = Get-File $u (Join-Path $stage "x64dbg.zip")
+        if ($x64Ok) { break }
+    }
 }
 
 # Zig (for the x64dbg MCP plugin build) - 0.14+ uses zig-<arch>-windows-<ver>.zip
@@ -84,30 +160,63 @@ if (-not $zigOk) {
         (Join-Path $stage "zig-${zigVer}.zip")
 }
 
-# pe-sieve / hollows_hunter (direct release binaries; asset name varies)
-$peOk = Get-File "https://github.com/hasherezade/pe-sieve/releases/latest/download/pe_sieve64.exe" `
-    (Join-Path $stage "pe-sieve64.exe")
-if (-not $peOk) {
-    $peOk = Get-File "https://github.com/hasherezade/pe-sieve/releases/latest/download/pe-sieve64.exe" `
-        (Join-Path $stage "pe-sieve64.exe")
+# pe-sieve / hollows_hunter: FlareVM ships hollows_hunter; pe-sieve only when missing
+if ($vmHas["C:\Tools\hollows_hunter\hollows_hunter.exe"]) {
+    Write-Host "  [SKIP] hollows_hunter (FlareVM provides C:\Tools\hollows_hunter)" -ForegroundColor DarkGray
+    $hhOk = $true
+} else {
+    $hhOk = Get-File "https://github.com/hasherezade/hollows_hunter/releases/latest/download/hollows_hunter64.exe" `
+        (Join-Path $stage "hollows_hunter64.exe")
 }
-$hhOk = Get-File "https://github.com/hasherezade/hollows_hunter/releases/latest/download/hollows_hunter64.exe" `
-    (Join-Path $stage "hollows_hunter64.exe")
+$peOk = $true
+if (Test-Path "C:\ProgramData\chocolatey\bin\pe-sieve64.exe") {
+    Write-Host "  [SKIP] pe-sieve (choco install present on VM)" -ForegroundColor DarkGray
+} else {
+    $peOk = Get-File "https://github.com/hasherezade/pe-sieve/releases/latest/download/pe_sieve64.exe" `
+        (Join-Path $stage "pe-sieve64.exe")
+    if (-not $peOk) {
+        $peOk = Get-File "https://github.com/hasherezade/pe-sieve/releases/latest/download/pe-sieve64.exe" `
+            (Join-Path $stage "pe-sieve64.exe")
+    }
+}
 
 # Additional free static tools (staged for the air-gapped VM):
-#   - Detect It Easy (portable release zip: contains diec.exe)
-$dieVer = "3.09"
-$dieOk = Get-File "https://github.com/horsicq/Detect-It-Easy/releases/download/${dieVer}/die_win32_portable_${dieVer}.zip" `
-    (Join-Path $stage "die_win32_portable_${dieVer}.zip")
-#   - goresym (Go symbol recovery; only needed for Go samples)
-$goresymOk = Get-File "https://github.com/mandiant/GoReSym/releases/latest/download/GoReSym.exe" `
-    (Join-Path $stage "GoReSym.exe")
-#   - scdbg (shellcode emulator; FlareVM base usually ships it)
-$scdbgOk = Get-File "https://github.com/dzzie/SCDBG/releases/latest/download/scdbg.zip" `
-    (Join-Path $stage "scdbg.zip")
-#   - yara-x scanner (yr.exe; FlareVM base usually ships it)
-$yaraOk = Get-File "https://github.com/VirusTotal/yara-x/releases/latest/download/yr-x86_64-pc-windows-msvc.zip" `
-    (Join-Path $stage "yr-x86_64-pc-windows-msvc.zip")
+#   - Detect It Easy / GoReSym / scdbg / yara-x: FlareVM ships all four
+#     (C:\Tools\die, C:\Tools\GoReSym, C:\Tools\scdbg, C:\Tools\yara-x).
+#     Stage only for non-FlareVM hosts.
+$dieOk = $true
+if ($vmHas["C:\Tools\die\diec.exe"]) {
+    Write-Host "  [SKIP] Detect It Easy (FlareVM provides C:\Tools\die)" -ForegroundColor DarkGray
+} else {
+    $dieVer = "3.09"
+    $dieOk = Get-File "https://github.com/horsicq/Detect-It-Easy/releases/download/${dieVer}/die_win32_portable_${dieVer}.zip" `
+        (Join-Path $stage "die_win32_portable_${dieVer}.zip")
+    if (-not $dieOk) {
+        $dieOk = Get-GitHubAsset "horsicq/Detect-It-Easy" "latest" 'portable.*\.zip$' `
+            (Join-Path $stage "die_win32_portable.zip")
+    }
+}
+$goresymOk = $true
+if ($vmHas["C:\Tools\GoReSym\GoReSym.exe"]) {
+    Write-Host "  [SKIP] GoReSym (FlareVM provides C:\Tools\GoReSym)" -ForegroundColor DarkGray
+} else {
+    $goresymOk = Get-GitHubAsset "mandiant/GoReSym" "latest" 'windows.*\.zip$|GoReSym.*\.exe$' `
+        (Join-Path $stage "GoReSym-windows.zip")
+}
+$scdbgOk = $true
+if ($vmHas["C:\Tools\scdbg\scdbg.exe"]) {
+    Write-Host "  [SKIP] scdbg (FlareVM provides C:\Tools\scdbg)" -ForegroundColor DarkGray
+} else {
+    $scdbgOk = Get-File "https://github.com/dzzie/SCDBG/releases/latest/download/scdbg.zip" `
+        (Join-Path $stage "scdbg.zip")
+}
+$yaraOk = $true
+if ($vmHas["C:\Tools\yara-x\yr.exe"]) {
+    Write-Host "  [SKIP] yara-x (FlareVM provides C:\Tools\yara-x)" -ForegroundColor DarkGray
+} else {
+    $yaraOk = Get-GitHubAsset "VirusTotal/yara-x" "latest" 'x86_64-pc-windows-msvc\.zip$' `
+        (Join-Path $stage "yr-x86_64-pc-windows-msvc.zip")
+}
 
 # capa-rules (mandiant): capa's capability signatures
 $capaRulesDir = Join-Path $stage "capa-rules"

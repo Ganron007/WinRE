@@ -37,6 +37,13 @@ param(
 $ErrorActionPreference = "Continue"
 
 # --- Detached re-exec (SSH-safe): run under Task Scheduler, then exit ------
+# Over SSH, direct children die on disconnect (Win32-OpenSSH kills the
+# session's process tree). Auto-detach when we detect SSH and the caller did
+# not explicitly ask for foreground/direct mode - operators cannot get this
+# wrong by forgetting -Detach.
+if (-not $Detach -and -not $Foreground -and $env:SSH_CONNECTION) {
+    $Detach = $true
+}
 if ($Detach) {
     $task = "WinRE-MCP-Heal"
     $arg = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File " +
