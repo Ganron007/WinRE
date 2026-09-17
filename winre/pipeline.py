@@ -369,7 +369,7 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
             from .agentic import run_langgraph_deep_dive, TOOL_NAMES
             agent_result = run_langgraph_deep_dive(
                 sample.name, pack.root.name,
-                max_steps=10, dry=dry_llm,
+                max_steps=14, dry=dry_llm,
                 dynamic=enable_agentic_dbg,
                 mode="local", quick=quick)
         history = []
@@ -385,6 +385,7 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
             "source": agent_result.get("source"),
             "verdict": agent_result.get("verdict"),
             "llm_analysis": agent_result.get("llm_analysis"),
+            "fallback_reason": agent_result.get("fallback_reason"),
             "tool_calls": len(agent_result.get("history") or []),
             "history": history,
             "packed_signal": agent_result.get("packed_signal"),

@@ -790,7 +790,7 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
             if not malcat_present:
                 names = [n for n in names if not n.startswith("malcat_")]
             agent_result = run_langgraph_deep_dive(sample_name, sha or sample_name,
-                                                   max_steps=10, dry=dry_llm,
+                                                   max_steps=14, dry=dry_llm,
                                                    dynamic=dynamic,
                                                    available_tools=names,
                                                    quick=quick_ev)
@@ -809,6 +809,7 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
             "source": agent_result.get("source"),
             "verdict": agent_result.get("verdict"),
             "llm_analysis": agent_result.get("llm_analysis"),
+            "fallback_reason": agent_result.get("fallback_reason"),
             "tool_calls": len(agent_result.get("history") or []),
             "history": history,
             "packed_signal": agent_result.get("packed_signal"),

@@ -29,7 +29,7 @@ IDA 9.3 is the WinRE default. `idasql v0.0.18.1` verified on this VM.
 ```powershell
 C:\Python313\python.exe C:\WinRE\tools\ida_sql_client.py health
 C:\Python313\python.exe C:\WinRE\tools\ida_sql_client.py query `
-  "SELECT address FROM funcs WHERE size > 150 ORDER BY size DESC LIMIT 3" `
+  "SELECT addr FROM funcs WHERE size > 150 ORDER BY size DESC LIMIT 3" `
   --file C:\samples\calc.exe
 ```
 

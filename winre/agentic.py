@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time as _time
 from pathlib import Path
 from typing import Any, Callable
 from collections.abc import Sequence
@@ -1310,9 +1311,10 @@ Known SQL schemas (do NOT waste turns discovering them — query directly):
 Ghidra: funcs(name, addr, size) - the column is addr, there is NO
   'address' column (alias it yourself: SELECT addr AS address). imports
   (name,module/name,library), strings(content,addr); LIMIT small (25).
-IDA: tables funcs(name,address,size,prototype,arg_count,calling_conv),
-  imports(name,module), strings(content,address), segments, names.
-  Use LIMIT 20. IDs are strings in most rows.
+IDA: funcs(name, addr, size, prototype, arg_count, calling_conv) - the
+  column is addr, there is NO 'address' column. imports(name,module),
+  strings(content,addr), segments, names. Use LIMIT 20. IDs are strings in
+  most rows.
 Malcat (only if reachable): analyse_file / fns_top_list / fn_decompile.
 
 Static evidence tools (no args — call and read the JSON):
@@ -1422,6 +1424,7 @@ to your final answer immediately.
     import re as _re
     verdict = None
     llm_text = ""
+    tool_dump = ""
     for msg in reversed(result.get("messages") or []):
         content = getattr(msg, "content", None)
         if isinstance(content, list):
@@ -1431,7 +1434,10 @@ to your final answer immediately.
                 if isinstance(p, dict) and p.get("type") == "text")
         if not isinstance(content, str) or not content.strip():
             continue
-        if not llm_text and getattr(msg, "type", "") != "human":
+        mtype = getattr(msg, "type", "")
+        if not tool_dump and mtype == "tool":
+            tool_dump = content.strip()[:4000]
+        if not llm_text and mtype not in ("human", "tool"):
             llm_text = content.strip()[:8000]
         # strip code fences, then try each balanced {...} span
         text = _re.sub(r"```(?:json)?", "", content)
@@ -1461,12 +1467,48 @@ to your final answer immediately.
                     break
         except Exception:
             continue
+    # Finalize pass: agents sometimes end with prose analysis instead of the
+    # required JSON. One extra LLM call converts their own analysis into the
+    # verdict object instead of falling back deterministically.
+    fallback_reason = "no verdict JSON in agent output"
+    basis = llm_text or tool_dump
+    if verdict is None and basis:
+        for _attempt in (1, 2, 3):
+            try:
+                from langchain_core.messages import HumanMessage as _HM
+                _extra = ("" if _attempt == 1 else
+                          "\n\nSTRICT: reply with ONLY the flat JSON object, "
+                          "starting with { and ending with }.")
+                fid = llm.invoke([_HM(content=(
+                    "Convert the following analysis into the required flat JSON "
+                    "verdict object ONLY (keys: verdict (malicious/unknown/benign), "
+                    "confidence (high/medium/low), summary, key_evidence (list of "
+                    "strings)). No prose, no code fences." + _extra + "\n\n"
+                    + basis[:6000]))])
+                ftext = str(getattr(fid, "content", "") or "")
+                ftext = _re.sub(r"```(?:json)?", "", ftext)
+                fm = _re.search(r"\{.*\}", ftext, _re.DOTALL)
+                if fm:
+                    fdata = json.loads(fm.group(0))
+                    if isinstance(fdata, dict) and fdata.get("verdict"):
+                        verdict = _normalize_verdict(fdata)
+                        llm_text = (llm_text + "\n\n[finalize] " + ftext)[:8000]
+                        fallback_reason = ""
+                        break
+                fallback_reason = (f"finalize unparseable (attempt {_attempt}): "
+                                   + repr(ftext[:120]))
+                _time.sleep(1.5)
+            except Exception as e:
+                fallback_reason = (f"finalize failed (attempt {_attempt}): "
+                                   f"{str(e)[:180]}")
+                _time.sleep(1.5)
     # curated-YARA verdict floor (W2): never let a below-malicious verdict
     # contradict a family-distinctive rule match
     verdict = _apply_verdict_floor(verdict, _curated_yara_hits(quick, findings))
     if verdict is None:
         return {"verdict": "unknown", "source": "deterministic_fallback",
                 "history": history, "llm_analysis": llm_text[:4000],
+                "fallback_reason": fallback_reason,
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
                 "windbg_dump": windbg_dump}
     return {"verdict": verdict, "source": "llm_judge",
