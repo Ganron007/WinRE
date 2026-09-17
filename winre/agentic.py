@@ -814,7 +814,7 @@ TOOL_NAMES = ("ghidra_query", "ida_query", "malcat_analyze",
               "crypto_constants", "mitigations", "sink_sites",
               "rtf_predecode", "string_decode_emulate", "rolling_xor",
               "script_decode", "ioc_extract", "goresym_analyze",
-              "decrypt_gate")
+              "decrypt_gate", "threat_intel")
 # Opt-in dynamic tools: x64dbg debug loops over MCP. Bounded, deterministic
 # primitives — the LLM composes them, never free-forms debugger commands.
 DYNAMIC_TOOL_NAMES = ("x64dbg_oep", "x64dbg_wpm_dump",
@@ -1096,8 +1096,29 @@ def _apply_verdict_floor(verdict: dict | None, rules: list[str]) -> dict | None:
     return out
 
 
+
+def _normalize_verdict(verdict: dict) -> dict:
+    """Map LLM verdict labels onto the pipeline enum (malicious/unknown/benign)."""
+    if not isinstance(verdict, dict):
+        return verdict
+    raw = str(verdict.get("verdict") or "").strip().lower()
+    mapping = {"tool/legit": "benign", "tool": "benign", "legit": "benign",
+               "legitimate": "benign", "clean": "benign", "goodware": "benign",
+               "benign-tool": "benign", "suspicious": "unknown",
+               "malware": "malicious", "mal": "malicious"}
+    mapped = mapping.get(raw, raw)
+    if mapped not in ("malicious", "unknown", "benign"):
+        mapped = "unknown"
+    if mapped != raw:
+        out = dict(verdict)
+        out["verdict_raw"] = verdict.get("verdict")
+        out["verdict"] = mapped
+        return out
+    return verdict
+
+
 def run_langgraph_deep_dive(sample_name: str, sha: str, *,
-                            max_steps: int = 10,
+                            max_steps: int = 14,
                             log_dir: Path | None = None,
                             dry: bool = False,
                             dynamic: bool = False,
@@ -1135,8 +1156,9 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
         remaining = budget - state["calls"]
         if remaining <= 0:
             return "\n[BUDGET] tool budget exhausted — submit your final answer now."
-        if remaining <= 2:
-            return f"\n[BUDGET CRITICAL] {remaining} tool call(s) left — final answer NOW."
+        if remaining <= 3:
+            return (f"\n[FINALIZE NOW] {remaining} tool call(s) left — stop "
+                    f"investigating and submit your final verdict JSON.")
         return ""
 
     def _make(name: str) -> StructuredTool:
@@ -1301,9 +1323,11 @@ pe_parse: imports (per-DLL function lists), sections + entropy, digital
   signature (signed true/false) — packing = few imports + high entropy.
 diec: packer/protector/compiler identification.
 strings_tool: raw ASCII strings (may be garbage if packed).
-yarascan: curated-ruleset scan. `high_signal` hits are family-distinctive
-  (the verdict floor applies); `generic` hits matched only common API/DLL/DOS
-  strings — evidence-only, never lean on them.
+yarascan: ruleset scan. `high_signal` = curated family-distinctive hits
+  (the verdict floor applies). `auto_generated` = CADRE_v2_* auto rules:
+  LEADS only - they routinely match legit tools, never decisive alone.
+  `generic` = common API/DLL/DOS literals: noise, never lean on them.
+  `packer_signal` = packer-family hits (expected on packed legit binaries).
 xor_string_search: XOR/ROL/ADD encoded-string brute force — finds hidden
   config/URLs when plain strings are garbage.
 speakeasy_emulate: Windows-native emulation — API calls/events WITHOUT
@@ -1336,7 +1360,7 @@ z3_solve / angr_analyze: deobfuscation solvers — only for confirmed
   obfuscation (MBA/CFF), never first-line.
 
 VERDICT METHOD (ACH): frame the verdict as competing hypotheses
-(malicious | tool/legit | unknown). Weight the DIAGNOSTICITY of each piece
+(malicious | benign (tool/legit) | unknown). Weight the DIAGNOSTICITY of each piece
 of evidence, not its volume. Explicitly try to DISPROVE your leading
 hypothesis (e.g., is the C2 string actually a kill-switch? is the
 high-entropy section a legitimate packer?). Protection/obfuscation alone
@@ -1355,14 +1379,24 @@ Your job:
    (high/medium/low), summary, key_evidence (list of strings).
 Converge quickly: 3-6 tool calls is enough for triage. Cite concrete
 tool/SQL evidence. Never claim behavior without tool output.
-MASQUERADE AWARENESS: VersionInfo/company metadata is trivially forged. If
-Malcat anomalies/YARA/high-signal imports fire, verdict must be malicious
-even if strings look legitimate.
+IDENTITY & MASQUERADE: VersionInfo/company metadata is trivially forged,
+but so is every unsigned build - "unsigned + has VersionInfo" is NOT a
+masquerade. A masquerade verdict needs identity mismatch PLUS decisive
+behavioral evidence (C2/config, persistence, injection, crypto+exfil).
+Malcat anomalies, packer hits, auto-generated CADRE_v2_* YARA leads and
+high-signal imports alone never justify malicious.
+
+KNOWN TOOLS: consult threat_intel early (signer + security-tool markers).
+known_tool=true means dual-use behavior (debug/injection APIs, packing,
+high entropy, credential-adjacent imports) is EXPECTED for that tool:
+verdict must be benign (tool/legit) or unknown unless a curated family-exact YARA
+hit or concrete malicious artifacts (C2 config, persistence, exfil) exist.
+Kesakode/tool-tags in Malcat metadata corroborate known-tool identity.
 BUDGET DISCIPLINE: limited tool calls; when a [BUDGET] note appears, converge
 to your final answer immediately.
 {dyn_note}{packer_note}{windbg_note}"""
     agent = create_react_agent(llm, tools=tools, prompt=system_prompt)
-    recursion_limit = max(16, int(max_steps) * 2 + 6)
+    recursion_limit = max(24, int(max_steps) * 2 + 10)
     try:
         brief = _quick_brief(quick)
         result = agent.invoke(
@@ -1405,7 +1439,7 @@ to your final answer immediately.
             if isinstance(data, dict):
                 v = data.get("verdict") or data.get("Verdict")
                 if isinstance(v, str) and v.strip():
-                    verdict = data
+                    verdict = _normalize_verdict(data)
                     llm_text = content.strip()[:8000]
                     break
         if verdict is not None:
@@ -1417,7 +1451,7 @@ to your final answer immediately.
             if start >= 0 and end > start:
                 data = json.loads(text[start:end + 1])
                 if isinstance(data, dict) and data.get("verdict"):
-                    verdict = data
+                    verdict = _normalize_verdict(data)
                     llm_text = content.strip()[:8000]
                     break
         except Exception:
@@ -1441,7 +1475,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="WinRE LangGraph deep dive (static phase)")
     ap.add_argument("sha")
     ap.add_argument("--sample-name", required=True)
-    ap.add_argument("--max-steps", type=int, default=10)
+    ap.add_argument("--max-steps", type=int, default=14)
     ap.add_argument("--dry", action="store_true",
                     help="no LLM — deterministic fallback only")
     ap.add_argument("--dynamic", action="store_true",

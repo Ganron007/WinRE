@@ -465,6 +465,7 @@ def yarascan(sample: str, timeout: int = 600) -> dict:
     high: list[str] = []
     generic: list[str] = []
     packer: list[str] = []
+    auto_gen: list[str] = []
     detail: dict = {}
     bad = 0
     for rf in yar_files:
@@ -495,6 +496,10 @@ def yarascan(sample: str, timeout: int = 600) -> dict:
                     # packer/compressor family (or auto-gen packer rule) -
                     # packed legit binaries hit these constantly
                     packer.append(rule)
+                elif str(rule).startswith("CADRE_v2_"):
+                    # auto-generated CADRE rules are LEADS, never proof: their
+                    # literal sets routinely match legitimate tooling
+                    auto_gen.append(rule)
                 elif not matched or _specific_match(matched):
                     high.append(rule)   # no printed strings (hex/imphash/pe) = specific
                 else:
@@ -516,6 +521,7 @@ def yarascan(sample: str, timeout: int = 600) -> dict:
     return {"ok": True, "tool": "yarascan", "hits": hits[:40],
             "high_signal": high[:40], "generic": generic[:40],
             "packer_signal": packer[:40],
+            "auto_generated": auto_gen[:40],
             "match_detail": detail,
             "total": len(hits), "rules_scanned": len(yar_files),
             "rules_failed": bad}
