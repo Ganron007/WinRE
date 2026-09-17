@@ -111,7 +111,7 @@ def _launch_local() -> bool:
 
 
 def ensure_mcp_local(base: str | None = None,
-                     wait_s: int = 45) -> tuple[bool, dict]:
+                     wait_s: int = 90) -> tuple[bool, dict]:
     """Ensure :9094 for callers already running ON the VM (dynamic OEP/dump).
 
     Same scheduled-task launch as ensure_mcp(), minus the SSH hop. Keeps

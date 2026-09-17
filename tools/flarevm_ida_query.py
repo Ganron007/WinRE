@@ -179,10 +179,11 @@ def query_oneshot(db_path: str, sql: str, write: bool = False) -> dict:
                 "skipped": f"idasql not found at {IDASQL} (licensed, optional)"}
     stdout = result.stdout
     if result.returncode != 0 or "Error" in stdout:
+        detail = ((stdout or "") + "\n" + (getattr(result, "stderr", "") or "")).strip()
         return {
             "ok": False,
             "returncode": result.returncode,
-            "error": stdout[-500:],
+            "error": detail[-500:] or f"idasql rc={result.returncode} (no output)",
         }
 
     # Parse the table output from idasql

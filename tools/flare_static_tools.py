@@ -139,21 +139,26 @@ def capa(sample: str, timeout: int = 900) -> dict:
 
 def floss(sample: str, timeout: int = 900) -> dict:
     import importlib.util
-    if importlib.util.find_spec("floss") is None:
-        return _skipped("floss")
+    has_mod = importlib.util.find_spec("floss") is not None
     # pip floss entry: floss.main lacks __main__ on some builds — use the
-    # documented API entry (floss.main.main) with explicit argv, else Scripts exe
+    # documented API entry (floss.main.main) with explicit argv, else Scripts
+    # exe; FlareVM's standalone C:\Tools\FLOSS\floss.exe is the final fallback.
     exe = Path(PY).parent / "Scripts" / "floss.exe"
     roaming = Path.home() / "AppData" / "Roaming" / "Python" / "Python313" / "Scripts" / "floss.exe"
-    if exe.is_file():
+    standalone = Path(r"C:\Tools\FLOSS\floss.exe")
+    if has_mod and exe.is_file():
         cmd = [str(exe), sample, "--json"]
-    elif roaming.is_file():
+    elif has_mod and roaming.is_file():
         cmd = [str(roaming), sample, "--json"]
-    else:
+    elif standalone.is_file():
+        cmd = [str(standalone), "--json", sample]
+    elif has_mod:
         cmd = [PY, "-c",
                "import sys; sys.argv=['floss', sys.argv[1], '--json']; "
                "from floss.main import main; exit(main())",
                sample]
+    else:
+        return _skipped("floss", "no python module and no C:\\Tools\\FLOSS\\floss.exe")
     rc, out, err = _run(cmd, timeout)
     if rc != 0:
         return {"ok": False, "error": (err or out)[-300:], "tool": "floss"}

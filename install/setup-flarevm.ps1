@@ -456,9 +456,17 @@ else { Manual "Install ILSpy CLI: dotnet tool install -g ilspycmd (see docs\TOOL
 $x64 = "C:\Tools\x64dbg\release\x64\x64dbg.exe"
 if (Test-Path $x64) {
     Ok "x64dbg -> $x64"
-    $plug = Get-ChildItem "C:\Tools\x64dbg" -Recurse -Depth 4 -Include "*.dp64", "*.dp32" -ErrorAction SilentlyContinue |
-        Where-Object Name -match "^x64dbg-MCP-Server" | Select-Object -First 1
-    if ($plug) { Ok "MCP plugin -> $($plug.FullName)" }
+    # Arch-aware: x64dbg.exe (64-bit) loads only .dp64; x32dbg.exe loads .dp32.
+    # Checking with Select -First 1 used to "satisfy" the check with the dp32
+    # and skip the build, leaving :9094 dead (fresh-VM bug, 2026-09-17).
+    $plugDir64 = "C:\Tools\x64dbg\release\x64\plugins"
+    $plugDir32 = "C:\Tools\x64dbg\release\x32\plugins"
+    $plug64 = Join-Path $plugDir64 "x64dbg-MCP-Server.dp64"
+    $plug32 = Join-Path $plugDir32 "x64dbg-MCP-Server.dp32"
+    if ((Test-Path $plug64) -and (Test-Path $plug32)) {
+        Ok "MCP plugin dp64 -> $plug64"
+        Ok "MCP plugin dp32 -> $plug32"
+    }
     else {
         # ---- fresh-VM plugin chain: source -> patch -> zig -> build ----
         # source: repo integrations\ OR the host-staged clone (provision_tools)
@@ -515,14 +523,25 @@ if (Test-Path $x64) {
             if (-not $CheckMode) {
                 Push-Location $srcDir.FullName
                 & $zigCmd.Path build 2>&1 | Select-Object -Last 3
-                $built = Get-ChildItem "zig-out" -Recurse -Include "*.dp64", "*.dp32" -ErrorAction SilentlyContinue |
-                    Where-Object Name -match "^x64dbg-MCP-Server" | Select-Object -First 1
-                if ($built) {
-                    $plugDir = Join-Path (Split-Path $x64) "plugins"
-                    New-Item -ItemType Directory -Force -Path $plugDir | Out-Null
-                    Copy-Item $built.FullName $plugDir -Force
-                    Ok "plugin deployed: $($built.Name) -> $plugDir"
-                } else { Manual "zig build produced no plugin - build manually (docs\X64DBG-MCP.md)." }
+                $cands = @()
+                foreach ($r in @("zig-out", "dist")) {
+                    if (Test-Path $r) {
+                        $cands += Get-ChildItem $r -Recurse -Include "*.dp64", "*.dp32" -ErrorAction SilentlyContinue |
+                            Where-Object Name -match "^x64dbg-MCP-Server"
+                    }
+                }
+                $d64 = $cands | Where-Object Extension -eq ".dp64" | Select-Object -First 1
+                $d32 = $cands | Where-Object Extension -eq ".dp32" | Select-Object -First 1
+                if ($d64) {
+                    New-Item -ItemType Directory -Force -Path $plugDir64 | Out-Null
+                    Copy-Item $d64.FullName $plugDir64 -Force
+                    Ok "plugin deployed: $($d64.Name) -> $plugDir64"
+                } else { Manual "dp64 plugin missing after build - build manually (docs\X64DBG-MCP.md)." }
+                if ($d32) {
+                    New-Item -ItemType Directory -Force -Path $plugDir32 | Out-Null
+                    Copy-Item $d32.FullName $plugDir32 -Force
+                    Ok "plugin deployed: $($d32.Name) -> $plugDir32"
+                }
                 Pop-Location
             }
         } else {

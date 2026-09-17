@@ -324,6 +324,11 @@ class ToolRegistry:
         """Detect It Easy: packer/compiler/protector identification."""
         return self._vm_tool("diec")
 
+    def threat_intel(self) -> dict:
+        """Known-tool/vendor identification: Authenticode signer, version
+        info, security-tool markers, Malcat kesakode (when keyed)."""
+        return self._vm_tool("threat_intel")
+
     def strings_tool(self) -> dict:
         """ASCII/unicode strings from the sample."""
         return self._vm_tool("strings")
@@ -1302,9 +1307,9 @@ dynamic tool errors, fall back to static — do not retry more than once.
 FlareVM analysis pipeline. Sample: {sample_name} (SHA {sha[:16]}).
 
 Known SQL schemas (do NOT waste turns discovering them — query directly):
-Ghidra: tables funcs(name,address,size), imports(name,module/name,library),
-  strings(content,address); LIMIT small (25). funcs uses columns
-  name, addr AS address, size.
+Ghidra: funcs(name, addr, size) - the column is addr, there is NO
+  'address' column (alias it yourself: SELECT addr AS address). imports
+  (name,module/name,library), strings(content,addr); LIMIT small (25).
 IDA: tables funcs(name,address,size,prototype,arg_count,calling_conv),
   imports(name,module), strings(content,address), segments, names.
   Use LIMIT 20. IDs are strings in most rows.

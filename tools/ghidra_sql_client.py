@@ -276,7 +276,7 @@ class GhidraSqlClient:
             self.close(sid, force=force)
 
     # ---- internal ---------------------------------------------------------
-    def _ensure_server(self, proj: dict) -> str:
+    def _ensure_server(self, proj: dict, _retry: bool = True) -> str:
         sid = proj["project_name"]
         entry = self._servers.get(sid)
         if entry and entry.get("proc") is not None and entry["proc"].poll() is None:
@@ -340,6 +340,15 @@ class GhidraSqlClient:
                     tail = log_path.read_text(errors="replace")[-1200:]
                 except OSError:
                     pass
+                if _retry:
+                    # transient startup deaths (stale project lock, port race)
+                    # self-heal once before surfacing the error
+                    try:
+                        self.close(sid)
+                    except Exception:
+                        pass
+                    time.sleep(2)
+                    return self._ensure_server(proj, _retry=False)
                 raise RuntimeError(
                     f"ghidrasql server died during startup (rc={proc.returncode}); "
                     f"log tail:\n{tail}")
