@@ -146,6 +146,21 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
         and not dynamic_conflict and gate_ok
     truly_green = all_green and quality_green
 
+    # A dynamic stage that was REQUESTED but refused by the snapshot gate is
+    # recorded explicitly (the stage file exists with ok=False + gate error).
+    # It does not fail truly_green (the gate acted correctly; dynamic is
+    # optional), but reports must not look like detonation happened.
+    dynamic_blocked = False
+    try:
+        stg_file = evidence / "dynamic" / "STAGE.json"
+        if stg_file.is_file():
+            _s = json.loads(stg_file.read_text(encoding="utf-8"))
+            dynamic_blocked = bool(
+                _s.get("ok") is False
+                and "snapshot gate" in str(_s.get("error") or ""))
+    except (OSError, json.JSONDecodeError):
+        pass
+
     return {
         "truly_green": truly_green,
         "all_green": all_green,
@@ -154,6 +169,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
         "fallback_stages": fallbacks,
         "failed_tools": failed_tools,
         "dynamic_conflict": dynamic_conflict,
+        "dynamic_blocked": dynamic_blocked,
         "static_yara_wins": True,
         "static_verdict": static_verdict,
         "dynamic_verdict": dynamic_verdict,

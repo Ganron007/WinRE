@@ -161,11 +161,10 @@ def floss(sample: str, timeout: int = 900) -> dict:
     else:
         return _skipped("floss", "no python module and no C:\\Tools\\FLOSS\\floss.exe")
     rc, out, err = 1, "", ""
-    for flag in ("-j", "--json"):
-        if base[0] == PY:
-            rc, out, err = _run(base + [sample], timeout)
-        else:
-            rc, out, err = _run(base + [flag, sample], timeout)
+    attempts = ([base + [sample]] if base[0] == PY
+                else [base + [f, sample] for f in ("-j", "--json")])
+    for cmd in attempts:
+        rc, out, err = _run(cmd, timeout)
         if rc == 0 and (out or "").strip().startswith("{"):
             break
     if rc != 0:

@@ -420,9 +420,32 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     from . import snapshot_gate
     gate = snapshot_gate.preflight("dynamic", sha=sha, cfg=cfg, consume=False)
     if not gate.get("allowed"):
-        return stage_result("dynamic", False, error=gate.get("error"),
-                            elapsed_s=round(time.time() - t0, 1),
-                            gate=gate.get("gate"))
+        # Honesty: a blocked run must not leave the PREVIOUS run's dynamic
+        # artifacts in the pack - audits/reports would read stale evidence
+        # (observed 2026-09-18: blocked enforce run still showed events=533).
+        try:
+            import shutil as _sh
+            dyn_dir = pack.stages.get("dynamic")
+            if dyn_dir and dyn_dir.exists():
+                for ch in list(dyn_dir.iterdir()):
+                    if ch.is_dir():
+                        _sh.rmtree(ch, ignore_errors=True)
+                    else:
+                        try:
+                            ch.unlink()
+                        except OSError:
+                            pass
+        except Exception:
+            pass
+        blocked = stage_result("dynamic", False, error=gate.get("error"),
+                              elapsed_s=round(time.time() - t0, 1),
+                              gate_pass=False, gate=gate.get("gate"),
+                              summary="blocked by snapshot gate")
+        try:
+            pack.write("dynamic", "STAGE.json", blocked)
+        except Exception:
+            pass
+        return blocked
     py = _remote_py(cfg)
     remote_sample = rf"C:\samples\{sample_name}"
     helper = REPO / "winre" / "_remote_dynamic_helper.py"
@@ -439,10 +462,12 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     # Without this the helper's own default (enforce) blocks benign test
     # loops even when the host explicitly asked for observe.
     from . import snapshot_gate as _sg
+    _marker_fwd = (f"$env:WINRE_SNAPSHOT_MARKER='{_sg.MARKER}'; "
+                   if os.environ.get("WINRE_SNAPSHOT_MARKER") else "")
     cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "'
            f"$env:WINRE_SNAPSHOT_GATE='{_sg.mode()}'; "
-           f"$env:WINRE_SNAPSHOT_MARKER='{_sg.MARKER}'; "
-           f'& {py} '
+           + _marker_fwd
+           + f'& {py} '
            f'{cfg["remote_pipeline"]}\\winre\\_remote_dynamic_helper.py '
            f'{sha} "{remote_sample}" {int(max_seconds)}'
            f'{" --pesieve" if enable_pesieve else ""}'

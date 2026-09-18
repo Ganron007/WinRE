@@ -1406,7 +1406,11 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
                                      "module_file", "error")}})
                 if not ps_res.get("ok"):
                     err = str(ps_res.get("error") or "").lower()
-                    if "not found" in err or "access" in err:
+                    # Stop only when there is nothing to escalate (no dump
+                    # produced / pe-sieve missing). An invalid /imp mode or a
+                    # failed rebuild must fall through to the next mode.
+                    if ("no dump" in err or "winerror 2" in err
+                            or "cannot find the file" in err):
                         break
                     continue
                 ps_parse = _dump_parse_check(pesieve_path)
