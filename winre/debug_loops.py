@@ -1197,7 +1197,8 @@ def _resolve_module_name(xc: X64DbgClient, basename: str, stem: str) -> str:
     return basename or stem
 
 
-def _pesieve_imp_dump(xc: X64DbgClient, stem: str, pid, copy_to: str) -> dict:
+def _pesieve_imp_dump(xc: X64DbgClient, stem: str, pid, copy_to: str,
+                      imp_mode: int = 1) -> dict:
     """pe-sieve import-recovery dump of the live (paused) process.
 
     pe-sieve /imp rebuilds the ImportTable from the in-memory IATs
@@ -1223,7 +1224,7 @@ def _pesieve_imp_dump(xc: X64DbgClient, stem: str, pid, copy_to: str) -> dict:
             shutil.rmtree(out_dir, ignore_errors=True)
             os.makedirs(out_dir, exist_ok=True)
             p = subprocess.run(
-                [exe, "/pid", str(pid), "/imp", "1", "/dmode", "3",
+                [exe, "/pid", str(pid), "/imp", str(imp_mode), "/dmode", "3",
                  "/report", "7", "/dir", out_dir, "/quiet", "/json"],
                 capture_output=True, text=True, timeout=300)
             stdout = p.stdout or ""
@@ -1234,7 +1235,7 @@ def _pesieve_imp_dump(xc: X64DbgClient, stem: str, pid, copy_to: str) -> dict:
         ps = (
             f"Remove-Item -Recurse -Force '{out_dir}' -ErrorAction SilentlyContinue\n"
             f"New-Item -ItemType Directory -Force -Path '{out_dir}' | Out-Null\n"
-            f"& '{exe}' /pid {int(pid)} /imp 1 /dmode 3 /report 7 "
+            f"& '{exe}' /pid {int(pid)} /imp {int(imp_mode)} /dmode 3 /report 7 "
             f"/dir '{out_dir}' /quiet /json 2>$null | Out-String"
         )
         try:
@@ -1389,12 +1390,28 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
         pesieve_path = f"{vm_dir}\\{stem}_pesieve_unpacked.exe"
         pid = _parse_state(xc.get_state()).get("pid")
         ps_res: dict = {}
+        ps_parse: dict = {}
+        imp_modes_tried: list[int] = []
         if pid:
-            ps_res = _pesieve_imp_dump(xc, stem, pid, pesieve_path)
-            evidence.append({"label": "pesieve_imp",
-                             **{k: ps_res.get(k) for k in
-                                ("ok", "imp_rec_result", "dump_mode",
-                                 "module_file", "error")}})
+            # IAT rebuild escalation: /imp 1 (in-memory IAT) then 3/4/5
+            # (build the ImportTable from scratch from found IATs) until the
+            # dump parses with imports. pe-sieve documents 3/4/5 as R0/R1/R2.
+            for _m in (1, 3, 4, 5):
+                imp_modes_tried.append(_m)
+                ps_res = _pesieve_imp_dump(xc, stem, pid, pesieve_path,
+                                           imp_mode=_m)
+                evidence.append({"label": "pesieve_imp", "imp_mode": _m,
+                                 **{k: ps_res.get(k) for k in
+                                    ("ok", "imp_rec_result", "dump_mode",
+                                     "module_file", "error")}})
+                if not ps_res.get("ok"):
+                    err = str(ps_res.get("error") or "").lower()
+                    if "not found" in err or "access" in err:
+                        break
+                    continue
+                ps_parse = _dump_parse_check(pesieve_path)
+                if ps_parse.get("parses") and int(ps_parse.get("imports") or 0) > 0:
+                    break
         module = _resolve_module_name(xc, name, stem)
         evidence.append({"label": "dump_module_name", "module": module,
                          "dump_path": savedata_path})
@@ -1410,7 +1427,6 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
             if dr.get("ok"):
                 break
         savedata_ok = bool(dr.get("ok"))
-        ps_parse: dict = _dump_parse_check(pesieve_path) if ps_res.get("ok") else {}
         ps_imports = int(ps_parse.get("imports") or 0)
         if ps_res.get("ok") and ps_parse.get("parses") and ps_imports > 0:
             dump_path, dump_source = pesieve_path, "pesieve_imp"
@@ -1431,7 +1447,8 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
                     "evidence": evidence}
         evidence.append({"label": "dump_choice", "source": dump_source,
                          "pesieve_parse": ps_parse, "savedata_ok": savedata_ok,
-                         "pesieve_imp_result": ps_res.get("imp_rec_result")})
+                         "pesieve_imp_result": ps_res.get("imp_rec_result"),
+                         "imp_modes_tried": imp_modes_tried})
     evidence.append({"label": "dumped", "dump_path": dump_path,
                      "kind": dump_kind, "source": dump_source,
                      "dump": (dr.get("result") if dump_kind == "module"

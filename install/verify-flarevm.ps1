@@ -234,9 +234,20 @@ $x64 = @("C:\Tools\x64dbg\release\x64\x64dbg.exe", "C:\Tools\x64dbg\release\x32\
 if ($x64) { Ok "x64dbg -> $($x64 -join ', ')" }
 else { Fail "x64dbg.exe not found under C:\Tools\x64dbg (see docs\PREREQUISITES.md)" }
 $plugs = Get-ChildItem "C:\Tools\x64dbg" -Recurse -Depth 4 -Include "*.dp64", "*.dp32" -ErrorAction SilentlyContinue |
-    Where-Object Name -match "^x64dbg-MCP-Server" 
+    Where-Object Name -match "^x64dbg-MCP-Server"
 if ($plugs) { Ok "MCP plugin -> $($plugs[0].FullName)" }
 else { Fail "x64dbg MCP plugin (x64dbg-MCP-Server.dp64) not found - build from integrations\x64dbg-mcp-server (Zig)" }
+# x64dbg.exe (64-bit) only loads .dp64 - both arches must be present or
+# :9094 never binds (2026-09-17 fresh-VM bug: dp32 satisfied the old check)
+$plug64 = "C:\Tools\x64dbg\release\x64\plugins\x64dbg-MCP-Server.dp64"
+$plug32 = "C:\Tools\x64dbg\release\x32\plugins\x64dbg-MCP-Server.dp32"
+if (Test-Path $plug64) { Ok "MCP plugin dp64 -> $plug64" }
+else { Fail "x64dbg MCP dp64 plugin missing ($plug64) - :9094 cannot bind" }
+if (Test-Path $plug32) { Ok "MCP plugin dp32 -> $plug32" }
+else { Warn "MCP plugin dp32 missing ($plug32) - x32dbg debug loop unavailable" }
+$fw = Get-NetFirewallRule -DisplayName "WinRE x64dbg MCP (lab subnet)" -ErrorAction SilentlyContinue
+if ($fw) { Ok "firewall: :9094 scoped to LocalSubnet ($($fw.Enabled))" }
+else { Warn "no firewall rule for :9094 - port reachable on all interfaces (setup creates it)" }
 
 Write-Host ""
 Write-Host "--- Dynamic prerequisites ---"

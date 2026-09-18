@@ -51,7 +51,7 @@ DIRTY_ACTIONS = ("detonated", "debugged")
 
 
 def mode() -> str:
-    m = os.environ.get("WINRE_SNAPSHOT_GATE", "observe").strip().lower()
+    m = os.environ.get("WINRE_SNAPSHOT_GATE", "enforce").strip().lower()
     if m not in ("observe", "enforce", "off"):
         # fail-open would silently weaken enforcement - pin to observe but
         # shout, since the operator typed something we don't know

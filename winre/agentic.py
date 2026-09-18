@@ -663,7 +663,7 @@ class ToolRegistry:
 
         enforce: the FIRST debug call consumes the marker (same-sha calls
         later in this agent run pass via session scope); blocked -> tools
-        return an error, agent falls back to static. observe (default):
+        return an error, agent falls back to static. enforce (default):
         advisory only — never blocks testing. If :9094 is down, bring x64dbg
         up once via the scheduled-task launcher (interactive session).
         """
@@ -907,6 +907,20 @@ def _truncate(s: str, n: int) -> str:
     return s if len(s) <= n else s[:n] + f"... (truncated {len(s) - n} chars)"
 
 
+def _ctx_budget_chars() -> int:
+    """Chars we may feed the LLM, derived from the model context window.
+
+    The configured model supports 1M tokens (WINRE_LLM_CONTEXT_TOKENS).
+    Do not starve the interpreter: ~3.6 chars/token, 30% reserved for the
+    system prompt, history and the final answer.
+    """
+    try:
+        toks = int(os.environ.get("WINRE_LLM_CONTEXT_TOKENS", "1000000"))
+    except ValueError:
+        toks = 1000000
+    return max(200_000, int(toks * 3.6 * 0.7))
+
+
 def _quick_brief(quick: dict | None) -> str:
     """Compact quick-evidence summary for the agent's opening message.
 
@@ -966,6 +980,25 @@ _PACKER_WORDS = (
     "protector", "protect", "packer", "packed", "custom virtual", "spaghetti",
     "crypter",
 )
+
+
+def _is_managed_quick(quick: dict | None) -> bool:
+    """True when quick evidence says the sample is a .NET/managed assembly.
+
+    Managed assemblies have no native entry-point pause: the x64dbg OEP/unpack
+    prepass is meaningless for them (and CLI tools exit immediately), so the
+    dynamic stage must route to dotnet_analyze / windbg instead.
+    """
+    ev = (quick or {}).get("evidence") or {}
+    if not isinstance(ev, dict):
+        return False
+    for key in ("pe_parse", "pe", "threat_intel", "dotnet_analyze"):
+        v = ev.get(key)
+        if isinstance(v, dict) and v.get("is_dotnet"):
+            return True
+    dc = ev.get("diec") or {}
+    det = " ".join(str(d) for d in (dc.get("detects") or [])).lower()
+    return ".net" in det or "dotnet" in det or "msil" in det
 
 
 def _packer_signal(quick: dict | None) -> dict | None:
@@ -1155,8 +1188,9 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
     registry = ToolRegistry(sample_name, sha, cfg, mode=mode)
     history: list[dict] = []
     findings: dict[str, Any] = {}
-    state = {"calls": 0, "redundant": 0, "seen": set()}
+    state = {"calls": 0, "redundant": 0, "seen": set(), "chars": 0}
     budget = max(10, int(max_steps) * 2)
+    budget_chars = _ctx_budget_chars()
 
     def _budget_note() -> str:
         remaining = budget - state["calls"]
@@ -1184,7 +1218,14 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
             history.append({"step": len(history) + 1, "tool": name, "args": kwargs,
                             "result": result})
             findings[f"{name}_{len(history)}"] = result
-            return _truncate(json.dumps(result, default=str), 2000) + _budget_note()
+            # full-context policy: send as much of the raw tool result as the
+            # model window allows (was a hard 2000-char cap)
+            payload = json.dumps(result, default=str)
+            remaining = max(20_000, budget_chars - int(state.get("chars") or 0))
+            cap = min(240_000, remaining)
+            sent = _truncate(payload, cap)
+            state["chars"] = int(state.get("chars") or 0) + len(sent)
+            return sent + _budget_note()
 
         _runner.__name__ = name
         _runner.__doc__ = f"Run tool `{name}` on the current sample."
@@ -1196,9 +1237,16 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
     if available_tools is not None:
         names = [n for n in names if n in set(available_tools)]
     tools = [_make(n) for n in names]
+    managed = _is_managed_quick(quick)
+    dyn_names = list(DYNAMIC_TOOL_NAMES)
+    if managed:
+        # native OEP/unpack primitives do not apply to managed assemblies
+        dyn_names = [n for n in dyn_names
+                     if n not in ("x64dbg_oep", "x64dbg_unpack",
+                                  "x64dbg_crypt_dump")]
     dyn_note = ""
     if dynamic:
-        tools += [_make(n) for n in DYNAMIC_TOOL_NAMES]
+        tools += [_make(n) for n in dyn_names]
         dyn_note = """
 Dynamic debugger tools (x64dbg in the VM snapshot — bounded primitives):
 x64dbg_oep (find unpack OEP), x64dbg_wpm_dump (capture process-injected
@@ -1222,7 +1270,7 @@ dynamic tool errors, fall back to static — do not retry more than once.
     # hoping the LLM picks it (0/14 calls on a packed sample happened).
     packed_sig = _packer_signal(quick)
     unpack_prepass: dict | None = None
-    if dynamic and packed_sig:
+    if dynamic and packed_sig and not managed:
         try:
             r = registry.call("x64dbg_unpack", {})
         except Exception as e:
@@ -1241,6 +1289,10 @@ dynamic tool errors, fall back to static — do not retry more than once.
                            "artifact", "fallback_trace", "fallback_summary")
                           if k in r}
     packer_note = _packer_note(packed_sig, unpack_prepass, dynamic)
+    if managed:
+        packer_note = ("\nPACKER SIGNAL (managed): packer/compression signals on a "
+                       ".NET assembly do NOT route to native unpack - use "
+                       "dotnet_analyze for IL/metadata and windbg for dumps.")
 
     # deterministic WinDbg routing (Bug-2 fix): the agent never reached for
     # windbg_analyze_dump on its own. Run it once when the debug tools are
@@ -1302,8 +1354,12 @@ dynamic tool errors, fall back to static — do not retry more than once.
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
                 "windbg_dump": windbg_dump}
 
+    try:
+        _max_out = int(os.environ.get("WINRE_LLM_MAX_OUTPUT_TOKENS", "32768"))
+    except ValueError:
+        _max_out = 32768
     llm = ChatOpenAI(model=model, api_key=api_key or "none",
-                     base_url=api_url, temperature=0.0, max_tokens=4096)
+                     base_url=api_url, temperature=0.0, max_tokens=_max_out)
     system_prompt = f"""You are an agentic malware reverse-engineering assistant on a Windows
 FlareVM analysis pipeline. Sample: {sample_name} (SHA {sha[:16]}).
 
@@ -1436,9 +1492,9 @@ to your final answer immediately.
             continue
         mtype = getattr(msg, "type", "")
         if not tool_dump and mtype == "tool":
-            tool_dump = content.strip()[:4000]
+            tool_dump = content.strip()[:120_000]
         if not llm_text and mtype not in ("human", "tool"):
-            llm_text = content.strip()[:8000]
+            llm_text = content.strip()[:200_000]
         # strip code fences, then try each balanced {...} span
         text = _re.sub(r"```(?:json)?", "", content)
         for m in _re.finditer(r"\{[^{}]*\"verdict\"[^{}]*\}", text,
@@ -1451,7 +1507,7 @@ to your final answer immediately.
                 v = data.get("verdict") or data.get("Verdict")
                 if isinstance(v, str) and v.strip():
                     verdict = _normalize_verdict(data)
-                    llm_text = content.strip()[:8000]
+                    llm_text = content.strip()[:200_000]
                     break
         if verdict is not None:
             break
@@ -1463,7 +1519,7 @@ to your final answer immediately.
                 data = json.loads(text[start:end + 1])
                 if isinstance(data, dict) and data.get("verdict"):
                     verdict = _normalize_verdict(data)
-                    llm_text = content.strip()[:8000]
+                    llm_text = content.strip()[:200_000]
                     break
         except Exception:
             continue
@@ -1484,7 +1540,7 @@ to your final answer immediately.
                     "verdict object ONLY (keys: verdict (malicious/unknown/benign), "
                     "confidence (high/medium/low), summary, key_evidence (list of "
                     "strings)). No prose, no code fences." + _extra + "\n\n"
-                    + basis[:6000]))])
+                    + basis[:300_000]))])
                 ftext = str(getattr(fid, "content", "") or "")
                 ftext = _re.sub(r"```(?:json)?", "", ftext)
                 fm = _re.search(r"\{.*\}", ftext, _re.DOTALL)
@@ -1492,7 +1548,7 @@ to your final answer immediately.
                     fdata = json.loads(fm.group(0))
                     if isinstance(fdata, dict) and fdata.get("verdict"):
                         verdict = _normalize_verdict(fdata)
-                        llm_text = (llm_text + "\n\n[finalize] " + ftext)[:8000]
+                        llm_text = (llm_text + "\n\n[finalize] " + ftext)[:250_000]
                         fallback_reason = ""
                         break
                 fallback_reason = (f"finalize unparseable (attempt {_attempt}): "
@@ -1507,12 +1563,12 @@ to your final answer immediately.
     verdict = _apply_verdict_floor(verdict, _curated_yara_hits(quick, findings))
     if verdict is None:
         return {"verdict": "unknown", "source": "deterministic_fallback",
-                "history": history, "llm_analysis": llm_text[:4000],
+                "history": history, "llm_analysis": llm_text[:200_000],
                 "fallback_reason": fallback_reason,
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
                 "windbg_dump": windbg_dump}
     return {"verdict": verdict, "source": "llm_judge",
-            "history": history, "llm_analysis": llm_text[:8000],
+            "history": history, "llm_analysis": llm_text[:200_000],
             "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
                 "windbg_dump": windbg_dump}
 

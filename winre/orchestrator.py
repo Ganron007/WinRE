@@ -487,7 +487,7 @@ def _release_lock() -> None:
 def _exec_site_gate(kind: str, sha: str, meta: dict) -> bool:
     marker = Path(os.environ.get(
         "WINRE_SNAPSHOT_MARKER", r"C:\WinRE\.clean_snapshot"))
-    gmode = os.environ.get("WINRE_SNAPSHOT_GATE", "observe").strip().lower()
+    gmode = os.environ.get("WINRE_SNAPSHOT_GATE", "enforce").strip().lower()
     if gmode not in ("observe", "enforce"):
         gmode = "observe"
     meta["gate_mode"] = gmode

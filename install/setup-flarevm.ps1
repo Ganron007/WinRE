@@ -109,13 +109,14 @@ if (Test-Path $py) {
     # network when the local wheel set does not satisfy the module.
     $wheelDir = "C:\Tools-staged\wheels"
     # import name -> PyPI package name (needed where they differ)
-    $pipNames = @{ "z3" = "z3-solver"; "speakeasy" = "speakeasy-emulator"; "mcp_windbg" = "mcp-windbg" }
+    $pipNames = @{ "z3" = "z3-solver"; "speakeasy" = "speakeasy-emulator"; "mcp_windbg" = "mcp-windbg"; "floss" = "flare-floss" }
     # angr needs sdist-only deps (cooldict/cppheaderparser/mulpyplexer) - no
     # offline wheel set exists; the deobf helper degrades gracefully, so a
     # miss is Info, not Warn.
     $optionalMods = @("angr")
     foreach ($mod in @("frida", "flask", "pefile", "psutil", "oletools",
-                       "pypdf", "dnfile", "z3", "speakeasy", "mcp_windbg", "angr")) {
+                       "pypdf", "dnfile", "z3", "speakeasy", "mcp_windbg",
+                       "floss", "angr")) {
         & $py -c "import $mod" 2>$null
         if ($LASTEXITCODE -eq 0) { Ok "module $mod present"; continue }
         $pipName = if ($pipNames.ContainsKey($mod)) { $pipNames[$mod] } else { $mod }
@@ -124,6 +125,13 @@ if (Test-Path $py) {
             if (Test-Path $wheelDir) {
                 & $py -m pip install --quiet --no-index --find-links $wheelDir $pipName 2>$null
                 & $py -c "import $mod" 2>$null
+                if ($LASTEXITCODE -ne 0) {
+                    # sdist-only deps (e.g. flare-floss -> binary2strings, halo)
+                    # cannot resolve build isolation offline: reuse the box's
+                    # setuptools/pybind11 instead of the network.
+                    & $py -m pip install --quiet --no-index --find-links $wheelDir --no-build-isolation $pipName 2>$null
+                    & $py -c "import $mod" 2>$null
+                }
             }
             if ($LASTEXITCODE -ne 0) { & $py -m pip install --quiet $pipName }
             & $py -c "import $mod" 2>$null
@@ -550,6 +558,33 @@ if (Test-Path $x64) {
         }
     }
 } else { Manual "REQUIRED (free): install x64dbg to C:\Tools\x64dbg - run the FlareVM base installer (brings it) or download the release; then re-run setup. docs\PREREQUISITES.md." }
+
+# --- x64dbg MCP :9094 exposure -------------------------------------------------
+# The plugin binds 0.0.0.0 by default. Binding 127.0.0.1 would break the
+# control plane (it drives :9094 from the host over the LAN), so the port is
+# restricted with the Windows Firewall instead: ONE inbound allow rule scoped
+# to the lab subnet - everything else stays blocked by the default policy.
+# For an air-gapped box that only debugs locally, set
+#   <x64dbgRoot>\mcp_config.json  -> {"IpAddress":"127.0.0.1"}
+# and drop the rule below.
+$fwName = "WinRE x64dbg MCP (lab subnet)"
+if (-not $CheckMode) {
+    $existing = Get-NetFirewallRule -DisplayName $fwName -ErrorAction SilentlyContinue
+    if (-not $existing) {
+        New-NetFirewallRule -DisplayName $fwName -Direction Inbound -Action Allow `
+            -Protocol TCP -LocalPort 9094 -RemoteAddress LocalSubnet `
+            -Profile Any -ErrorAction SilentlyContinue | Out-Null
+        if (Get-NetFirewallRule -DisplayName $fwName -ErrorAction SilentlyContinue) {
+            Ok "firewall: TCP 9094 allowed from LocalSubnet only"
+        } else {
+            Warn "firewall rule for :9094 not created (run setup elevated)"
+        }
+    } else {
+        Ok "firewall: $fwName present"
+    }
+} else {
+    Act "ensure firewall rule '$fwName' (TCP 9094, LocalSubnet only)"
+}
 
 foreach ($t in @(@("FakeNet-NG (REQUIRED free)", @("C:\Tools\fakenet\fakenet3.5\fakenet.exe"), @("fakenet.exe")),
                  @("Procmon (REQUIRED free)", @("C:\Tools\sysinternals\Procmon64.exe"), @("Procmon64.exe")),

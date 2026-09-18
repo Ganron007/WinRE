@@ -146,20 +146,28 @@ def floss(sample: str, timeout: int = 900) -> dict:
     exe = Path(PY).parent / "Scripts" / "floss.exe"
     roaming = Path.home() / "AppData" / "Roaming" / "Python" / "Python313" / "Scripts" / "floss.exe"
     standalone = Path(r"C:\Tools\FLOSS\floss.exe")
+    # JSON flag differs by distribution: the pip/module CLI takes -j, the
+    # FlareVM standalone accepted --json. Try both, first rc==0 wins.
     if has_mod and exe.is_file():
-        cmd = [str(exe), sample, "--json"]
+        base = [str(exe)]
     elif has_mod and roaming.is_file():
-        cmd = [str(roaming), sample, "--json"]
+        base = [str(roaming)]
     elif standalone.is_file():
-        cmd = [str(standalone), "--json", sample]
+        base = [str(standalone)]
     elif has_mod:
-        cmd = [PY, "-c",
-               "import sys; sys.argv=['floss', sys.argv[1], '--json']; "
-               "from floss.main import main; exit(main())",
-               sample]
+        base = [PY, "-c",
+                "import sys; sys.argv=['floss', sys.argv[1], '-j']; "
+                "from floss.main import main; exit(main())"]
     else:
         return _skipped("floss", "no python module and no C:\\Tools\\FLOSS\\floss.exe")
-    rc, out, err = _run(cmd, timeout)
+    rc, out, err = 1, "", ""
+    for flag in ("-j", "--json"):
+        if base[0] == PY:
+            rc, out, err = _run(base + [sample], timeout)
+        else:
+            rc, out, err = _run(base + [flag, sample], timeout)
+        if rc == 0 and (out or "").strip().startswith("{"):
+            break
     if rc != 0:
         return {"ok": False, "error": (err or out)[-300:], "tool": "floss"}
     try:

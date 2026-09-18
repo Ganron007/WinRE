@@ -434,7 +434,15 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                             elapsed_s=round(time.time() - t0, 1),
                             gate=gate.get("gate"))
 
-    cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} '
+    # Gate mode is a CONTROL-PLANE decision: forward it (and the marker path)
+    # to the VM helper so an operator's observe/off override works end-to-end.
+    # Without this the helper's own default (enforce) blocks benign test
+    # loops even when the host explicitly asked for observe.
+    from . import snapshot_gate as _sg
+    cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "'
+           f"$env:WINRE_SNAPSHOT_GATE='{_sg.mode()}'; "
+           f"$env:WINRE_SNAPSHOT_MARKER='{_sg.MARKER}'; "
+           f'& {py} '
            f'{cfg["remote_pipeline"]}\\winre\\_remote_dynamic_helper.py '
            f'{sha} "{remote_sample}" {int(max_seconds)}'
            f'{" --pesieve" if enable_pesieve else ""}'
