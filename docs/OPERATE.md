@@ -40,7 +40,9 @@ localhost-bound on the VM and probed over SSH.
 
 **Invariants:** dynamic is opt-in and always LAST; `static_yara_wins` - dynamic corroborates, never clears a static verdict; every run is audited (`audit.json`, `truly_green`). The snapshot gate defaults to **`enforce`** (a detonation consumes the marker; the next dynamic run is refused until the snapshot is reverted and setup re-run). Set `WINRE_SNAPSHOT_GATE=observe` only for intentional benign test loops. A refused dynamic run writes a fresh `dynamic/STAGE.json` (`ok=false`, "blocked by snapshot gate") and the audit records `dynamic_blocked: true` - stale evidence can never masquerade as this run's detonation.
 
-**Threat intel (triage):** the offline `threat_intel` tool identifies known tools (Authenticode signer, VersionInfo, security-tool markers) and merges Malcat Kesakode verdicts when the MCP is keyed. Kesakode is effectively unavailable in this deployment (no `-k` on the VM by policy; headless offline Kesakode needs an OEM license - see [`MALCAT.md`](MALCAT.md)). Planned: VirusTotal **hash-only** lookup on the control plane at triage.
+**Threat intel (triage):** the offline `threat_intel` tool identifies known tools (Authenticode signer, VersionInfo, security-tool markers) and merges Malcat Kesakode verdicts when the MCP is keyed. Kesakode is effectively unavailable in this deployment (no `-k` on the VM by policy; headless offline Kesakode needs an OEM license - see Malcat's public docs
+<https://doc.malcat.fr/analysis/kesakode.html>). Planned: VirusTotal
+**hash-only** lookup on the control plane at triage.
 
 ## Where the LLM lives (driver owns the LLM)
 
