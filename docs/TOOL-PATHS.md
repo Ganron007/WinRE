@@ -19,7 +19,8 @@ the air-gapped VM.
 |---|---|---|---|---|
 | Ghidra 11/12.x + CADRE loader `[user]` | `C:\ProgramData\chocolatey\lib\ghidra\tools\ghidra_*_PUBLIC` (also `C:\Tools\ghidra_*_PUBLIC`; glob auto-detect) | `GHIDRA_INSTALL_DIR` (pyghidra fast-path) | ghidra_query, ghidra_decompile, signature SQL | deep skips ghidra tools → static weakens, honest skip |
 | capa + mandiant rules `[base]` | `C:\Tools\capa\capa.exe` + `C:\Tools\capa-rules` | — | capability clusters (verdict driver) | capa evidence absent (pip fallback auto-tried) |
-| floss [base]/[setup] | lare-floss pip module (installed offline from staged wheels) or C:\\Tools\\FLOSS\\floss.exe | - | decoded/stack strings | floss evidence absent |
+| floss [base]/[setup] | 
+lare-floss pip module (installed offline from staged wheels) or C:\\Tools\\FLOSS\\floss.exe | - | decoded/stack strings | floss evidence absent |
 | Detect It Easy `[base]`/`[stage]` | `C:\Tools\die\diec.exe` | — | packer/compiler taxonomy (decrypt-gate) | taxonomy falls back to entropy-only |
 | yara-x `[base]` | `C:\Tools\yara-x\yr.exe` | — | curated-ruleset scan (verdict driver) | yara-hit rule can't fire |
 | curated YARA rules `[setup]` | `C:\Tools\yara-rules` (`*.yar`) | `YARA_RULES_DIR` | family matches | yarascan reports `no rules staged` |
@@ -28,9 +29,9 @@ the air-gapped VM.
 | scdbg `[base]` | `C:\Tools\scdbg\scdbg.exe` | — | shellcode extraction emulation | shellcode_extract degrades |
 | UPX `[base]` | `C:\Tools\upx\upx-*\upx.exe` (versioned dir glob) | — | `upx_unpack` (static), UPX-packed test fixtures | upx_unpack skips honestly |
 | goresym `[user]`/`[stage]` | `C:\Tools\GoReSym\GoReSym.exe` | — | Go binaries only | goresym tool skips (Go detection gates it) |
-| ILSpy CLI `[user]` | `%USERPROFILE%\.dotnet\tools\ilspycmd.exe` | — | .NET decompile | dotnet_analyze degrades to metadata-only |
+| ILSpy CLI `[user]`/`[base]` | `ilspycmd` on PATH (`C:\ProgramData\chocolatey\bin\ilspycmd.exe`, FlareVM) or `%USERPROFILE%\.dotnet\tools\ilspycmd.exe` or `C:\Tools\ilspycmd` | `WINRE_ILSPY` | .NET decompile | dotnet_analyze degrades to metadata-only |
 | IDA Pro/Free + idasql `[user]` | `C:\Program Files\IDA Professional 9.3` (also probed: IDA Free 9.3/8.3, `C:\Tools\IDA*`) | **`WINRE_IDA_DIR`** (dir with `idat.exe`); **`IDASQL`** / `WINRE_IDASQL` (idasql.exe full path) | ida_query, .i64 creation | License states: **pro** (idapro*.hexlic in install dir, no AppData free license → fully supported) · **shadowed** (Pro present but a stale FREE license in the user profile wins license resolution → move the stale file aside, backup kept) · **free** (no Pro anywhere → instant honest skip + actionable message, GUI-only) · **missing** (setup verify fails open, Ghidra canonical) |
-| Malcat (portable) `[user]` | `C:\Tools\malcat\bin` (also probed: `C:\Program Files\Malcat\bin`, `%USERPROFILE%\Downloads\malcat\bin`) — must contain `bin\malcat.mcp.py` | `MALCAT_BIN_DIR`; license `MALCAT_LICENSE` (default `%APPDATA%\Malcat\license.dat`) | quick triage views, agent malcat tools, unpack compare | all malcat evidence skips honestly; Ghidra + x64dbg carry the analysis. Kesakode is not used (no license key on the VM; headless *offline* Kesakode needs an OEM license) - threat intel comes from signer/markers |
+| Malcat (portable) `[user]` | `C:\Tools\malcat\bin` (also probed: `C:\Program Files\Malcat\bin`, `%USERPROFILE%\Downloads\malcat\bin`) — must contain `bin\malcat.mcp.py` | `MALCAT_BIN_DIR` (`MALCAT_LICENSE` optional - offline headless analysis needs no license file; `MALCAT_KEY`/`-k` enables ONLINE Kesakode only) | quick triage views, agent malcat tools, unpack compare | all malcat evidence skips honestly; Ghidra + x64dbg carry the analysis. Kesakode is not used (no license key on the VM; headless *offline* Kesakode needs an OEM license) - threat intel comes from signer/markers |
 
 ## Dynamic / detonation
 

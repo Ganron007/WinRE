@@ -114,14 +114,16 @@ def health() -> dict:
         "key_envfile": bool(_load_env_file().get("MALCAT_KEY")),
         "python": shutil.which("python") or shutil.which("python.exe"),
     }
-    out["ok"] = out["malcat_mcp_exists"] and (out["key_env"] or out["key_envfile"])
+    # The MALCAT_KEY is ONLY for ONLINE Kesakode. Headless offline analysis
+    # works without it (verified live 2026-09-19) - do not gate on the key.
+    out["kesakode_online"] = bool(out["key_env"] or out["key_envfile"])
+    out["ok"] = out["malcat_mcp_exists"]
     if not out["ok"]:
-        missing = []
-        if not out["malcat_mcp_exists"]:
-            missing.append(f"malcat.mcp.py missing at {MALCAT_MCP}")
-        if not (out["key_env"] or out["key_envfile"]):
-            missing.append("MALCAT_KEY not in env and not in C:\\WinRE\\.env")
-        out["error"] = "; ".join(missing)
+        out["error"] = f"malcat.mcp.py missing at {MALCAT_MCP}"
+    elif not out["kesakode_online"]:
+        out["note"] = ("offline only - no MALCAT_KEY: Kesakode lookups are "
+                       "unavailable (headless offline Kesakode needs an OEM "
+                       "license; online needs -k with a running license)")
     return out
 
 
@@ -129,7 +131,7 @@ def health() -> dict:
 # Analyze
 # ---------------------------------------------------------------------------
 def _build_argv(views: list[str], limits: dict, path: Path,
-                analysis_id: int) -> list[str]:
+                analysis_id: int, key: str | None = None) -> list[str]:
     argv = [
         sys.executable, str(MALCAT_MCP),
         "--path", str(path),
@@ -138,13 +140,79 @@ def _build_argv(views: list[str], limits: dict, path: Path,
     ]
     for k, v in limits.items():
         argv += [f"--limit-{k}", str(v)]
+    if key:
+        argv += ["-k", key]  # ONLINE Kesakode only
     return argv
+
+
+def _extract_mcp_json(result: dict | None) -> dict:
+    """Parse a malcat.mcp.py tool result into a dict.
+
+    Newer MCP servers return `structuredContent`; older ones put JSON in
+    `content[].text`."""
+    if not isinstance(result, dict):
+        return {}
+    sc = result.get("structuredContent")
+    if isinstance(sc, dict) and sc:
+        return sc
+    for part in (result.get("content") or []):
+        if isinstance(part, dict) and part.get("type") == "text":
+            try:
+                d = json.loads(part.get("text") or "")
+                if isinstance(d, dict):
+                    return d
+            except json.JSONDecodeError:
+                continue
+    return {}
+
+
+def _ensure_server(timeout_s: int = 30) -> tuple[bool, str | None]:
+    """Start the Malcat headless MCP server (:9009) when it is not running."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from winre.mcp.malcat_client import MalcatClient
+    if MalcatClient(default_timeout=5).is_up():
+        return True, None
+    key = _resolve_key()
+    argv = [sys.executable, str(MALCAT_MCP), "-p", "9009"]
+    if key:
+        argv += ["-k", key]
+    flags = 0
+    if os.name == "nt":
+        flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
+                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    try:
+        subprocess.Popen(argv, creationflags=flags)
+    except Exception as e:  # noqa: BLE001
+        return False, f"could not start malcat.mcp.py: {e}"
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        time.sleep(1)
+        if MalcatClient(default_timeout=3).is_up():
+            return True, None
+    return False, "malcat MCP :9009 did not come up"
+
+
+_MALCAT_VIEW_METHODS = {
+    "anomalies": "anomalies_list",
+    "yara_hits": "yara_list",
+    "strings": "strings_top_list",
+    "functions": "fns_top_list",
+    "constants": "constants_list",
+    "carved": "file_list_carved",
+    "virtual_files": "file_list_virtual_files",
+    "imports": "analyse_infos",
+}
 
 
 def malcat_analyze(path: Path, views: list[str] | None = None,
                    profile: str = "triage", limits: dict | None = None,
                    analysis_id: int = 0, timeout: int = 300) -> dict:
-    """Run malcat.mcp.py once and return its JSON."""
+    """Analyze through the Malcat headless MCP server (:9009).
+
+    MALCAT_KEY is ONLY for ONLINE Kesakode - offline headless analysis works
+    without it. `malcat.mcp.py` is a server (not a one-shot CLI), so this
+    wrapper speaks JSON-RPC exactly like the pipeline's MalcatClient.
+    """
     h = health()
     if not h["ok"]:
         return {"ok": False, "error": h.get("error"),
@@ -152,73 +220,38 @@ def malcat_analyze(path: Path, views: list[str] | None = None,
     if not path.is_file():
         return {"ok": False, "error": f"sample missing: {path}",
                 "analysis_id": analysis_id, "profile": profile}
+    ok, err = _ensure_server()
+    if not ok:
+        return {"ok": False, "error": err, "analysis_id": analysis_id,
+                "profile": profile}
 
-    if views is None:
-        cfg = PROFILES.get(profile, PROFILES["triage"])
-        views = cfg["views"]
-    if limits is None:
-        limits = PROFILES.get(profile, PROFILES["triage"]).get("limits", {})
-
-    key = _resolve_key()
-    env = os.environ.copy()
-    if key:
-        env["MALCAT_KEY"] = key
-
-    argv = _build_argv(views, limits, path, analysis_id)
     t0 = time.time()
-    try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
-                              encoding="utf-8", errors="replace", env=env)
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"malcat timeout {timeout}s",
+    from winre.mcp.malcat_client import MalcatClient
+    client = MalcatClient(default_timeout=timeout)
+    r = client.analyse_file(str(path))
+    if not r.get("ok"):
+        return {"ok": False, "error": r.get("error"),
                 "analysis_id": analysis_id, "profile": profile,
                 "elapsed_s": round(time.time() - t0, 1)}
-    except FileNotFoundError as e:
-        return {"ok": False, "error": f"python or malcat.mcp.py missing: {e}",
-                "analysis_id": analysis_id, "profile": profile}
-
-    if proc.returncode != 0:
-        return {"ok": False, "returncode": proc.returncode,
-                "error": (proc.stderr or proc.stdout)[-600:],
-                "analysis_id": analysis_id, "profile": profile,
-                "elapsed_s": round(time.time() - t0, 1)}
-
-    # malcat.mcp.py emits one JSON blob (text/plain or application/json);
-    # take the last { ... } block on stdout.
-    payload = None
-    buf = []
-    for line in (proc.stdout or "").splitlines():
-        if line.strip().startswith("{"):
-            buf = [line]
-        elif buf:
-            buf.append(line)
-            if line.strip().endswith("}"):
-                try:
-                    payload = json.loads("\n".join(buf))
-                    buf = []
-                except json.JSONDecodeError:
-                    pass
-    if payload is None:
-        # fallback: whole-stdout
+    summary = _extract_mcp_json(r.get("result"))
+    aid = summary.get("analysis_id", analysis_id)
+    want = views or PROFILES.get(profile, PROFILES["triage"])["views"]
+    out_views: dict = {}
+    for v in want:
+        meth = _MALCAT_VIEW_METHODS.get(v)
+        fn = getattr(client, meth, None) if meth else None
+        if fn is None:
+            continue
         try:
-            payload = json.loads(proc.stdout)
-        except json.JSONDecodeError:
-            return {"ok": False, "error": "malcat.mcp.py did not emit JSON",
-                    "stdout_tail": (proc.stdout or "")[-400:],
-                    "analysis_id": analysis_id, "profile": profile,
-                    "elapsed_s": round(time.time() - t0, 1)}
-
-    payload.setdefault("ok", True)
-    payload.setdefault("analysis_id", analysis_id)
-    payload.setdefault("profile", profile)
-    payload.setdefault("elapsed_s", round(time.time() - t0, 1))
-    # annotate entropy per the malcat output schema
-    if "file_summary" in payload and "entropy" not in payload.get("views", {}):
-        try:
-            payload["entropy_annotated"] = True
-        except Exception:
-            pass
-    return payload
+            rr = fn(str(path))
+        except Exception as e:  # noqa: BLE001
+            out_views[v] = {"error": str(e)[:200]}
+            continue
+        out_views[v] = (_extract_mcp_json(rr.get("result"))
+                        if rr.get("ok") else {"error": rr.get("error")})
+    return {"ok": True, "analysis_id": aid, "profile": profile,
+            "file_summary": summary, "views": out_views,
+            "elapsed_s": round(time.time() - t0, 1)}
 
 
 # ---------------------------------------------------------------------------

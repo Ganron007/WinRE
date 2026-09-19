@@ -135,7 +135,11 @@ class MalcatClient:
         return self.call("analyse_file", args)
 
     def analyse_infos(self, path: str) -> dict:
-        return self.call("analyse_infos", {"path": path})
+        # view tools take {"analysis_id"}, not {"path"} (malcat.mcp.py)
+        aid, err = self._resolve_aid(path)
+        if err is not None:
+            return err
+        return self.call("analyse_infos", {"analysis_id": aid})
 
     def analyse_carved_file(self, path: str, index: int) -> dict:
         return self.call("analyse_carved_file", {"path": path, "index": index})
@@ -144,10 +148,16 @@ class MalcatClient:
         return self.call("analyse_virtual_file", {"path": path, "subfile": subfile})
 
     def file_list_carved(self, path: str) -> dict:
-        return self.call("file_list_carved", {"path": path})
+        aid, err = self._resolve_aid(path)
+        if err is not None:
+            return err
+        return self.call("file_list_carved", {"analysis_id": aid})
 
     def file_list_virtual_files(self, path: str) -> dict:
-        return self.call("file_list_virtual_files", {"path": path})
+        aid, err = self._resolve_aid(path)
+        if err is not None:
+            return err
+        return self.call("file_list_virtual_files", {"analysis_id": aid})
 
     def fn_decompile(self, path: str, address: int) -> dict:
         # NOTE: malcat.mcp.py fn_decompile expects {"analysis_id", "ea"}.
