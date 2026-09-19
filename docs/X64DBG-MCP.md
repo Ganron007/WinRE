@@ -1,10 +1,13 @@
-﻿# x64dbg-MCP — Windows (FlareVM)
+# x64dbg-MCP — Windows (FlareVM)
 
 > **Source:** NOT vendored here — fetch upstream (MIT): `https://github.com/duty1g/x64dbg-mcp-server`
 > into `integrations/x64dbg-mcp-server-main/` (gitignored), then apply our
 > one-line fix from `tools/x64dbg-mcp-winre.patch` (surfacing hardware-BP
 > failures as errors instead of success text).
 > **Binary:** Zig single-file plugin `x64dbg-MCP-Server.dp64/.dp32` (`build.zig:5`); setup-flarevm.ps1 auto-provisions the toolchain from `C:\Tools-staged\zig-*.zip` (zig 0.14+, `build.zig.zon` minimum) and builds from `C:\WinRE\integrations\x64dbg-mcp-server*`.
+> **Status:** implemented - build/deploy is automated by `install/setup-flarevm.ps1`
+> (both arches) and `:9094` is scoped to `LocalSubnet` by a firewall rule.
+> **Audience:** integrators and agent authors using the debugger MCP.
 
 ## 1. What it is
 
@@ -64,7 +67,7 @@ LLM: DumpModule module=foo filePath=C:\WinRE\logs\<sha>\x64dbg\dump\foo.dmp → 
 LLM: SetBreakpoint target=0x401000 → run → WaitForPause (30s) → GetAllRegisters → ReadMemory address=cip size=64
 ```
 
-WinRE `winre/mcp/x64dbg_client.py` wraps this HTTP — see `docs/internal/ARCHITECTURE.md:4` transport.
+WinRE `winre/mcp/x64dbg_client.py` wraps this HTTP — see [`SSH-CONTRACT.md`](SSH-CONTRACT.md) section 4 (MCP over HTTP).
 
 > **WinRE pipeline note (debug loops):** the deep unpack prepass runs
 > `oep_by_section → oep_by_esp` (explicit entry BP, stable-pause gate,

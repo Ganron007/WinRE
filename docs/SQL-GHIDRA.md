@@ -1,8 +1,9 @@
-﻿# SQL-Ghidra — Windows (FlareVM) — REAL ENGINE
+# SQL-Ghidra — Windows (FlareVM) — REAL ENGINE
 
 > **Status: REAL (2026-09-15).** SQL-first Ghidra access, mirroring RevAI's
 > architecture. There is **no fallback stub** — without the engine, queries
 > fail loudly.
+> **Audience:** integrators querying Ghidra over SQL.
 
 ```
 tools/flare_ghidra_sql.py  (canonical queries)
@@ -50,7 +51,7 @@ Staged offline copies live in `internal\reapply\sql\` (`LibGhidraHost.zip`,
    `--build --config Release --target install` → `C:\Tools\libghidra-sdk`.
 5. ghidrasql: patch its `CMakeLists.txt` httplib block to
    `add_subdirectory(<cpp-httplib>)` (or pre-create the target) and the
-   `cpp_httplib` declare to `SOURCE_DIR <cpp-httplib>`. A stale-RevEng
+   `cpp_httplib` declare to `SOURCE_DIR <cpp-httplib>`. A stale third-party
    snapshot fails to compile (expects `HeadlessOptions`); ghidrasql **main**
    is required. Configure with `-DGHIDRASQL_LIBXSQL_DIR=<libxsql main>`
    `-DGHIDRASQL_LIBGHIDRA_DIR=<libghidra/cpp>` `-DGHIDRASQL_WITH_MCP=OFF`

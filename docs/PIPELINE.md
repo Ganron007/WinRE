@@ -5,10 +5,11 @@
 > (`logs/<sha>/<static|agentic>/`).
 > WinRE is the Windows FlareVM pipeline: static AND dynamic AND interactive
 > debugger on one host, all local, LLM interprets evidence only.
+> **Audience:** operators and integrators (stages, modes, CLI).
 
 ## Static-first, dynamic opt-in + segregated (design)
 
-**Static is the default and mirrors RevEng/RevAI exactly.** Dynamic is a
+**Static is the default and mirrors the RevAI static contract exactly.** Dynamic is a
 SEPARATE, opt-in phase that runs LAST from a restored (clean) VM — never in
 the middle of static (detonation would contaminate the VM the deep static
 agent runs on). `static_yara_wins`: dynamic corroborates, never clears.
@@ -24,7 +25,7 @@ DEFAULT (no env):   pipeline.py <sample> [--mode agentic|static]  → STATIC ONL
                     reruns overwrite their section, cross-mode coexists).
 
 OPT-IN DYNAMIC:     WINRE_ENABLE_DYNAMIC=1 pipeline.py <sample> --dynamic
-                    (or RevEng triggers the legacy SSH orchestrator)
+                    (or a remote caller triggers the legacy SSH orchestrator)
                     static completes FIRST → detonation on restored VM →
                     FakeNet+Procmon+Frida+pe-sieve → dynamic pack pulled into
                     the run's mode section → static_yara_wins →
@@ -33,11 +34,11 @@ OPT-IN DYNAMIC:     WINRE_ENABLE_DYNAMIC=1 pipeline.py <sample> --dynamic
 
 Why: a detonation dirties the VM (Run keys, dropped files, hooks). Running
 the deep static agent after detonation would analyze on contaminated ground.
-RevEng/RevAI (Linux static) can drive WinRE SQL over SSH; WinRE owns dynamic.
+RevAI (Linux static) can drive WinRE SQL over SSH; WinRE owns dynamic.
 
 ## Why WinRE beats static-only pipelines
 
-RevEng/RevAI run static tools on Linux and hand the evidence to an LLM. They
+RevAI runs static tools on Linux and hands the evidence to an LLM. They
 cannot: detonate on Windows, hook APIs with Frida, capture Procmon/network,
 drive x64dbg/WinDbg/Malcat over MCP, or unpack interactively. WinRE does all
 of it on one host — static SQL, dynamic detonation (gated), and agentic

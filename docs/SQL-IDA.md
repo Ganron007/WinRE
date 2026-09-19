@@ -4,6 +4,7 @@
 > free `idasql` engine runs against the `.i64` and is driven by
 > `tools/ida_sql_client.py`. No stub, no license gate — `idasql` is a public
 > release (`github.com/allthingsida/idasql`), version-matched to the IDA build.
+> **Audience:** integrators querying IDA over SQL.
 
 ```
 tools/ida_sql_client.py  (IdaSqlClient)

@@ -1,5 +1,7 @@
 # Prerequisites
 
+> **Scope:** what must exist before `install/setup-flarevm.ps1` runs. **Audience:** deployers.
+
 Everything needed before `install/setup-flarevm.ps1` can bootstrap a WinRE
 FlareVM. Read together with [`INSTALL.md`](INSTALL.md).
 

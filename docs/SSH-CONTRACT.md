@@ -1,6 +1,6 @@
-# WinRE SSH Contract — for RevEng / RevAI callers
+# WinRE SSH Contract — for remote callers (RevAI and other control planes)
 
-> **Audience:** sibling pipelines (e.g. RevEng, RevAI) invoking WinRE
+> **Audience:** remote pipelines (e.g. RevAI) invoking WinRE
 > (FlareVM) over SSH for static + dynamic analysis.
 > **Status:** verified live; the SSH-exec path is the most-tested surface.
 > **LLM / remote-driver wiring:** if the driver runs on a RevAI (Remnux)
@@ -150,9 +150,11 @@ Notes:
 
 | Server | Port | Bind | Reachable from caller VM? |
 |---|---|---|---|
-| x64dbg-MCP | 9094 | `0.0.0.0` | **Yes, direct** |
-| idasql_server | 19300 | `127.0.0.1` | No — SSH-exec CLI or `ssh -L` tunnel |
-| ghidra serve | 19301 | `127.0.0.1` | No — SSH-exec CLI or `ssh -L` tunnel |
+| x64dbg-MCP | 9094 | `0.0.0.0` (firewall: LocalSubnet only) | **Yes, direct** |
+| idasql HTTP | 19300 | `127.0.0.1` | No — SSH-exec CLI or `ssh -L` tunnel |
+| ghidrasql HTTP | 18080 | `127.0.0.1` | No — SSH-exec CLI or `ssh -L` tunnel |
+| LibGhidraHost RPC | 18090 | `127.0.0.1` | No — SSH-exec CLI or `ssh -L` tunnel |
+| legacy ghidra serve | 19301 | `127.0.0.1` | No — optional legacy mode |
 | malcat serve | 9009 | `127.0.0.1` | No — SSH-exec CLI or `ssh -L` tunnel |
 | mcp-windbg | 9097 | `127.0.0.1` | No — SSH-exec CLI or `ssh -L` tunnel |
 
@@ -173,7 +175,7 @@ from the caller to bring it up on demand, or start it first:
 | `session load failed` | no `SESSIONS_DIR/<sha>.json` or bad `sample_path`; check env overrides |
 | `sample missing` | sample not present on the **caller** (ssh mode scps it up) |
 | `job_timeout` / SSH timeout | raise `--max-seconds`; budget is `max_seconds+300`; check hung tools via `taskkill` block |
-| `GhidraSql.java did not emit JSON` | usually a bad SQL string; verify against canonical `@funcs/@imports/@strings` first |
+| `ghidrasql SQL error: no such column ...` | bad SQL/column name; canonical tables are `funcs(name, addr, size)` / `imports` / `strings(content, addr)` (see [SQL-GHIDRA.md](SQL-GHIDRA.md)) |
 | idasql query hangs | known flakiness on this build; retry once, else fail open and rely on Ghidra |
 | `tools/list` refused on :9094/:9097 | MCP not running — start via `start_servers.ps1`, then retry |
 | `FROM was unexpected at this time` | SQL passed as bare argv to a `.bat` — always go through the wrappers |

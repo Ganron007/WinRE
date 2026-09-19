@@ -32,7 +32,7 @@ It runs where Windows malware lives: on a [FlareVM](https://github.com/mandiant/
 **WinRE** is the Windows-side of malware analysis, static and dynamic, with a dynamic remote driver for the RevAI Linux pipeline. Work that must run on Windows stays on Windows: SQL-first Ghidra/IDA querying, in-VM dynamic detonation, and debugger automation over MCP. The Linux side (RevAI) stays headless and static-first; the contract between them is **files, not shared process** — a versioned artifact pack in `logs/<sha>/<mode>/dynamic/` that RevAI reads for corroboration.
 
 - **Deterministic-first detonation** — a single PowerShell job stages FakeNet-NG (network sink), Procmon (file/reg/process events), Frida (API trace with string/sockaddr decode), and optional pe-sieve + hollows_hunter (injection/hollowing dumps). The LLM can only interpret what these tools emitted — it never runs the sample.
-- **SQL-first Windows RE** — Ghidra (`analyzeHeadless` + SQL post-script) is the primary engine and always present; IDA Pro (`idasql`) and Binary Ninja are optional upgrades that plug into the same SQL surface when installed.
+- **SQL-first Windows RE** — Ghidra is the primary engine through the real **LibGhidraHost + `ghidrasql`** SQL server (`ghidra_sql_client.py`); IDA Pro plugs into the same surface via **`idasql`** (`ida_sql_client.py`). No hand-rolled analyzer post-scripts — the engines are verified live by `install/verify-flarevm.ps1`.
 - **Debugger MCP** — the vendored 71-tool x64dbg MCP server (Zig, MIT) for live control, plus `mcp-windbg` (10-tool, MIT) for passive crash-dump/memory-image analysis over the same JSON-RPC HTTP plane — so an LLM agent can load a binary, find the OEP, dump modules, and triage the captured memory dumps.
 - **Honest artifact contract** — every run emits `META.json` (schema-versioned), Frida/Procmon/network/memory artifacts, and `ANALYST-NEXT.md` marking which next steps are **analyst-only**. Dynamic evidence corroborates but **never clears** high-signal static YARA (`static_yara_wins`).
 
@@ -48,7 +48,7 @@ FlareVM (Windows 10 + Flare-VM)                       Remnux (Linux, RevAI)
 C:\samples\<sha>.exe  ◄──── analyst copies to both ──►  /opt/samples/<sha>/
         │                                                  │
         ├─ tools/flare_ghidra_sql.py ── analyzeHeadless ────┘  static/LLM pipeline
-        │     └─ GhidraSql.java (SQL post-script)           (reads logs/<sha>/<mode>/dynamic/
+        │     └─ ghidrasql (LibGhidraHost SQL)           (reads logs/<sha>/<mode>/dynamic/
         ├─ tools/flarevm_ida_query.py ── idasql.exe          as corroboration only)
         ├─ tools/flarevm_bn_query.py ── Binary Ninja API
         │
@@ -66,11 +66,11 @@ C:\samples\<sha>.exe  ◄──── analyst copies to both ──►  /opt/sam
                        └─ SMB → Remnux artifact share (read-only there)
 ```
 
-- **SQL services** — `idasql_server.py` (:19300) and `flare_ghidra_sql.py --serve` (:19301) expose `/query` so a remote agent can query Windows databases over HTTP.
+- **SQL services** — `idasql` HTTP (:19300) and `ghidrasql` HTTP (:18080) + LibGhidraHost RPC (:18090) expose `/query` so a remote agent can query Windows databases over HTTP; WinRE's SQL clients own server lifecycle (per-project reuse registry + end-of-run sweep).
 - **Debugger MCP** — `x64dbg-MCP` (:9094 x64 / :9095 x86) and `mcp-windbg` (:9097). Same JSON-RPC shape on every port: `POST / {"jsonrpc":"2.0","method":"tools/call","params":{"name":...,"arguments":{...}}}`.
-- **Artifact contract** — `logs/<sha>/<mode>/dynamic/` is versioned (internal: `docs/internal/ARCHITECTURE.md`); RevAI reads it with `load_dynamic_pack()` and never writes into it.
+- **Artifact contract** — `logs/<sha>/<mode>/dynamic/` is versioned (see [`docs/EVIDENCE.md`](docs/EVIDENCE.md)); RevAI reads it with `load_dynamic_pack()` and never writes into it.
 
-Full breakdown: `docs/internal/ARCHITECTURE.md` (internal) · transports + ports: `docs/internal/VM-ACCESS.md` (internal) · tool layout: `docs/internal/TOOL-INVENTORY.md` (internal).
+Full breakdown: [`docs/EVIDENCE.md`](docs/EVIDENCE.md) - transports + ports: [`docs/SSH-CONTRACT.md`](docs/SSH-CONTRACT.md) - tool layout: [`docs/TOOL-PATHS.md`](docs/TOOL-PATHS.md).
 
 ---
 
@@ -118,8 +118,8 @@ ELF samples are rare on Windows; the orchestrator dispatches them to the Linux-s
 * **Resources**: 8 GB RAM minimum (16 GB recommended); ≥60 GB disk
 * **Python**: 3.11+ (`frida` for the tracer, `flask` for the SQL/HTTP servers)
 * **Isolated lab network** — host-only VM network, no public internet
-* **Optional tools**: IDA Pro 9.x (for `idasql`), Malcat (commercial license), pe-sieve (`choco install pe-sieve`), Ghidra 12.x extracted to `C:\tools\`
-* **Linux peer**: RevAI/RevEng pipeline on Remnux (optional — WinRE runs standalone; the artifact share is the only coupling)
+* **Optional tools**: IDA Pro 9.x (for `idasql`), Malcat (commercial license), pe-sieve (`choco install pe-sieve`); Ghidra ships with FlareVM (a chocolatey install is detected automatically)
+* **Linux peer**: the RevAI pipeline on Remnux (optional — WinRE runs standalone; the versioned artifact pack is the only coupling)
 
 ---
 
@@ -143,8 +143,10 @@ python C:\WinRE\winre\orchestrator.py <sha256> --mode local --max-seconds 45
 
 # 5. Debugger MCP (x64dbg)
 #    build once:    powershell -File C:\WinRE\tools\build_x64dbg_mcp.ps1
-#    deploy:        xcopy /E dist\x64\plugins\x64dbg-MCP-Server.dp64 C:\Tools\x64dbg\release\x64\plugins\
-#    then in x64dbg: Plugins > Configure MCP Server > 0.0.0.0:9094
+#    deploy BOTH arches: dist\x64\plugins\x64dbg-MCP-Server.dp64 -> release\x64\plugins\
+#                       dist\x32\plugins\x64dbg-MCP-Server.dp32 -> release\x32\plugins\
+#    then in x64dbg: Plugins > Configure MCP Server (0.0.0.0:9094; setup adds a
+#    firewall allow rule scoped to the lab subnet)
 curl http://127.0.0.1:9094/ -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 
 # 6. Smoke + lab status
@@ -165,7 +167,7 @@ python winre\ui\app.py --port 5001
 #    defaults off when the LLM endpoint answers, on when it doesn't.
 ```
 
-Per-feature docs: `docs/PIPELINE.md` · `docs/SQL-GHIDRA.md` · `docs/SQL-IDA.md` · `docs/X64DBG-MCP.md` · `docs/WINDBG-MCP.md` · `docs/DYNAMIC-ORCHESTRATOR.md`. Malcat-specific notes live in [`docs/PREREQUISITES.md`](docs/PREREQUISITES.md) (optional-commercial section).
+Docs index: [`docs/`](docs/README.md). Per-feature docs: `docs/PIPELINE.md` · `docs/SQL-GHIDRA.md` · `docs/SQL-IDA.md` · `docs/X64DBG-MCP.md` · `docs/WINDBG-MCP.md` · `docs/DYNAMIC-ORCHESTRATOR.md`. Malcat-specific notes live in [`docs/PREREQUISITES.md`](docs/PREREQUISITES.md) (optional-commercial section).
 
 ---
 
@@ -174,7 +176,7 @@ Per-feature docs: `docs/PIPELINE.md` · `docs/SQL-GHIDRA.md` · `docs/SQL-IDA.md
 * Keep FlareVM on a host-only / isolated lab NIC — **no public internet**.
 * **Snapshot before every detonation run and restore after.** The VM is a detonation host; malware can persist via Run keys or services.
 * Never commit `.env` files, API keys (e.g. `MALCAT_KEY`), or malware samples.
-* MCP/SQL HTTP services are unauthenticated by design (lab-net only) — do not expose ports 9094–9097, 19300, 19301 outside the lab network.
+* MCP/SQL HTTP services are unauthenticated by design (lab-net only) — do not expose ports 9094-9097, 18080/18090, 19300 outside the lab network. `:9094` binds `0.0.0.0` for the control plane and is scoped to `LocalSubnet` by a Windows Firewall rule installed by setup.
 
 ---
 
@@ -184,9 +186,8 @@ Per-feature docs: `docs/PIPELINE.md` · `docs/SQL-GHIDRA.md` · `docs/SQL-IDA.md
 
 | Item | Description |
 |------|-------------|
-| **LangGraph deep-dive agent** | Agentic ReAct loop over the MCP servers (x64dbg/Malcat/WinDbg) — the LLM decides debugger moves within budget, RevAI-style |
-| **LLM endpoint on control plane** | Point `WINRE_LLM_BASE_URL` at a local model / API so deep-dive reports are `llm_judge` not fallback |
 | **Persistence forensics pass** | Registry Run keys / services diff in `process_snapshot_*` vs clean baseline, surfaced in `ANALYST-NEXT.md` |
+| **VirusTotal hash-only triage** | Control-plane hash lookup feeding the triage `threat_intel` evidence (VM stays air-gapped) |
 | **RevAI evidence backlink** | URL/`load_dynamic_pack()` links in published RevAI reports pointing at the WinRE artifact pack |
 
 ---

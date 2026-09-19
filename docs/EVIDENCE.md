@@ -1,5 +1,7 @@
 # Evidence Packs & Reporting — where everything lives
 
+> **Scope:** the evidence-pack layout and the audit contract (`truly_green`). **Audience:** analysts and integrators.
+
 WinRE writes one **evidence pack per sample per engine**, keyed by SHA256 +
 deep-dive mode (RevAI-style sections — RevAI `scripted`/`agentic` folders).
 Both the CLI and the console read from this layout; the RevAI remote driver

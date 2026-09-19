@@ -1,5 +1,7 @@
 # Tool-Paths — where WinRE expects every tool (and how to tell it otherwise)
 
+> **Scope:** the tool-location contract and per-tool env overrides. **Audience:** deployers and troubleshooters.
+
 This is the **tool-location contract**. `install/setup-flarevm.ps1 -CheckMode`
 detects each entry below and tells you exactly what is missing; the pipeline
 skips honestly when a tool is absent (never fake-fails, never invents
@@ -15,20 +17,20 @@ the air-gapped VM.
 
 | Tool | Expected default | Env override | Needed for | Missing → |
 |---|---|---|---|---|
-| Ghidra 11/12.x + CADRE loader `[user]` | `C:\Tools\ghidra_*_PUBLIC` (glob auto-detect) | `GHIDRA_INSTALL_DIR` (pyghidra fast-path) | ghidra_query, ghidra_decompile, signature SQL | deep skips ghidra tools → static weakens, honest skip |
+| Ghidra 11/12.x + CADRE loader `[user]` | `C:\ProgramData\chocolatey\lib\ghidra\tools\ghidra_*_PUBLIC` (also `C:\Tools\ghidra_*_PUBLIC`; glob auto-detect) | `GHIDRA_INSTALL_DIR` (pyghidra fast-path) | ghidra_query, ghidra_decompile, signature SQL | deep skips ghidra tools → static weakens, honest skip |
 | capa + mandiant rules `[base]` | `C:\Tools\capa\capa.exe` + `C:\Tools\capa-rules` | — | capability clusters (verdict driver) | capa evidence absent (pip fallback auto-tried) |
-| floss `[base]` | pip module | — | decoded/stack strings | floss evidence absent |
+| floss [base]/[setup] | lare-floss pip module (installed offline from staged wheels) or C:\\Tools\\FLOSS\\floss.exe | - | decoded/stack strings | floss evidence absent |
 | Detect It Easy `[base]`/`[stage]` | `C:\Tools\die\diec.exe` | — | packer/compiler taxonomy (decrypt-gate) | taxonomy falls back to entropy-only |
-| yara-x `[base]` | `C:\Tools\yr\yr.exe` | — | curated-ruleset scan (verdict driver) | yara-hit rule can't fire |
+| yara-x `[base]` | `C:\Tools\yara-x\yr.exe` | — | curated-ruleset scan (verdict driver) | yara-hit rule can't fire |
 | curated YARA rules `[setup]` | `C:\Tools\yara-rules` (`*.yar`) | `YARA_RULES_DIR` | family matches | yarascan reports `no rules staged` |
 | Sysinternals strings64 `[base]` | `C:\Tools\sysinternals\strings64.exe` | — | raw string extraction | strings tool skips |
 | radare2 `[base]` | `C:\Tools\radare2\radare2.exe` | — | r2_decompile, sink_sites | those tools skip |
 | scdbg `[base]` | `C:\Tools\scdbg\scdbg.exe` | — | shellcode extraction emulation | shellcode_extract degrades |
-| UPX `[base]` | `C:\Tools\upx\upx.exe` | — | `upx_unpack` (static), UPX-packed test fixtures | upx_unpack skips honestly |
-| goresym `[user]`/`[stage]` | `C:\Tools\goresym\goresym.exe` | — | Go binaries only | goresym tool skips (Go detection gates it) |
+| UPX `[base]` | `C:\Tools\upx\upx-*\upx.exe` (versioned dir glob) | — | `upx_unpack` (static), UPX-packed test fixtures | upx_unpack skips honestly |
+| goresym `[user]`/`[stage]` | `C:\Tools\GoReSym\GoReSym.exe` | — | Go binaries only | goresym tool skips (Go detection gates it) |
 | ILSpy CLI `[user]` | `%USERPROFILE%\.dotnet\tools\ilspycmd.exe` | — | .NET decompile | dotnet_analyze degrades to metadata-only |
 | IDA Pro/Free + idasql `[user]` | `C:\Program Files\IDA Professional 9.3` (also probed: IDA Free 9.3/8.3, `C:\Tools\IDA*`) | **`WINRE_IDA_DIR`** (dir with `idat.exe`); **`IDASQL`** / `WINRE_IDASQL` (idasql.exe full path) | ida_query, .i64 creation | License states: **pro** (idapro*.hexlic in install dir, no AppData free license → fully supported) · **shadowed** (Pro present but a stale FREE license in the user profile wins license resolution → move the stale file aside, backup kept) · **free** (no Pro anywhere → instant honest skip + actionable message, GUI-only) · **missing** (setup verify fails open, Ghidra canonical) |
-| Malcat (portable) `[user]` | `C:\Tools\malcat\bin` (also probed: `C:\Program Files\Malcat\bin`, `%USERPROFILE%\Downloads\malcat\bin`) — must contain `bin\malcat.mcp.py` | `MALCAT_BIN_DIR`; license `MALCAT_LICENSE` (default `%APPDATA%\Malcat\license.dat`) | quick triage views, agent malcat tools, unpack compare | all malcat evidence skips honestly; Ghidra + x64dbg carry the analysis |
+| Malcat (portable) `[user]` | `C:\Tools\malcat\bin` (also probed: `C:\Program Files\Malcat\bin`, `%USERPROFILE%\Downloads\malcat\bin`) — must contain `bin\malcat.mcp.py` | `MALCAT_BIN_DIR`; license `MALCAT_LICENSE` (default `%APPDATA%\Malcat\license.dat`) | quick triage views, agent malcat tools, unpack compare | all malcat evidence skips honestly; Ghidra + x64dbg carry the analysis. Kesakode is not used (no license key on the VM; headless *offline* Kesakode needs an OEM license) - threat intel comes from signer/markers |
 
 ## Dynamic / detonation
 
@@ -37,20 +39,21 @@ the air-gapped VM.
 | x64dbg + MCP plugin `[base]`+`[setup]` | `C:\Tools\x64dbg` (+ `release\x64\plugins\x64dbg-MCP-Server.dp64`) | — | x64dbg OEP/dump/write-BP loops | agentic-dbg + debug loops unavailable |
 | FakeNet-NG `[base]` | `C:\Tools\fakenet\fakenet3.5\fakenet.exe` | — | network sink, pcaps | detonation network evidence absent |
 | Procmon `[base]` | `C:\Tools\sysinternals\Procmon64.exe` | — | file/reg/process capture | persistence/behavior analysis absent |
-| pe-sieve `[base]` | `C:\ProgramData\chocolatey\bin\pe-sieve.exe` | `WINRE_PESIEVE` | injection/hollowing dumps + suspended-process monitor + **Scylla-class IAT rebuild** (`/imp 1..5 /dmode 3`) for unpack dumps at OEP | memory dumps partial; unpack dump falls back to savedata `DumpModule` |
+| pe-sieve `[base]` | `C:\ProgramData\chocolatey\bin\pe-sieve.exe` | `WINRE_PESIEVE` | injection/hollowing dumps + suspended-process monitor + **Scylla-class IAT rebuild** (`/imp` escalation 1->3->4->5 `/dmode 3`) for unpack dumps at OEP | memory dumps partial; unpack dump falls back to savedata `DumpModule` |
 | hollows_hunter `[base]` | `C:\Tools\hollows_hunter\hollows_hunter.exe` | — | hollowing detection | best-effort skip |
 | Frida `[base]` | pip module (Python 3.13) | — | API trace | frida trace absent |
 | procdump `[base]` | `C:\Tools\sysinternals\Procdump64.exe` | — | post-mortem memory harvest | harvest skips; DFIR-Nexus gets other artifacts |
 | Wireshark/tshark `[base]` | `C:\Program Files\Wireshark\tshark.exe` | — | pcap enrich + beacon analysis | network intel degrades |
 | 7-Zip `[base]` | `C:\Program Files\7-Zip\7z.exe` (or PATH) | `WINRE_7Z` | DFIR-Nexus case packs | case pack falls back to .zip |
 | WinDbg (Store/classic) `[base]` | — | — | mcp-windbg dump analysis (`windbg_analysis.json` + `windbg_analyze_dump` agent tool) | windbg step skips honestly |
-| VMWare Tools / hypervisor `[user]` | — | `WINRE_HYPERVISOR`, `WINRE_VM_PATH`, `WINRE_SNAPSHOT` | L2 snapshot auto-restore | manual snapshot discipline (gate observe mode) |
+| VMWare Tools / hypervisor `[user]` | — | `WINRE_HYPERVISOR`, `WINRE_VM_PATH`, `WINRE_SNAPSHOT` | L2 snapshot auto-restore | manual snapshot discipline (gate `enforce` default; `observe` override) |
 
 ## Python deps (VM, `C:\Python313`)
 
 Installed automatically by `setup-flarevm.ps1` (pip): `frida`, `flask`,
 `pefile`, `psutil`, `oletools`, `pypdf`, `dnfile`, `z3`, `angr`,
-`speakeasy`, `mcp-windbg` (dump-analysis MCP, :9097), plus `setuptools<81`
+`speakeasy`, `mcp-windbg` (dump-analysis MCP, :9097), `flare-floss`, plus
+`setuptools<81`
 (pinned — speakeasy imports `pkg_resources`, removed in setuptools 81+).
 
 Optional: `pyghidra` + `GHIDRA_INSTALL_DIR` → faster `ghidra_decompile`

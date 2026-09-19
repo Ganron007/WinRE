@@ -1,6 +1,7 @@
 # WinDbg-MCP — Windows (FlareVM)
 
 > **Status:** REWIRED (2026-09-01) — official **`mcp-windbg`** (svnscha/mcp-windbg, MIT, PyPI) replaces the homemade 12-tool bridge. 10 tools over MCP streamable-http on :9097. Crash-dump analysis + remote + kernel debugging, driven by `cdb.exe`/`kd.exe` (auto-detected from the Store WinDbg or Windows Kits).
+> **Audience:** integrators and agent authors using dump analysis.
 
 ## 1. Why this changed
 

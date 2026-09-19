@@ -1,6 +1,7 @@
-﻿# Dynamic Orchestrator — FlareVM
+# Dynamic Orchestrator — FlareVM
 
-> **Status:** PORT — `winre/orchestrator.py` is `Tools/v6_deploy/V6.2/scripts/dynamic_run_v2.py` (668 lines, local-first now). `winre/flare_dynamic_job.ps1` stages Frida+Procmon+FakeNet+PE-sieve.
+> **Status:** implemented (local-first) — `winre/orchestrator.py` drives `winre/flare_dynamic_job.ps1`, which stages Frida + Procmon + FakeNet-NG + pe-sieve.
+> **Audience:** operators (detonation) and integrators.
 
 ## 1. Flow
 
@@ -64,7 +65,7 @@ Env flags (same as `dynamic_run_v2.py:317`):
 
 ## 3. Artifacts
 
-See `docs/internal/ARCHITECTURE.md:3` contract table. Key:
+See the dynamic artifact contract in [`EVIDENCE.md`](EVIDENCE.md). Key:
 
 | File | Source |
 |------|--------|
@@ -72,7 +73,7 @@ See `docs/internal/ARCHITECTURE.md:3` contract table. Key:
 | `procmon.csv` | `C:\tools\sysinternals\Procmon64.exe /Quiet /Minimized /BackingFile` |
 | `procmon_summary.json` | `winre/summarize_dynamic.py` (filters to process `foo.exe`) + `winre/procmon_post.py` (persistence families, spoofing_suspects, behavior timeline) |
 | `network_intel.json` | `winre/enrich_pcap_tshark.py` over `network_raw/*.pcap` |
-| `memory/pe_sieve_report.json` | `C:\tools\pe-sieve\pe-sieve64.exe /pid <pid> /json` |
+| `memory/pe_sieve_report.json` | `C:\ProgramData\chocolatey\bin\pe-sieve.exe /pid <pid> /json` |
 | `malcat-triage.json` | `tools/malcat_win.py` (if licensed) |
 | `x64dbg/dump/*.dmp` | `DumpModule` via `http://127.0.0.1:9094/` |
 | `META.json` → `x64dbg_dump` | terminal OEP/dump record `{attempted, ok, reason, dump_path?, oep?, module?, detect_ok?, analyze_ok?}` — always present, so a missing dump is never silent (the pre-run META carries `running=true` if the orchestrator died mid-run) |
@@ -94,8 +95,8 @@ See `docs/internal/ARCHITECTURE.md:3` contract table. Key:
 
 ## 5. Snapshot
 
-Orchestrator does NOT auto-revert — operator runs `Restore-VMSnapshot clean-*` after `META.json` + SMB copy (see `docs/internal/VM-ACCESS.md:6`).
+Orchestrator does NOT auto-revert — operator runs `Restore-VMSnapshot clean-*` after `META.json` + SMB copy (see [`OPERATE.md`](OPERATE.md) - snapshot gate / baseline recovery).
 
 ## References
 
-- `Tools/v6_deploy/V6.2/scripts/dynamic_run_v2.py:303`, `Tools/v6_deploy/V6.2/scripts/flare_dynamic_job.ps1:1`, `Tools/v6_deploy/V6.2/README.md:23`.
+- `winre/orchestrator.py`, `winre/flare_dynamic_job.ps1`, `winre/orchestrator.py` (emit_analyst_next).

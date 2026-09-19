@@ -1,5 +1,7 @@
 # Install
 
+> **Scope:** install WinRE on the control plane and bootstrap the FlareVM. **Audience:** operators deploying the lab.
+
 Two machines: the **control plane** (where you run the pipeline/UI) and the
 **FlareVM** (where samples execute). See [`PREREQUISITES.md`](PREREQUISITES.md)
 for the full hardware/software list. **Expected tool locations and env
@@ -77,9 +79,10 @@ repo `C:\WinRE` + layout, snapshot marker, `.env.template`; pip deps
 + `release\x32\plugins\x64dbg-MCP-Server.dp32` - x64dbg.exe loads only the dp64, the old
 single-select check silently shipped dp32-only and :9094 never bound); a firewall allow
 rule then scopes `:9094` to `LocalSubnet`);
-the **Ghidra SQL headless path** (repo `tools\ghidra_scripts\GhidraSql.java` -
-zero install; LibGhidraHost `:19301` serve mode is optional) + **CADRE PE
-loader** (auto-copied into Ghidra `Extensions\CADRE` from
+the **SQL-first Ghidra/IDA stack** (staged `LibGhidraHost.zip` +
+`ghidrasql.exe` + `idasql.exe`; per-project HTTP servers with a reuse
+registry and end-of-run sweep - see [`SQL-GHIDRA.md`](SQL-GHIDRA.md))
++ **CADRE PE loader** (auto-copied into Ghidra `Extensions\CADRE` from
 `C:\Tools-staged\cadre-pe-loader`); **`idasql.exe`** auto-installed from
 staging next to `idat.exe`; MCP autostart (Malcat :9009, mcp-windbg :9097;
 x64dbg :9094 on demand); IDA license hygiene (shadowed-Free auto-fix) +

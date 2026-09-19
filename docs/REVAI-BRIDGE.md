@@ -1,5 +1,8 @@
 # RevAI ↔ WinRE remote-driver bridge
 
+> **Status:** verified live - the remote driver is the tested entry point for
+> non-Windows control planes.
+
 > **Audience:** operators and integrators running RevAI (Remnux/Linux) or any
 > other control plane that drives WinRE (FlareVM) remotely. This document is
 > the contract for **where the LLM configuration lives and how it reaches the

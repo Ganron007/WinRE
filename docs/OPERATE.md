@@ -1,5 +1,7 @@
 # Operate
 
+> **Scope:** day-2 operation (runs, snapshot gate, packs, troubleshooting). **Audience:** analysts and operators.
+
 Day-2 operation of the WinRE lab. Install first: [`INSTALL.md`](INSTALL.md).
 
 ## Pipeline modes
