@@ -164,6 +164,29 @@ auto-restore config) with attest buttons. With `WINRE_HYPERVISOR` +
 `WINRE_VM_PATH` + `WINRE_SNAPSHOT` set, the pipeline auto-restores before
 each detonation.
 
+### Golden image (before the first sample run)
+
+Prepare a reusable baseline: deploy, verify, clean, snapshot.
+
+1. Deploy: `ops\sync_to_flare.ps1` -> `ops\provision_tools.ps1` ->
+   `ops\reapply_after_revert.ps1` (setup + verify battery). Expect
+   `0 FAIL` in `verify-flarevm.ps1`.
+2. Confirm the tree is clean: `C:\samples`, `C:\WinRE\logs` and
+   `C:\WinRE\cache\ghidra` empty; no `__pycache__` under `C:\WinRE`.
+   Both `install\verify-flarevm.ps1` and `ops\smoke_flare.py` are
+   **side-effect free** (SQL probe samples/servers/caches are cleaned up; the
+   smoke helper and its bytecode live in `%TEMP%`), so they can be re-run at
+   any time without dirtying the image.
+3. Confirm the clean marker is present (`python -m winre.snapshot_gate status`;
+   `marker-create` if missing) - the snapshot must contain it.
+4. Shut down and snapshot. MCP servers do **not** need to be running in the
+   snapshot: the Startup launcher (`WinRE-MCP.cmd`) + `WinRE-MCP-Heal` task
+   bring Malcat `:9009` / WinDbg `:9097` back after restore, and the x64dbg
+   manager launches `:9094` on demand.
+
+After restore the first dynamic run is allowed (marker armed) and consumes the
+marker; revert again before the next detonation.
+
 ## MCP plane
 
 | Server | Port | Start | Notes |

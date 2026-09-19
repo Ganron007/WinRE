@@ -74,6 +74,9 @@ python3 winre/orchestrator.py <sha256> --mode ssh --dry-run   # plan only
 - SSH time budget = `max_seconds + 300` (FakeNet/Procmon/CSV export overhead).
 - `--no-deploy` skips re-SCP of job scripts (use when Flare already has them).
 - Gating: `REVENG_DYNAMIC_SKIP=1` → writes skipped META, exit 0, no detonation.
+  > **Legacy names:** the `REVENG_*` variables are the live interface names the
+  > job scripts read (kept for compatibility) - they do not imply a dependency
+  > on any other tooling.
   Documents (`pdf`/`ole`/`ooxml`) auto-skip (no detonation; doc triage instead).
 
 ### Option B — direct job (caller drives each step)

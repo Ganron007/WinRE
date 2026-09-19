@@ -54,6 +54,10 @@ Smoke-check connectivity:
 python ops\smoke_flare.py
 ```
 
+`ops\smoke_flare.py` and `install\verify-flarevm.ps1` are **read-only**
+diagnostics: they leave no probe samples, SQL servers, caches or bytecode
+behind (safe to run any number of times, including on a golden image).
+
 ## 2. FlareVM (execution VM)
 
 ### Bare VM: what you provide vs what WinRE configures
@@ -114,7 +118,7 @@ command re-applies everything to a fresh/reverted VM -
    powershell -ExecutionPolicy Bypass -File C:\WinRE\install\setup-flarevm.ps1
    ```
 
-4. Verify (read-only PASS/FAIL battery):
+4. Verify (read-only PASS/FAIL battery - side-effect free, safe to re-run):
 
    ```powershell
    powershell -ExecutionPolicy Bypass -File C:\WinRE\install\verify-flarevm.ps1
