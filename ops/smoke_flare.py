@@ -31,14 +31,18 @@ from winre.remote_driver import (flare_cfg, ssh_run, ssh_ps, _remote_py,
 from winre import snapshot_gate
 
 PY_COMPILE_HELPER = r'''
-import json, py_compile, sys
+import json, os, py_compile, tempfile
 from pathlib import Path
 root = Path(r"C:\WinRE")
+cache = Path(tempfile.gettempdir()) / "winre_smoke_pyc"
+cache.mkdir(parents=True, exist_ok=True)
 out = {"ok": True, "compiled": 0, "errors": []}
 targets = list((root / "winre").glob("*.py")) + list((root / "tools").glob("*.py"))
 for p in targets:
     try:
-        py_compile.compile(str(p), doraise=True)
+        # compile into a TEMP cfile so the repo tree stays bytecode-free
+        py_compile.compile(str(p), cfile=str(cache / (p.stem + ".pyc")),
+                           doraise=True)
         out["compiled"] += 1
     except Exception as e:
         out["ok"] = False
@@ -79,19 +83,22 @@ def run_smoke() -> list[dict]:
     # 2. py_compile all VM-side python
     try:
         py = _remote_py(cfg)
-        helper = REPO / "ops" / "_smoke_pycompile.py"
+        # keep the helper OUT of the repo and off the VM's C:\WinRE tree -
+        # a smoke run must not dirty the golden image (found 2026-09-19)
+        import tempfile
+        helper = Path(tempfile.gettempdir()) / "_smoke_pycompile.py"
         helper.write_text(PY_COMPILE_HELPER, encoding="utf-8")
-        ssh_run(cfg, "New-Item -ItemType Directory -Force -Path C:\\WinRE\\ops "
+        ssh_run(cfg, "New-Item -ItemType Directory -Force -Path C:\\Windows\\Temp "
                      "| Out-Null", timeout=60)
         import subprocess
         scp = subprocess.run(
             ["scp", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no",
              "-o", "ConnectTimeout=15", str(helper),
-             f"{cfg['user']}@{cfg['host']}:C:/WinRE/ops/_smoke_pycompile.py"],
+             f"{cfg['user']}@{cfg['host']}:C:/Windows/Temp/_smoke_pycompile.py"],
             capture_output=True, text=True, timeout=120)
         if scp.returncode != 0:
             raise RuntimeError(f"scp helper: {scp.stderr[:150]}")
-        r = ssh_run(cfg, f'"{py}" C:\\WinRE\\ops\\_smoke_pycompile.py',
+        r = ssh_run(cfg, f'"{py}" C:\\Windows\\Temp\\_smoke_pycompile.py',
                     timeout=300)
         lines = [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
         if not lines:

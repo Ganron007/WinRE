@@ -347,5 +347,30 @@ if (Test-Path "C:\WinRE\.env") { Info "C:\WinRE\.env present (unused on the VM -
 else { Info "no C:\WinRE\.env (fine - LLM config lives on the control plane via .env)" }
 
 Write-Host ""
+Write-Host "--- cleanup (verify must not dirty the image) ---"
+# The SQL live gates stage probe samples and leave per-project servers/caches
+# behind. A verify run must be side-effect free so a golden snapshot stays
+# clean (found 2026-09-19: _sqlprobe* + cache\ghidra + server logs remained).
+# Kill the per-project SQL servers FIRST - a live server recreates its
+# project dir and log immediately after deletion.
+Get-Process ghidrasql, idasql -ErrorAction SilentlyContinue |
+    Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
+Get-ChildItem "C:\samples" -Filter "_sqlprobe*" -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+Remove-Item "C:\WinRE\cache\ghidra\*" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "C:\WinRE\logs\ghidrasql-servers.json",
+            "C:\WinRE\logs\ghidrasql-server.log",
+            "C:\WinRE\logs\idasql-server.log",
+            "C:\WinRE\logs\ghidra-sql-audit.jsonl",
+            "C:\WinRE\logs\ida-sql-audit.jsonl" `
+            -Force -ErrorAction SilentlyContinue
+if (@(Get-ChildItem "C:\samples" -Filter "_sqlprobe*" -ErrorAction SilentlyContinue).Count -eq 0) {
+    Ok "probe artifacts + SQL runtime state cleaned (samples/cache/logs)"
+} else {
+    Warn "probe artifacts still present under C:\samples"
+}
+
+Write-Host ""
 Write-Host "=== Summary: $($script:ERR) FAIL, $($script:WARN) WARN ===" -ForegroundColor Cyan
 if ($script:ERR -gt 0) { exit 1 } else { exit 0 }
