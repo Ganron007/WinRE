@@ -1580,7 +1580,7 @@ if __name__ == "__main__":
     ap.add_argument("--sample-name", required=True)
     ap.add_argument("--max-steps", type=int, default=14)
     ap.add_argument("--dry", action="store_true",
-                    help="no LLM — deterministic fallback only")
+                    help="no LLM - deterministic fallback only")
     ap.add_argument("--dynamic", action="store_true",
                     help="expose bounded x64dbg debug-loop tools to the agent")
     ap.add_argument("--keep", action="store_true",

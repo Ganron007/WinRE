@@ -363,7 +363,7 @@ def main() -> int:
     ap.add_argument("--dump", default=None)
     args = ap.parse_args()
     if not Path(WINDBG).is_file():
-        print(f"WARN: windbg not at {WINDBG} — tools will fail until installed",
+        print(f"WARN: windbg not at {WINDBG} - tools will fail until installed",
               file=sys.stderr)
     return serve(args.port, args.attach_pid, args.dump)
 

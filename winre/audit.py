@@ -180,9 +180,9 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) < 2:
-        print("usage: audit.py <evidence_dir>", file=sys.stderr)
-        sys.exit(2)
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print("usage: audit.py <evidence_dir>")
+        sys.exit(0 if len(sys.argv) > 1 else 2)
     ev = Path(sys.argv[1])
     res = audit(ev)
     print(json.dumps(res, indent=2))

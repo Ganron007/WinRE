@@ -1,4 +1,4 @@
-"""invoke_z3_or_angr.py ΓÇö v3 backlog 13.1: auto-invoke wrapper for deobfuscation verification.
+"""invoke_z3_or_angr.py - v3 backlog 13.1: auto-invoke wrapper for deobfuscation verification.
 
 Spec: Tools/v3-deploy/v3-plan.md section 6 + 13.1
 Toolchain flow:
@@ -347,6 +347,6 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--test":
         _self_test()
     else:
-        print("invoke_z3_or_angr.py ΓÇö v3 backlog 13.1 wrapper (importable module)")
+        print("invoke_z3_or_angr.py - v3 backlog 13.1 wrapper (importable module)")
         print("Usage: from invoke_z3_or_angr import invoke_z3_or_angr, invoke_z3, invoke_angr, invoke_cff_deflatten")
         print("Self-test: python3 invoke_z3_or_angr.py --test")

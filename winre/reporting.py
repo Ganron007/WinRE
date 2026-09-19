@@ -669,8 +669,12 @@ def generate_all(pack_root: Path) -> dict:
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) < 2:
-        print("usage: reporting.py <pack_root>", file=sys.stderr)
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print("usage: reporting.py <pack_root>")
+        sys.exit(0 if len(sys.argv) > 1 else 2)
+    _root = Path(sys.argv[1])
+    if not _root.is_dir():
+        print(f"error: not a directory: {_root}", file=sys.stderr)
         sys.exit(2)
-    res = generate_all(Path(sys.argv[1]))
+    res = generate_all(_root)
     print(json.dumps(res, indent=2, default=str))

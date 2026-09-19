@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Light tshark enrich over dynamic/network_raw/*.pcap → network_intel.json.
+"""Light tshark enrich over dynamic/network_raw/*.pcap -> network_intel.json.
 
 Does not replace analyst Wireshark deep-dive (see ANALYST-NEXT).
 
@@ -66,7 +66,7 @@ def main() -> int:
             "analyst_hint": "apt install tshark  # or use Wireshark GUI on the pcap",
         }
         (dyn / "network_intel.json").write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
-        print("tshark missing — wrote stub network_intel.json")
+        print("tshark missing - wrote stub network_intel.json")
         return 1
     if not raw.is_dir():
         raise SystemExit(f"missing {raw}")
@@ -80,7 +80,7 @@ def main() -> int:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "captures": captures,
         "analyst_next": [
-            "Deep stream analysis is analyst-driven — see ANALYST-NEXT.md network section",
+            "Deep stream analysis is analyst-driven - see ANALYST-NEXT.md network section",
             "tcpdump capture (ELF path): already in network_raw if elf job ran",
         ],
     }

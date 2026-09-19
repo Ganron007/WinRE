@@ -261,8 +261,8 @@ def generate_rules(evidence: Path, out_dir: Path) -> dict:
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) < 3:
-        print("usage: yara_gen.py <evidence_dir> <out_dir>", file=sys.stderr)
-        sys.exit(2)
+    if len(sys.argv) < 3 or sys.argv[1] in ("-h", "--help"):
+        print("usage: yara_gen.py <evidence_dir> <out_dir>")
+        sys.exit(0 if len(sys.argv) > 1 else 2)
     rep = generate_rules(Path(sys.argv[1]), Path(sys.argv[2]))
     print(json.dumps(rep, indent=2))
