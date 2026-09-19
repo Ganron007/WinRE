@@ -34,12 +34,13 @@ the live stage board, browse packs, rerun single stages, fire single
 tools, attest the snapshot gate. Dry-LLM defaults to **off** when the LLM
 endpoint answers (`/settings` shows reachability); it stays on when no
 LLM is configured so the spine never stalls on timeouts. MCP badges: x64dbg
-is probed directly (`:9094` binds `0.0.0.0`), Malcat `:9009` and mcp-windbg
-`:9097` are localhost-bound on the VM and probed over SSH.
+is probed directly (`:9094` binds `0.0.0.0`, restricted by a Windows Firewall
+allow rule to `LocalSubnet` only), Malcat `:9009` and mcp-windbg `:9097` are
+localhost-bound on the VM and probed over SSH.
 
-**Invariants:** dynamic is opt-in and always LAST; `static_yara_wins` —
-dynamic corroborates, never clears a static verdict; every run is audited
-(`audit.json`, `truly_green`).
+**Invariants:** dynamic is opt-in and always LAST; `static_yara_wins` - dynamic corroborates, never clears a static verdict; every run is audited (`audit.json`, `truly_green`). The snapshot gate defaults to **`enforce`** (a detonation consumes the marker; the next dynamic run is refused until the snapshot is reverted and setup re-run). Set `WINRE_SNAPSHOT_GATE=observe` only for intentional benign test loops. A refused dynamic run writes a fresh `dynamic/STAGE.json` (`ok=false`, "blocked by snapshot gate") and the audit records `dynamic_blocked: true` - stale evidence can never masquerade as this run's detonation.
+
+**Threat intel (triage):** the offline `threat_intel` tool identifies known tools (Authenticode signer, VersionInfo, security-tool markers) and merges Malcat Kesakode verdicts when the MCP is keyed. Kesakode is effectively unavailable in this deployment (no `-k` on the VM by policy; headless offline Kesakode needs an OEM license - see [`MALCAT.md`](MALCAT.md)). Planned: VirusTotal **hash-only** lookup on the control plane at triage.
 
 ## Where the LLM lives (driver owns the LLM)
 
@@ -52,7 +53,14 @@ WINRE_LLM_BASE_URL=https://<your-provider>/v1
 WINRE_LLM_MODEL=<model-name-your-provider-exposes>
 WINRE_LLM_API_KEY=<key>
 WINRE_LLM_REASONING=high
+WINRE_LLM_CONTEXT_TOKENS=1000000     # model window - evidence budget (default)
+WINRE_LLM_MAX_OUTPUT_TOKENS=32768    # assistant output cap (default)
 ```
+
+Full-context policy: tool results are sized from the model window
+(~3.6 chars/token, 30% reserved for prompt/history/answer; per-call cap up
+to 240k chars) instead of a fixed small truncation - the interpreter sees
+the raw tool data. Lower `WINRE_LLM_CONTEXT_TOKENS` only for small models.
 
 WinRE is model-agnostic: any OpenAI-compatible endpoint works. Only the
 variable names above are contractual — never a specific model or provider.
@@ -115,12 +123,13 @@ Before any execution (detonation or agent debug) the gate checks a
 clean-snapshot marker on the VM and a global run ledger
 (`logs/_vm_state.json`).
 
-- `observe` (default): everything is probed and recorded, **nothing is
-  blocked** — advisory mode.
-- `enforce` (`WINRE_SNAPSHOT_GATE=enforce`): execution is refused unless
-  the marker is present (or an L2 hypervisor auto-restore just re-created
-  it). The marker is consumed on use — two executions without a real
-  restore in between are impossible.
+- `enforce` (default): execution is refused unless the marker is present (or an
+  L2 hypervisor auto-restore just re-created it). The marker is consumed on use
+  - two executions without a real restore in between are impossible. A refused
+  run writes `dynamic/STAGE.json` with `ok=false` ("blocked by snapshot gate")
+  and the audit flags `dynamic_blocked`.
+- `observe` (`WINRE_SNAPSHOT_GATE=observe`): everything is probed and recorded,
+  **nothing is blocked** - explicit override for benign test loops only.
 - `off`: gate inert.
 
 ### After a snapshot revert (baseline recovery)

@@ -18,12 +18,14 @@ logs/<sha256>/<static|agentic>/         ← one self-contained case per engine
 ├── deep/                             deep dive — engine depends on the section
 │   ├── deep.json                     verdict + full history (+ llm_analysis in agentic)
 │   ├── 01-tools-raw.json             FULL tool-call results (untruncated)
-│   ├── x64dbg/                        unpack artifact (pe-sieve /imp IAT rebuild;
+│   ├── x64dbg/                        unpack artifact (pe-sieve /imp escalation 1->3->4->5: ImportTable rebuilt from found IATs;
 │   │                                 PE-valid dump for RevAI static)
 │   └── META.json                     engine (langgraph|static_deterministic),
 │                                     mode, fallback flag, MCP health
 ├── dynamic/                          (opt-in, segregated, runs LAST)
 │   ├── META.json / STAGE.json        run status + sample_pid + window + snapshot-gate evidence
+                                (refused run: ok=false, 'blocked by snapshot gate';
+                                 audit exposes dynamic_blocked=true)
 │   ├── frida_trace.jsonl / frida_summary.json
 │   ├── procmon.csv / procmon_summary.json
 │   │                               (+ persistence catalog, spoofing_suspects)

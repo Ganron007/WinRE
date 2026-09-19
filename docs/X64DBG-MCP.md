@@ -31,10 +31,16 @@ powershell -ExecutionPolicy Bypass -File C:\WinRE\tools\build_x64dbg_mcp.ps1
 # zig build -Doptimize=ReleaseSafe --prefix dist
 # → dist/x64/plugins/x64dbg-MCP-Server.dp64 + dist/x32/plugins/x64dbg-MCP-Server.dp32
 
-# deploy
-xcopy /E dist\x64\plugins\x64dbg-MCP-Server.dp64 C:\tools\x64dbg\x64\plugins\
-xcopy /E dist\x32\plugins\x64dbg-MCP-Server.dp32 C:\tools\x64dbg\x32\plugins\
-# launch x64dbg — server auto-starts, check log: "MCP server listening on 0.0.0.0:9094"
+# deploy BOTH arches (x64dbg.exe loads only dp64; x32dbg.exe loads dp32).
+# setup-flarevm.ps1 does this arch-aware and fails when dp64 is missing.
+xcopy /E dist\x64\plugins\x64dbg-MCP-Server.dp64 C:\Tools\x64dbg\release\x64\plugins\
+xcopy /E dist\x32\plugins\x64dbg-MCP-Server.dp32 C:\Tools\x64dbg\release\x32\plugins\
+# launch x64dbg - server auto-starts, check log: "MCP server listening on 0.0.0.0:9094"
+# Exposure: bind stays 0.0.0.0 (the control plane drives :9094 over the LAN);
+# setup adds a firewall allow rule scoped to LocalSubnet (default block else).
+# Config path quirk: the plugin resolves mcp_config.json via
+# GetModuleFileNameA(NULL) -> the x64dbg.exe dir (release\x64|release\x32),
+# NOT the plugins dir. Set {"IpAddress":"127.0.0.1"} there for a local-only box.
 ```
 
 Verify:
@@ -63,9 +69,7 @@ WinRE `winre/mcp/x64dbg_client.py` wraps this HTTP — see `docs/internal/ARCHIT
 > **WinRE pipeline note (debug loops):** the deep unpack prepass runs
 > `oep_by_section → oep_by_esp` (explicit entry BP, stable-pause gate,
 > fresh-session retry, heap-OEP gate) and produces the artifact with
-> **pe-sieve `/imp 1 /dmode 3`** at the paused OEP — ImportTable rebuilt from
-> the in-memory IATs, so the dump parses with imports (savedata `DumpModule`
-> stays the fallback). The dynamic OEP/dump step
+> **pe-sieve `/imp` escalation `1 -> 3 -> 4 -> 5`** at the paused OEP (3/4/5 = documented "build the ImportTable from scratch from found IATs" R0/R1/R2) until the produced image parses with imports; `imp_modes_tried` is recorded in the dump evidence (savedata `DumpModule` stays the fallback). Managed (.NET) samples skip the native OEP/unpack path entirely (no native entry-point pause) - `dotnet_analyze` + `x64dbg_wpm_dump` + `windbg` are used instead, and the MCP ensure waits up to 90 s for the plugin to bind. The dynamic OEP/dump step
 > (`orchestrator._x64dbg_oep_dump`) still uses `DumpModule` into
 > `dynamic/x64dbg/dump/`.
 

@@ -39,10 +39,12 @@ Gate + auto-restore config (optional):
 
 | Variable | Meaning |
 |---|---|
-| `WINRE_SNAPSHOT_GATE` | `observe` (default) / `enforce` / `off` |
+| `WINRE_SNAPSHOT_GATE` | `enforce` (default - blocks dirty-VM detonation) / `observe` (benign-test override) / `off` |
 | `WINRE_HYPERVISOR` | `vmware` or `vbox` (enables pre-run auto-restore) |
 | `WINRE_VM_PATH` | path of the VM (`.vmx` for VMware) |
 | `WINRE_SNAPSHOT` | snapshot name to restore |
+| `WINRE_LLM_CONTEXT_TOKENS` | model context window (default `1000000`) - sizes the evidence budget sent to the LLM |
+| `WINRE_LLM_MAX_OUTPUT_TOKENS` | assistant output cap (default `32768`) |
 
 Smoke-check connectivity:
 
@@ -68,10 +70,13 @@ python ops\smoke_flare.py
 **WinRE configures (idempotent: `sync_to_flare.ps1` + `setup-flarevm.ps1`):**
 repo `C:\WinRE` + layout, snapshot marker, `.env.template`; pip deps
 (`frida`, `flask`, `pefile`, `psutil`, `oletools`, `pypdf`, `dnfile`, `z3`,
-`angr`, `speakeasy`, `mcp-windbg`, `setuptools<81`) - from
+`angr`, `speakeasy`, `mcp-windbg`, `flare-floss`, `setuptools<81`) - from
 `C:\Tools-staged\wheels` first (air-gap safe); the **x64dbg-MCP plugin chain**
 (source -> `tools\x64dbg-mcp-winre.patch` -> staged zig auto-unzip to
-`C:\Tools\zig` -> build -> deploy to `C:\Tools\x64dbg\release\x64\plugins`);
+`C:\Tools\zig` -> build -> deploy BOTH arches (`release\x64\plugins\x64dbg-MCP-Server.dp64`
++ `release\x32\plugins\x64dbg-MCP-Server.dp32` - x64dbg.exe loads only the dp64, the old
+single-select check silently shipped dp32-only and :9094 never bound); a firewall allow
+rule then scopes `:9094` to `LocalSubnet`);
 the **Ghidra SQL headless path** (repo `tools\ghidra_scripts\GhidraSql.java` -
 zero install; LibGhidraHost `:19301` serve mode is optional) + **CADRE PE
 loader** (auto-copied into Ghidra `Extensions\CADRE` from
