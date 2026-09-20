@@ -1364,6 +1364,7 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
     heap_info: dict | None = None
     dr: dict = {}
     if not oep_in_module:
+        imp_modes_tried: list[int] = []
         # heap-OEP: dump the committed region containing the OEP
         heap_info = _dump_heap_region(xc, oep, dump_path)
         evidence.append({"label": "heap_dump",
@@ -1377,6 +1378,7 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
                     "method": oep_res.get("method", "oep_by_section"),
                     "attempts": oep_res.get("attempts"),
                     "diagnostics": _debugger_diagnostics(xc),
+                    "imp_modes_tried": imp_modes_tried,
                     "evidence": evidence}
         dump_kind = "heap"
         dump_source = "dumpmemory_heap"
@@ -1391,7 +1393,6 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
         pid = _parse_state(xc.get_state()).get("pid")
         ps_res: dict = {}
         ps_parse: dict = {}
-        imp_modes_tried: list[int] = []
         if pid:
             # IAT rebuild escalation: /imp 1 (in-memory IAT) then 3/4/5
             # (build the ImportTable from scratch from found IATs) until the
@@ -1547,6 +1548,7 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
               "method": oep_res.get("method", "oep_by_section"),
               "attempts": oep_res.get("attempts"),
               "oep_target": oep_res.get("target"),
+              "imp_modes_tried": imp_modes_tried,
               "evidence": evidence}
     notes: list[str] = []
     if not conclusive:

@@ -50,7 +50,8 @@
         <td>{% if dyn and dyn.ran %}<span class="badge up">ran</span>
             {% else %}<span class="badge flat">—</span>{% endif %}</td>
         <td>{% if p.audit.truly_green %}<span class="badge up">GREEN</span>
-            {% else %}<span class="badge down">no</span>{% endif %}</td>
+            {% else %}<span class="badge down">no</span>{% endif %}
+            {% if p.audit.dynamic_blocked %}<span class="badge warn">dyn blocked</span>{% endif %}</td>
       {% else %}<td colspan="9" class="muted">no audit</td>{% endif %}
     </tr>
     {% endfor %}

@@ -42,6 +42,8 @@
         <tr><td class="mono">WINRE_LLM_BASE_URL</td><td class="mono">{{ cfg.llm.base_url or '—' }}</td></tr>
         <tr><td class="mono">WINRE_LLM_MODEL</td><td class="mono">{{ cfg.llm.model or '—' }}</td></tr>
         <tr><td class="mono">WINRE_LLM_REASONING</td><td class="mono">{{ cfg.llm.reasoning or '—' }}</td></tr>
+        <tr><td class="mono">WINRE_LLM_CONTEXT_TOKENS</td><td class="mono">{{ cfg.llm.context_tokens }}</td></tr>
+        <tr><td class="mono">WINRE_LLM_MAX_OUTPUT_TOKENS</td><td class="mono">{{ cfg.llm.max_output_tokens }}</td></tr>
         <tr><td class="mono">WINRE_LLM_API_KEY</td><td>{% if cfg.llm.key_set %}
           <span class="badge up">set (masked)</span>{% else %}<span class="badge warn">not set</span>{% endif %}</td></tr>
       </tbody></table></div>
@@ -56,7 +58,7 @@
       <span style="margin-left:auto">
         {% if cfg.gate.mode == 'enforce' %}<span class="badge warn">enforce</span>
         {% elif cfg.gate.mode == 'off' %}<span class="badge flat">off</span>
-        {% else %}<span class="badge flat">observe (advisory)</span>{% endif %}
+        {% else %}<span class="badge flat">observe (override)</span>{% endif %}
       </span>
     </div>
     <div class="board-body">
@@ -69,9 +71,13 @@
             (set WINRE_HYPERVISOR / WINRE_VM_PATH / WINRE_SNAPSHOT){% endif %}</td></tr>
       </tbody></table></div>
       <p class="muted" style="font-size:var(--tx-xs)">
-        observe records gate evidence but never blocks. enforce refuses
-        detonation/debug unless the clean marker was just consumed or
-        auto-restored. See <code>python -m winre.snapshot_gate --help</code>.</p>
+        <b>enforce is the default</b>: a detonation/debug is refused unless the
+        clean marker is present (or a hypervisor auto-restore just re-created
+        it), and the marker is consumed on use. <b>observe</b> is the explicit
+        opt-in override for benign test loops (records evidence, never blocks).
+        A refused dynamic stage writes a fresh <code>dynamic/STAGE.json</code>
+        and the audit sets <code>dynamic_blocked</code>. See
+        <code>python -m winre.snapshot_gate --help</code>.</p>
     </div>
   </div>
 

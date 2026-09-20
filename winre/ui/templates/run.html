@@ -262,8 +262,8 @@
           `<br><span class=muted>${g.reason || ''}</span>`;
         // attest buttons only matter when there's no hypervisor automation
         actEl.style.display = (!g.hypervisor && g.mode !== 'off') ? 'flex' : 'none';
-        // in enforce mode a blocked gate locks the detonation checkbox;
-        // observe mode (default) never blocks testing.
+        // enforce (default) locks the detonation checkbox while blocked;
+        // observe is the explicit benign-test override and never blocks.
         if (chk) {
           chk.disabled = enforce && g.blocked;
           chk.title = (enforce && g.blocked) ? 'gate blocked — restore/attest first' : '';

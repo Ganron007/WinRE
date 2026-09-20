@@ -4,6 +4,7 @@
   <p style="margin:0 0 10px">
     {% if a.truly_green %}<span class="badge up">truly_green</span>
     {% else %}<span class="badge down">not green</span>{% endif %}
+    {% if a.dynamic_blocked %}<span class="badge warn">dynamic blocked</span>{% endif %}
     <span class="muted" style="margin-left:8px">static_yara_wins · dynamic corroborates, never clears</span>
   </p>
   <div class="table-wrap"><table>
@@ -27,6 +28,11 @@
   <ul style="color:var(--danger); font-size:var(--tx-sm); margin:4px 0">
     {% for t in a.failed_tools %}<li class="mono">{{ t }}</li>{% endfor %}
   </ul>
+  {% endif %}
+  {% if a.dynamic_blocked %}
+  <div class="notice warn">Dynamic was requested but refused by the snapshot
+    gate - no detonation ran. Revert the VM snapshot and re-run setup to re-arm
+    the clean marker.</div>
   {% endif %}
   {% if a.dynamic_conflict %}
   <div class="notice err">Dynamic/static verdict conflict — review before trusting.</div>

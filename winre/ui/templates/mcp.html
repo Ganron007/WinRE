@@ -63,5 +63,17 @@
     the agentic-dbg tools and the dynamic OEP/dump step launch it via a
     scheduled task (<span class="mono">x64dbg_manager</span>), then tear it down.
   </div>
+
+  <div class="notice ok" style="max-width:840px">
+    <b>Exposure &amp; engines.</b> <span class="mono">:9094</span> is the only
+    MCP port bound beyond loopback and it is scoped to the lab subnet by a
+    Windows Firewall rule installed by setup; the plugin ships both arches
+    (<span class="mono">x64dbg-MCP-Server.dp64</span> for x64dbg,
+    <span class="mono">.dp32</span> for x32dbg). SQL-first engines run
+    per-project, loopback-only: <span class="mono">ghidrasql :18080</span>
+    (+ LibGhidraHost RPC <span class="mono">:18090</span>) and
+    <span class="mono">idasql :19300</span> - drive them via SSH-exec or a
+    tunnel (see docs/SSH-CONTRACT.md).
+  </div>
 </div>
 {% endblock %}

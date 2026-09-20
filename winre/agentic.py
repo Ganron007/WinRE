@@ -1286,7 +1286,8 @@ dynamic tool errors, fall back to static — do not retry more than once.
                            "error", "method", "attempts", "diagnostics",
                            "oep_target", "dump_kind", "dump_source",
                            "heap_region", "dump_parse", "rebuild_hint",
-                           "artifact", "fallback_trace", "fallback_summary")
+                           "imp_modes_tried", "artifact", "fallback_trace",
+                           "fallback_summary")
                           if k in r}
     packer_note = _packer_note(packed_sig, unpack_prepass, dynamic)
     if managed:

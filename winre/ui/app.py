@@ -369,6 +369,8 @@ def _pack_views(root: Path, files: dict) -> dict:
         "fallback_stages": audit.get("fallback_stages") or [],
         "failed_tools": audit.get("failed_tools") or [],
         "dynamic_conflict": audit.get("dynamic_conflict"),
+        "dynamic_blocked": audit.get("dynamic_blocked"),
+        "snapshot_gate": audit.get("snapshot_gate"),
     }
     return v
 
@@ -647,7 +649,11 @@ def create_app() -> "Flask":
         try:
             return jsonify(snapshot_gate.gate_status())
         except Exception as e:
-            return jsonify({"mode": "observe", "marker": None,
+            try:
+                _mode = snapshot_gate.mode()
+            except Exception:  # noqa: BLE001
+                _mode = "unknown"
+            return jsonify({"mode": _mode, "marker": None,
                             "vm_state": {}, "ledger_clean": False,
                             "hypervisor": None, "blocked": False,
                             "reason": f"probe error: {e}"}), 200
@@ -1099,6 +1105,10 @@ def create_app() -> "Flask":
                 "base_url": _os.environ.get("WINRE_LLM_BASE_URL", ""),
                 "model": _os.environ.get("WINRE_LLM_MODEL", ""),
                 "reasoning": _os.environ.get("WINRE_LLM_REASONING", ""),
+                "context_tokens": _os.environ.get(
+                    "WINRE_LLM_CONTEXT_TOKENS", "1000000"),
+                "max_output_tokens": _os.environ.get(
+                    "WINRE_LLM_MAX_OUTPUT_TOKENS", "32768"),
                 "key_set": bool(_os.environ.get("WINRE_LLM_API_KEY")),
             },
             "gate": {

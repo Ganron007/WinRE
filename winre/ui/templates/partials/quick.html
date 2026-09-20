@@ -29,6 +29,21 @@
     {% endif %}
   </p>
   {% elif mal %}<p class="muted" style="margin:4px 0">malcat: {{ mal }}</p>{% endif %}
+  {% set ti = q.evidence.threat_intel %}
+  {% if ti is mapping %}
+  <p class="muted" style="margin:4px 0">
+    threat intel:
+    {% if ti.get('known_tool') %}<span class="badge up">known tool</span>
+    {% else %}<span class="badge flat">unidentified</span>{% endif %}
+    {% if ti.get('vendor') %}vendor <b>{{ ti.vendor }}</b>{% endif %}
+    {% if ti.get('signed') %}&#183; signed{% else %}&#183; unsigned{% endif %}
+    {% if ti.get('is_dotnet') %}&#183; .NET{% endif %}
+    {% if ti.get('kesakode') %}&#183; kesakode <b>{{ ti.kesakode }}</b>
+    {% else %}&#183; kesakode off/na{% endif %}
+    {% if ti.get('reasons') %}<br><span class="muted">{{ ti.reasons|join('; ') }}</span>{% endif %}
+    {% if ti.get('tool_markers') %}<br><span class="muted">markers: {{ ti.tool_markers|join(', ') }}</span>{% endif %}
+  </p>
+  {% endif %}
   {% set ida = q.evidence.ida %}{% set gh = q.evidence.ghidra %}
   <p class="muted" style="margin:4px 0">
     IDA funcs: <b>{{ ida.get('func_count', '—') if ida is mapping else '—' }}</b> ·

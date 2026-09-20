@@ -29,6 +29,20 @@
     </span>
   </div>
   <div class="board-body">
+    {% if agent.get('fallback_reason') %}
+      <div class="notice warn">fallback: {{ agent.fallback_reason }}</div>
+    {% endif %}
+    {% set up = agent.get('unpack_prepass') %}
+    {% if up is mapping %}
+      <p class="muted" style="font-size:var(--tx-xs)">
+        unpack: OEP <b>{{ up.get('oep') or '-' }}</b> &#183;
+        source <b>{{ up.get('dump_source') or '-' }}</b>
+        {% if up.get('dump_parse') %} &#183; parses <b>{{ up.dump_parse.get('parses') }}</b>
+          &#183; imports <b>{{ up.dump_parse.get('imports') }}</b>{% endif %}
+        {% if up.get('imp_modes_tried') %} &#183; /imp modes {{ up.imp_modes_tried|join(' -&gt; ') }}{% endif %}
+        {% if up.get('rebuild_hint') %}<br><span style="color:var(--warn)">{{ up.rebuild_hint }}</span>{% endif %}
+      </p>
+    {% endif %}
     {% if agent.get('llm_analysis') and agent.llm_analysis is string %}
       <details open><summary>LLM analysis</summary><pre>{{ agent.llm_analysis }}</pre></details>
     {% endif %}
