@@ -42,6 +42,28 @@
     {% else %}&#183; kesakode off/na{% endif %}
     {% if ti.get('reasons') %}<br><span class="muted">{{ ti.reasons|join('; ') }}</span>{% endif %}
     {% if ti.get('tool_markers') %}<br><span class="muted">markers: {{ ti.tool_markers|join(', ') }}</span>{% endif %}
+    {% set v = ti.get('vt') %}
+    {% if v is mapping %}
+      <br>
+      {% if v.get('skipped') %}<span class="muted">VirusTotal: {{ v.get('skipped') }}</span>
+      {% elif v.get('found') %}
+        VirusTotal:
+        {% if v.get('malicious') or v.get('suspicious') %}<span class="badge warn">{{ v.get('detection_ratio') }} detections</span>
+        {% else %}<span class="badge up">clean ({{ v.get('detection_ratio') }})</span>{% endif %}
+        {% if v.get('family') %}&#183; family <b>{{ v.family }}</b>{% endif %}
+        {% if v.get('name') %}&#183; name {{ v.name }}{% endif %}
+        &#183; <a href="{{ v.get('link') }}" target="_blank" rel="noopener">VT report</a>
+      {% elif v.get('error') %}<span class="muted">VirusTotal: {{ v.get('error') }}</span>
+      {% else %}<span class="muted">VirusTotal: hash not found</span>{% endif %}
+    {% endif %}
+    {% set ko = ti.get('kesakode_offline') %}
+    {% if ko is mapping %}
+      <br>
+      {% if ko.get('skipped') %}<span class="muted">Kesakode (offline): {{ ko.get('skipped') }}</span>
+      {% elif ko.get('error') %}<span class="muted">Kesakode (offline): {{ ko.get('error') }}</span>
+      {% elif ko.get('top') %}<span class="badge warn">Kesakode: {{ ko.get('top')|join(', ') }}</span>
+      {% elif ko.get('verdict') is not none %}<span class="muted">Kesakode (offline): no family match</span>{% endif %}
+    {% endif %}
   </p>
   {% endif %}
   {% set ida = q.evidence.ida %}{% set gh = q.evidence.ghidra %}

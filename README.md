@@ -50,7 +50,6 @@ C:\samples\<sha>.exe  ◄──── analyst copies to both ──►  /opt/sam
         ├─ tools/flare_ghidra_sql.py ── analyzeHeadless ────┘  static/LLM pipeline
         │     └─ ghidrasql (LibGhidraHost SQL)           (reads logs/<sha>/<mode>/dynamic/
         ├─ tools/flarevm_ida_query.py ── idasql.exe          as corroboration only)
-        ├─ tools/flarevm_bn_query.py ── Binary Ninja API
         │
         └─ winre/orchestrator.py ── ── ── ── ── ── ── ── ── ── ── ── ── ┐
               └─ winre/flare_dynamic_job.ps1                          │
@@ -109,12 +108,13 @@ ELF samples are rare on Windows; the orchestrator dispatches them to the Linux-s
 | **Analyst-only markers** | `ANALYST-NEXT.md` explicitly tags human work (PCAP deep-dive, snapshot restore, HITL unpacking) so an agent cannot claim it done |
 | **Vendored debugger MCP** | 71-tool x64dbg server (Zig, MIT) for live debug control + mcp-windbg dump analysis (MIT) share one JSON-RPC shape for the agentic loop |
 | **Unique artifact names** | FakeNet sub-directory outputs (shared filenames like `capture.pcap`) are flattened with collision-free names — no silent capture loss |
+| **Threat-intel triage** | offline known-tool identification (signer/VersionInfo/security-tool markers) + control-plane **VirusTotal hash-only** lookup (only the SHA256 leaves the box; evidence-only by policy) |
 
 ---
 
 ## Requirements
 
-* **OS**: Windows 10/11 (Flare-VM recommended — the VMware Flare image ships IDA/BN/Ghidra/x64dbg/WinDbg/Procmon/FakeNet)
+* **OS**: Windows 10/11 (Flare-VM recommended — the VMware Flare image ships IDA/Ghidra/x64dbg/WinDbg/Procmon/FakeNet)
 * **Resources**: 8 GB RAM minimum (16 GB recommended); ≥60 GB disk
 * **Python**: 3.11+ (`frida` for the tracer, `flask` for the SQL/HTTP servers)
 * **Isolated lab network** — host-only VM network, no public internet
@@ -130,7 +130,7 @@ ELF samples are rare on Windows; the orchestrator dispatches them to the Linux-s
 git clone https://github.com/Ganron007/WinRE.git C:\WinRE
 
 # 2. Health check the tool stack
-python C:\WinRE\tools\flarevm_toolset.py health          # IDA / idasql / Binary Ninja
+python C:\WinRE\tools\flarevm_toolset.py health          # IDA / idasql
 python C:\WinRE\tools\flare_ghidra_sql.py health         # Ghidra + CADRE PE Loader
 python C:\WinRE\tools\malcat_win.py health               # Malcat (optional, licensed)
 
@@ -187,8 +187,8 @@ Docs index: [`docs/`](docs/README.md). Per-feature docs: `docs/PIPELINE.md` · `
 | Item | Description |
 |------|-------------|
 | **Persistence forensics pass** | Registry Run keys / services diff in `process_snapshot_*` vs clean baseline, surfaced in `ANALYST-NEXT.md` |
-| **VirusTotal hash-only triage** | Control-plane hash lookup feeding the triage `threat_intel` evidence (VM stays air-gapped) |
 | **RevAI evidence backlink** | URL/`load_dynamic_pack()` links in published RevAI reports pointing at the WinRE artifact pack |
+| **Windows 11 support** | Deferred past v1.0: Defender cannot be fully disabled on Win11, which blocks the detonation phase |
 
 ---
 

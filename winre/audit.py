@@ -27,7 +27,11 @@ def _stage_ok(evidence: Path, stage: str) -> dict:
         if meta.is_file():
             try:
                 m = json.loads(meta.read_text(encoding="utf-8"))
-                ok = bool(m.get("ok") or m.get("ran"))
+                # explicit "not requested"/skipped stages are NOT "ran"
+                if m.get("ran") is False or m.get("skipped"):
+                    ok = False
+                else:
+                    ok = bool(m.get("ok") or m.get("ran"))
                 # orchestrator dynamic META marks ok=True when artifacts landed
                 if stage == "dynamic" and "frida_events" in m:
                     ok = bool(m.get("ok"))

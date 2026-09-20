@@ -557,6 +557,9 @@ def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = 
 
     # ---- DYNAMIC phase (segregated, opt-in, LAST) ----
     dynamic = None
+    if not enable_dynamic:
+        from .evidence import mark_dynamic_not_requested
+        mark_dynamic_not_requested(pack)
     if enable_dynamic:
         # static already complete; detonation runs on (restored) VM now.
         # dynamic is corroboration — do not let it fail static artifacts.

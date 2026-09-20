@@ -118,6 +118,33 @@ def pack_sections(sha_dir: Path) -> list[dict]:
     return out
 
 
+def mark_dynamic_not_requested(pack: "EvidencePack") -> None:
+    """Fresh dynamic/STAGE.json for a run that did not request detonation.
+
+    Clears any previous run's dynamic artifacts first: a stale gate-blocked
+    STAGE.json must never make a static-only run look "dynamic blocked"
+    (found 2026-09-20). Never raises.
+    """
+    try:
+        import shutil
+        d = pack.stages.get("dynamic")
+        if d and d.exists():
+            for ch in list(d.iterdir()):
+                if ch.is_dir():
+                    shutil.rmtree(ch, ignore_errors=True)
+                else:
+                    try:
+                        ch.unlink()
+                    except OSError:
+                        pass
+        pack.write("dynamic", "STAGE.json", {
+            "stage": "dynamic", "ok": True, "ran": False,
+            "skipped": "not requested",
+            "summary": "dynamic not requested (static-only run)"})
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def stage_result(stage: str, ok: bool, *, error: str | None = None,
                  summary: str | None = None, **extra) -> dict:
     """A stage's META-shaped result with the honest ok/error contract."""

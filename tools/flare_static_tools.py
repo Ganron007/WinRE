@@ -140,39 +140,43 @@ def capa(sample: str, timeout: int = 900) -> dict:
 def floss(sample: str, timeout: int = 900) -> dict:
     import importlib.util
     has_mod = importlib.util.find_spec("floss") is not None
-    # pip floss entry: floss.main lacks __main__ on some builds — use the
-    # documented API entry (floss.main.main) with explicit argv, else Scripts
-    # exe; FlareVM's standalone C:\Tools\FLOSS\floss.exe is the final fallback.
-    exe = Path(PY).parent / "Scripts" / "floss.exe"
-    roaming = Path.home() / "AppData" / "Roaming" / "Python" / "Python313" / "Scripts" / "floss.exe"
+    # Preference order matters: the pip/module CLI routes through the full
+    # vivisect pipeline and measured ~523 s on a 1.7 MB tool binary
+    # (2026-09-20), while FlareVM's standalone binary finishes in seconds on
+    # the same file. Standalone FIRST; module CLIs are fallbacks only.
     standalone = Path(r"C:\Tools\FLOSS\floss.exe")
-    # JSON flag differs by distribution: the pip/module CLI takes -j, the
-    # FlareVM standalone accepted --json. Try both, first rc==0 wins.
-    if has_mod and exe.is_file():
-        base = [str(exe)]
+    exe = Path(PY).parent / "Scripts" / "floss.exe"
+    roaming = (Path.home() / "AppData" / "Roaming" / "Python" / "Python313"
+               / "Scripts" / "floss.exe")
+    if standalone.is_file():
+        cmd = [str(standalone), "--json", sample]
+    elif has_mod and exe.is_file():
+        cmd = [str(exe), "-j", sample]
     elif has_mod and roaming.is_file():
-        base = [str(roaming)]
-    elif standalone.is_file():
-        base = [str(standalone)]
+        cmd = [str(roaming), "-j", sample]
     elif has_mod:
-        base = [PY, "-c",
-                "import sys; sys.argv=['floss', sys.argv[1], '-j']; "
-                "from floss.main import main; exit(main())"]
+        cmd = [PY, "-c",
+               "import sys; sys.argv=['floss', sys.argv[1], '-j']; "
+               "from floss.main import main; exit(main())", sample]
     else:
         return _skipped("floss", "no python module and no C:\\Tools\\FLOSS\\floss.exe")
-    rc, out, err = 1, "", ""
-    attempts = ([base + [sample]] if base[0] == PY
-                else [base + [f, sample] for f in ("-j", "--json")])
-    for cmd in attempts:
-        rc, out, err = _run(cmd, timeout)
-        if rc == 0 and (out or "").strip().startswith("{"):
-            break
+    rc, out, err = _run(cmd, timeout)
     if rc != 0:
         return {"ok": False, "error": (err or out)[-300:], "tool": "floss"}
+    # tolerate leading log lines: floss prints one JSON blob (take { .. })
+    d = None
     try:
         d = json.loads(out)
     except json.JSONDecodeError:
-        return {"ok": False, "error": "floss non-JSON output", "tool": "floss"}
+        i, j = (out or "").find("{"), (out or "").rfind("}")
+        if i >= 0 and j > i:
+            try:
+                d = json.loads(out[i:j + 1])
+            except json.JSONDecodeError:
+                d = None
+    if not isinstance(d, dict):
+        return {"ok": False, "error": "floss non-JSON output",
+                "stdout_tail": (out or "")[-200:], "tool": "floss"}
     strings = []
     for feat in (d.get("strings") or {}).get("decoded_strings", []):
         s = feat.get("string", "")
@@ -657,6 +661,25 @@ _SECURITY_TOOL_MARKERS = (
     "forensic", "incident response", "malware analysis", "threat hunting",
     "dfir", "soc ", "siem",
 )
+
+
+def kesakode_offline(sample: str, timeout: int = 600) -> dict:
+    """Offline Kesakode family lookup (Malcat headless).
+
+    OEM-license feature; on FULL/PRO the tool returns an honest skip (the DB
+    is bundled but not queryable headless). Never online, never keyed."""
+    tool = Path(__file__).with_name("malcat_kesakode.py")
+    if not tool.is_file():
+        return _skipped("kesakode_offline", "malcat_kesakode.py missing")
+    rc, out, err = _run([PY, str(tool), sample, "--json"], timeout)
+    try:
+        d = json.loads(out)
+        if isinstance(d, dict):
+            return d
+    except json.JSONDecodeError:
+        pass
+    return {"ok": False, "tool": "kesakode_offline",
+            "error": (err or out)[-300:] or "no JSON from malcat_kesakode.py"}
 
 
 def threat_intel(sample: str, timeout: int = 120) -> dict:
@@ -1586,6 +1609,7 @@ def main() -> int:
                   "strings": strings,
                   "pe_import_signals": pe_import_signals,
                   "api_hash_resolver": api_hash_resolver,
+                  "kesakode_offline": kesakode_offline,
                   "threat_intel": threat_intel,
                   "signature_match": signature_match,
                   "xor_string_search": xor_string_search,

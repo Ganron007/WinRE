@@ -47,6 +47,7 @@ Gate + auto-restore config (optional):
 | `WINRE_SNAPSHOT` | snapshot name to restore |
 | `WINRE_LLM_CONTEXT_TOKENS` | model context window (default `1000000`) - sizes the evidence budget sent to the LLM |
 | `WINRE_LLM_MAX_OUTPUT_TOKENS` | assistant output cap (default `32768`) |
+| `WINRE_VT_API_KEY` | VirusTotal **hash-only** triage on the control plane (optional; only the SHA256 is sent) |
 
 Smoke-check connectivity:
 
@@ -88,7 +89,7 @@ the **SQL-first Ghidra/IDA stack** (staged `LibGhidraHost.zip` +
 registry and end-of-run sweep - see [`SQL-GHIDRA.md`](SQL-GHIDRA.md))
 + **CADRE PE loader** (auto-copied into Ghidra `Extensions\CADRE` from
 `C:\Tools-staged\cadre-pe-loader`); **`idasql.exe`** auto-installed from
-staging next to `idat.exe`; MCP autostart (Malcat :9009, mcp-windbg :9097;
+staging next to `idat.exe`; MCP autostart (`WinRE-MCP-Boot` AtStartup/SYSTEM + logon launcher: Malcat :9009, mcp-windbg :9097;
 x64dbg :9094 on demand); IDA license hygiene (shadowed-Free auto-fix) +
 logon/BinDiff cleanup.
 

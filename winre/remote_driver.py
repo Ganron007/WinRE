@@ -237,6 +237,28 @@ try:
                     ti.setdefault("reasons", []).append("malcat kesakode: tool tag")
             except Exception:
                 pass
+        # offline Kesakode (Malcat headless): OEM-only; honest skip otherwise
+        try:
+            ks2 = run(tools / "flare_static_tools.py", "kesakode_offline",
+                      str(sample), timeout=900)
+            # the CLI wraps a single-tool payload: {"kesakode_offline": {...}}
+            p2 = ks2.get("kesakode_offline") if isinstance(ks2, dict) else None
+            if isinstance(p2, dict):
+                if p2.get("skipped"):
+                    ti["kesakode_offline"] = {"skipped": p2.get("skipped")}
+                elif p2.get("ok"):
+                    ti["kesakode_offline"] = {
+                        "flavor": p2.get("flavor"),
+                        "verdict": p2.get("verdict"),
+                        "top": p2.get("top"), "matches": p2.get("matches")}
+                    if p2.get("top"):
+                        ti["known_tool"] = False
+                        ti.setdefault("reasons", []).append(
+                            "Kesakode: " + ", ".join(p2["top"][:3]))
+                elif p2.get("error"):
+                    ti["kesakode_offline"] = {"error": p2.get("error")}
+        except Exception:
+            pass
         md = mc_file.get("metadata")
         if isinstance(md, dict):
             comp = str(md.get("company") or md.get("Company") or "")
@@ -326,6 +348,32 @@ def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict) -> dict:
                       if isinstance(v, dict)
                       and not v.get("error") and not v.get("skipped")]
     ok = parsed and (len(failed_sources) < len(evidence)) and bool(active_sources)
+
+    # --- control-plane threat intel: VirusTotal HASH-ONLY -------------------
+    # Runs on the driving box (never the air-gapped VM) and only sends the
+    # SHA256. Evidence-only by policy: a detection count never decides a
+    # verdict (commercial AV flags dual-use tooling constantly). Added AFTER
+    # the failure/active accounting so VT errors can't fail the quick gate.
+    try:
+        from . import vt as _vt
+        _sha = pack.root.name
+        if not (len(_sha) == 64
+                and all(c in "0123456789abcdef" for c in _sha.lower())):
+            _sha = pack.root.parent.name   # section pack: logs/<sha>/<mode>
+        vres = _vt.lookup(_sha)
+        evidence["vt"] = vres
+        ti = evidence.get("threat_intel")
+        if isinstance(ti, dict):
+            ti["vt"] = {k: vres.get(k) for k in
+                        ("ok", "found", "malicious", "suspicious",
+                         "detection_ratio", "family", "name", "link",
+                         "error", "skipped")}
+            if vres.get("malicious") and vres.get("family"):
+                ti.setdefault("reasons", []).append(
+                    f"VirusTotal: {vres['family']} "
+                    f"({vres.get('detection_ratio')})")
+    except Exception as e:  # noqa: BLE001
+        evidence["vt"] = {"ok": False, "error": str(e)[:180]}
 
     verdict = "unknown"
     pack.write("quick", "quick.json", {"evidence": evidence, "verdict": verdict,
@@ -969,6 +1017,9 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
                                   dynamic=enable_agentic_dbg, mode=mode)
 
     # ---- DYNAMIC phase (segregated, opt-in, runs LAST after static) ----
+    if not enable_dynamic:
+        from .evidence import mark_dynamic_not_requested
+        mark_dynamic_not_requested(pack)
     if enable_dynamic:
         results["dynamic"] = remote_dynamic(sample.name, sha, pack, cfg,
                                             max_seconds, enable_pesieve,

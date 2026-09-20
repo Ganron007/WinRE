@@ -6,7 +6,7 @@
 .DESCRIPTION
     Boot-safe launcher: checks each port before starting (idempotent), so it
     can run at every logon (Startup folder) without duplicate servers. Starts:
-      - Malcat MCP     :9009 (malcat.mcp.py -p 9009 [-k $MALCAT_KEY])
+      - Malcat MCP     :9009 (malcat.mcp.py -p 9009; offline-only, no key)
       - WinDbg MCP     :9097 (mcp_windbg --transport streamable-http)
       - x64dbg-MCP     :9094 (optional: launches x64dbg GUI whose plugin
                                auto-starts the MCP server on :9094)
@@ -111,13 +111,9 @@ $malcatBin = "C:\Tools\malcat\bin\malcat.mcp.py"
 if (-not (Test-Path $malcatBin)) { $malcatBin = "C:\Program Files\Malcat\bin\malcat.mcp.py" }
 if (-not (Test-Path $malcatBin)) { $malcatBin = "C:\Users\flare-vm\Downloads\malcat\bin\malcat.mcp.py" }
 if (Test-Path $malcatBin) {
-    $key = ""
-    if (Test-Path "$WinRE\.env") {
-        $line = Select-String -Path "$WinRE\.env" -Pattern "^MALCAT_KEY=" | Select-Object -First 1
-        if ($line) { $key = ($line.Line -split "=",2)[1].Trim() }
-    }
+    # Offline-only policy: never pass -k (online Kesakode). The VM holds no
+    # secrets - no C:\WinRE\.env, no MALCAT_KEY.
     $argsList = @($malcatBin, "-p", "$MalcatPort")
-    if ($key) { $argsList += @("-k", $key) }
     Start-Hidden "C:\Python313\python.exe" $argsList "malcat" $MalcatPort
 } else {
     Write-Host "[winre-mcp] WARN: malcat.mcp.py not found — skipping Malcat MCP" -ForegroundColor Yellow

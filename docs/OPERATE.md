@@ -42,9 +42,17 @@ localhost-bound on the VM and probed over SSH.
 
 **Invariants:** dynamic is opt-in and always LAST; `static_yara_wins` - dynamic corroborates, never clears a static verdict; every run is audited (`audit.json`, `truly_green`). The snapshot gate defaults to **`enforce`** (a detonation consumes the marker; the next dynamic run is refused until the snapshot is reverted and setup re-run). Set `WINRE_SNAPSHOT_GATE=observe` only for intentional benign test loops. A refused dynamic run writes a fresh `dynamic/STAGE.json` (`ok=false`, "blocked by snapshot gate") and the audit records `dynamic_blocked: true` - stale evidence can never masquerade as this run's detonation.
 
-**Threat intel (triage):** the offline `threat_intel` tool identifies known tools (Authenticode signer, VersionInfo, security-tool markers) and merges Malcat Kesakode verdicts when the MCP is keyed. Kesakode is effectively unavailable in this deployment (no `-k` on the VM by policy; headless offline Kesakode needs an OEM license - see Malcat's public docs
-<https://doc.malcat.fr/analysis/kesakode.html>). Planned: VirusTotal
-**hash-only** lookup on the control plane at triage.
+**Threat intel (triage):** the deterministic `threat_intel` tool identifies
+known tools (Authenticode signer, VersionInfo, security-tool markers), and
+the driver box adds a **VirusTotal HASH-ONLY** lookup (`WINRE_VT_API_KEY` in
+the control-plane `.env`; only the SHA256 is sent - never a sample).
+Evidence-only by policy: VT engines flag dual-use tooling constantly, so a
+detection count never decides a verdict. **Kesakode is not available here**:
+headless *offline* Kesakode is an OEM-license feature (this install is FULL,
+and live-probed flavors are reported by `tools/malcat_kesakode.py`), and the
+**online** lookup (`-k`, license quota) is deliberately **removed by policy**
+- the VM holds no secrets. An OEM build auto-enables offline lookup through
+the `kesakode_offline` evidence field.
 
 ## Where the LLM lives (driver owns the LLM)
 
@@ -57,6 +65,7 @@ WINRE_LLM_BASE_URL=https://<your-provider>/v1
 WINRE_LLM_MODEL=<model-name-your-provider-exposes>
 WINRE_LLM_API_KEY=<key>
 WINRE_LLM_REASONING=high
+WINRE_VT_API_KEY=<virustotal-key>   # hash-only triage (optional)
 WINRE_LLM_CONTEXT_TOKENS=1000000     # model window - evidence budget (default)
 WINRE_LLM_MAX_OUTPUT_TOKENS=32768    # assistant output cap (default)
 ```
@@ -180,9 +189,9 @@ Prepare a reusable baseline: deploy, verify, clean, snapshot.
 3. Confirm the clean marker is present (`python -m winre.snapshot_gate status`;
    `marker-create` if missing) - the snapshot must contain it.
 4. Shut down and snapshot. MCP servers do **not** need to be running in the
-   snapshot: the Startup launcher (`WinRE-MCP.cmd`) + `WinRE-MCP-Heal` task
-   bring Malcat `:9009` / WinDbg `:9097` back after restore, and the x64dbg
-   manager launches `:9094` on demand.
+   snapshot: the `WinRE-MCP-Boot` scheduled task (AtStartup, SYSTEM) brings
+   Malcat `:9009` / WinDbg `:9097` back after any reboot/restore (no logon
+   required), and the x64dbg manager launches `:9094` on demand.
 
 After restore the first dynamic run is allowed (marker armed) and consumes the
 marker; revert again before the next detonation.
@@ -191,14 +200,18 @@ marker; revert again before the next detonation.
 
 | Server | Port | Start | Notes |
 |---|---|---|---|
-| Malcat | 9009 | boot autostart (`WinRE-MCP.cmd`) + driver self-heal | localhost-bound; control plane uses the SSH-exec bridge |
-| WinDbg | 9097 | boot autostart + self-heal (`windbg_post`) | localhost-bound; SSH port probe for health |
+| Malcat | 9009 | **boot task** `WinRE-MCP-Boot` (AtStartup, SYSTEM) + logon launcher + driver self-heal | localhost-bound; control plane uses the SSH-exec bridge; offline-only (no `-k`) |
+| WinDbg | 9097 | **boot task** `WinRE-MCP-Boot` (AtStartup, SYSTEM) + self-heal (`windbg_post`) | localhost-bound; SSH port probe for health |
 | x64dbg | 9094 | on demand only — scheduled-task launch via `x64dbg_manager` (agentic-dbg gate + dynamic OEP/dump heal); **not** auto-started at boot | binds all interfaces; GUI + plugin |
 
 Restart everything on the VM console:
 `powershell -File C:\WinRE\winre\mcp\start_servers.ps1` (idempotent).
 
-**Self-healing.** The boot launcher is the primary path; on top of it
+**Self-healing.** `WinRE-MCP-Boot` (scheduled task, AtStartup, SYSTEM) is the
+primary path and does **not** depend on an interactive logon (the box has no
+AutoAdminLogon, so the Startup-folder launcher alone left MCP down after a
+reboot - fixed 2026-09-20). The logon launcher is kept for interactive
+sessions. On top of both,
 `remote_driver.ensure_mcp_servers()` (quick + deep stages) and
 `windbg_post` (dynamic post-analysis) re-probe and, when a headless server
 is down, run `start_servers.ps1 -NoX64dbg -Detach`. `-Detach` re-launches

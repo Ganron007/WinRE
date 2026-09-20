@@ -93,11 +93,10 @@ def _load_env_file() -> dict:
 
 
 def _resolve_key() -> str | None:
-    key = os.environ.get("MALCAT_KEY")
-    if key:
-        return key
-    env = _load_env_file()
-    return env.get("MALCAT_KEY")
+    """DEPRECATED: online Kesakode is removed by policy (offline-only).
+
+    Kept as a no-op so older callers do not break."""
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -110,20 +109,20 @@ def health() -> dict:
         "malcat_mcp_exists": MALCAT_MCP.is_file(),
         "license_file": str(MALCAT_LICENSE),
         "license_file_exists": MALCAT_LICENSE.is_file(),
-        "key_env": "MALCAT_KEY" in os.environ,
-        "key_envfile": bool(_load_env_file().get("MALCAT_KEY")),
+        "key_env": False,   # online Kesakode removed by policy
+        "key_envfile": False,
         "python": shutil.which("python") or shutil.which("python.exe"),
     }
     # The MALCAT_KEY is ONLY for ONLINE Kesakode. Headless offline analysis
     # works without it (verified live 2026-09-19) - do not gate on the key.
-    out["kesakode_online"] = bool(out["key_env"] or out["key_envfile"])
+    out["kesakode_online"] = False   # offline-only policy (no -k)
     out["ok"] = out["malcat_mcp_exists"]
     if not out["ok"]:
         out["error"] = f"malcat.mcp.py missing at {MALCAT_MCP}"
     elif not out["kesakode_online"]:
-        out["note"] = ("offline only - no MALCAT_KEY: Kesakode lookups are "
-                       "unavailable (headless offline Kesakode needs an OEM "
-                       "license; online needs -k with a running license)")
+        out["note"] = ("Kesakode: offline-only policy. Headless offline lookup "
+                       "requires an OEM license; online (-k) is deliberately "
+                       "not configured (no secrets on the VM).")
     return out
 
 
@@ -140,8 +139,7 @@ def _build_argv(views: list[str], limits: dict, path: Path,
     ]
     for k, v in limits.items():
         argv += [f"--limit-{k}", str(v)]
-    if key:
-        argv += ["-k", key]  # ONLINE Kesakode only
+    # no -k: online Kesakode removed by policy (offline-only)
     return argv
 
 
