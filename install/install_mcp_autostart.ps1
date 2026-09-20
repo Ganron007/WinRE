@@ -22,9 +22,15 @@ $startup = [Environment]::GetFolderPath("Startup")
 $launcher = Join-Path $startup "WinRE-MCP.cmd"
 $script = "C:\WinRE\winre\mcp\start_servers.ps1"
 
+$bootTask = "WinRE-MCP-Boot"
+
 if ($Remove) {
     if (Test-Path $launcher) { Remove-Item $launcher -Force; Write-Host "removed $launcher" -ForegroundColor Green }
     else { Write-Host "no autostart entry present" -ForegroundColor Yellow }
+    if (Get-ScheduledTask -TaskName $bootTask -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $bootTask -Confirm:$false
+        Write-Host "removed scheduled task $bootTask" -ForegroundColor Green
+    }
     exit 0
 }
 
@@ -43,4 +49,25 @@ Write-Host "installed: $launcher" -ForegroundColor Green
 $task = Get-ScheduledTask -TaskName "WinRE-MCP-WinDbg" -ErrorAction SilentlyContinue
 if ($task) { Unregister-ScheduledTask -TaskName "WinRE-MCP-WinDbg" -Confirm:$false; Write-Host "removed old WinRE-MCP-WinDbg task (superseded by startup launcher)" -ForegroundColor Yellow }
 
-Write-Host "MCP autostart installed. Reboot (autologon) will bring up :9009 :9097 :9094." -ForegroundColor Cyan
+# --- boot-safe scheduled task -----------------------------------------------
+# The Startup-folder launcher only fires on an INTERACTIVE LOGON. This box has
+# no AutoAdminLogon (verified 2026-09-20) - i.e. after a reboot nobody logs in
+# and MCP never came up (found during the boot-autostart proof). Register an
+# AtStartup task running as SYSTEM so :9009/:9097 are up after ANY reboot,
+# independent of logons. Idempotent start_servers.ps1 makes a later user logon
+# a no-op.
+$action = New-ScheduledTaskAction -Execute "powershell.exe" `
+    -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden " +
+               "-File `"$script`" -NoX64dbg")
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" `
+    -LogonType ServiceAccount -RunLevel Highest
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries -StartWhenAvailable `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) `
+    -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 1)
+Register-ScheduledTask -TaskName $bootTask -Action $action -Trigger $trigger `
+    -Principal $principal -Settings $settings -Force | Out-Null
+Write-Host "installed scheduled task: $bootTask (AtStartup, SYSTEM)" -ForegroundColor Green
+
+Write-Host "MCP autostart installed: boot task + logon launcher -> :9009 :9097 (x64dbg :9094 on demand)." -ForegroundColor Cyan
