@@ -23,6 +23,22 @@
     {% endfor %}
     </tbody>
   </table></div>
+  {% if a.unmet_expectations %}
+  <div class="notice err" style="margin-top:8px">unmet expectations — this run is
+    <b>not</b> green:</div>
+  <ul style="color:var(--danger); font-size:var(--tx-sm); margin:4px 0">
+    {% for u in a.unmet_expectations %}<li class="mono">{{ u }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% if a.execution_plan %}
+  <p class="muted" style="font-size:var(--tx-xs); margin-top:8px">
+    execution plan: {{ a.execution_plan.execution_sites | join(' + ') or 'none' }}
+    — requested {{ a.execution_plan.executions_requested }},
+    gate ({{ a.execution_plan.gate_mode }}) allows
+    {{ a.execution_plan.executions_available }}
+    {% if not a.execution_plan.ok %}<span class="badge down">over budget</span>{% endif %}
+  </p>
+  {% endif %}
   {% if a.failed_tools %}
   <p class="muted" style="font-size:var(--tx-xs); margin-top:8px">failed tools:</p>
   <ul style="color:var(--danger); font-size:var(--tx-sm); margin:4px 0">

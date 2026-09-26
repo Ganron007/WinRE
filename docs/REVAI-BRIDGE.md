@@ -226,7 +226,7 @@ python3 -m winre.pipeline <local-sample-path> --driver remote --mode agentic --d
 
 ## 9. Artifacts RevAI consumes
 
-Two WinRE outputs are part of the contract:
+Three WinRE outputs are part of the contract:
 
 - **Unpack artifact (PE-valid):** `deep/x64dbg/<stem>_pesieve_unpacked.exe` in
   the mode-section pack, and inside the DFIR-Nexus casepack under
@@ -240,3 +240,25 @@ Two WinRE outputs are part of the contract:
   `META.job.json`; the raw trace-side record is
   `frida_trace.jsonl.run.json`). Cite it when reporting dynamic evidence so
   a short effective window is not over-read (delayed C2 may fall outside it).
+- **Case pack (DFIR-Nexus ingest):** `case-<sha16>-<mode>.7z` at the **pack
+  root** (`logs/<sha>/<mode>/`), *not* inside a stage directory — it is a
+  derived bundle, not a stage artifact, so do not read it as one. It contains
+  the dynamic logs plus static context, unpack dumps, `manifest.json` and
+  `timeline.json` (`.zip` fallback when 7-Zip is absent). The authoritative
+  per-stage files remain the ones in `intake/`, `quick/`, `deep/`, `dynamic/`,
+  `yara/`, `report/`.
+
+### Run-level facts a consumer should read before trusting a pack
+
+| Fact | Where | Meaning |
+|---|---|---|
+| `execution_plan` | `execution_plan.json` → `audit.json` | how many VM executions the run intended (`execution_sites`, `executions_requested`) and whether the snapshot gate could honor it. `gate_mode=enforce` without hypervisor auto-restore allows **1 execution per clean restore** — a run asking for `--dynamic` + `--agentic-dbg` is refused before anything executes. |
+| `run_id` | `dynamic/META.json` + `dynamic/STAGE.json → nonce` | the per-run nonce the control plane issued. Pack freshness is decided by this **value** (a VM `META.json` without it is not trusted); timestamps are for humans only. |
+| `clock_skew_s` | `dynamic/STAGE.json`, pack `META.json`, `/health` | VM-vs-control-plane clock difference, seconds. **Diagnostic only** — freshness never depends on it (a 5h-fast control plane can no longer make a run look `not-run`). VM-side facts live in `C:\WinRE\vm_clock.json`. |
+| `unmet_expectations` | `audit.json` | named gaps that block `truly_green` (e.g. `deep verdict missing`, `report verdict missing`). An empty list is part of the green contract. |
+| `no_verdict` / `verdict` | `deep/deep.json` (top level **and** `agent`), `report/report.json` | the deep verdict is mirrored at the top level of `deep.json` (`verdict`, `verdict_obj`, `source`, `confidence`, `key_evidence`, `tool_failures`) so a consumer does not need to know it lives under `agent`. |
+
+Evidence is append-only per mode section: a later static-only run never
+deletes an earlier dynamic pack — the previous pack is moved to
+`previous_runs/dynamic_<ts>/` and the fresh `dynamic/STAGE.json` points at it
+(`preserved_previous`, `cleared_previous: false`).

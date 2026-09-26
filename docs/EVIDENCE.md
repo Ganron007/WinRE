@@ -26,8 +26,16 @@ logs/<sha256>/<static|agentic>/         ← one self-contained case per engine
 │                                     mode, fallback flag, MCP health
 ├── dynamic/                          (opt-in, segregated, runs LAST)
 │   ├── META.json / STAGE.json        run status + sample_pid + window + snapshot-gate evidence
-                                (refused run: ok=false, 'blocked by snapshot gate';
-                                 audit exposes dynamic_blocked=true)
+│   │                                 + run_id (the per-run nonce the control plane
+│   │                                 issued: freshness is decided by this VALUE,
+│   │                                 never by comparing clocks; clock_skew_s
+│   │                                 rides along as a diagnostic only)
+│   │                                 (refused run: ok=false, 'blocked by snapshot gate';
+│   │                                 audit exposes dynamic_blocked=true)
+│   │                                 (not requested: ran=false, skipped='not requested',
+│   │                                 preserved_previous → previous_runs/dynamic_<ts>/;
+│   │                                 cleared_previous is always false — a static-only
+│   │                                 run never destroys a dynamic pack)
 │   ├── frida_trace.jsonl / frida_summary.json
 │   ├── procmon.csv / procmon_summary.json
 │   │                               (+ persistence catalog, spoofing_suspects)
@@ -41,6 +49,11 @@ logs/<sha256>/<static|agentic>/         ← one self-contained case per engine
 │   │                                 (!analyze -v/.ecxr/k/lm; passive)
 │   ├── x64dbg/dump/                  OEP dumps (local-mode post step)
 │   └── process_snapshot.json         PPID/cmdline snapshot (spoof correlation)
+├── previous_runs/dynamic_<ts>/       earlier dynamic packs, moved (never deleted)
+│                                     when a later static-only run reuses the section
+├── execution_plan.json               what the run intended: execution_sites,
+│                                     executions_requested / _available, gate_mode
+│                                     (written BEFORE any stage; mirrored into audit.json)
 ├── case-<sha16>-<mode>.7z            DFIR-Nexus ingest pack (dynamic + static
 │                                     context + unpack dumps + manifest + timeline)
 ├── yara/

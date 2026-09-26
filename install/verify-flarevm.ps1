@@ -347,6 +347,25 @@ if (Test-Path "C:\WinRE\.env") { Info "C:\WinRE\.env present (unused on the VM -
 else { Info "no C:\WinRE\.env (fine - LLM config lives on the control plane via .env)" }
 
 Write-Host ""
+Write-Host "--- clock (control-plane skew diagnosis) ---"
+# RevAI handoff 2026-09-27 item 4: freshness no longer compares clocks
+# (winre/run_nonce.py), so this is a DIAGNOSTIC gate: a stopped w32time is a
+# WARN (it makes every timestamp in the pack untrustworthy for a human
+# reading them), never a FAIL. Read-only: verify stays side-effect free.
+$w32 = Get-Service -Name w32time -ErrorAction SilentlyContinue
+if ($w32 -and $w32.Status -eq "Running") {
+    $q = (& w32tm.exe /query /status 2>&1 | Out-String)
+    $src = if ($q -match "Source:") { ($q -split "Source:")[1] -split "`r?`n" | Select-Object -First 1 } else { "?" }
+    Ok ("w32time running (source: {0}); vm now {1}" -f $src.Trim(), (Get-Date -Format o))
+} elseif ($w32) {
+    Warn ("w32time stopped (startup={0}) - run setup or: Set-Service w32time -StartupType Automatic; w32tm /resync /force" -f $w32.StartType)
+} else {
+    Warn "w32time service not found"
+}
+if (Test-Path "C:\WinRE\vm_clock.json") { Ok "clock state file C:\WinRE\vm_clock.json present" }
+else { Warn "clock state file missing (re-run install/setup-flarevm.ps1)" }
+
+Write-Host ""
 Write-Host "--- cleanup (verify must not dirty the image) ---"
 # The SQL live gates stage probe samples and leave per-project servers/caches
 # behind. A verify run must be side-effect free so a golden snapshot stays

@@ -5,18 +5,27 @@ Mirrors RevAI's honesty contract:
     truly_green = all stages ran (all_green)
                 + no stage used a deterministic fallback when the primary
                   tool was required (quality_green)
+                + no unmet expectation (a stage that ran but produced
+                  nothing usable — e.g. a deep dive with verdict: null)
                 + zero failed tools (tool_failures empty)
                 + dynamic honesty (dynamic evidence corroborates but never
                   overrides static YARA — static_yara_wins)
 
-Every audit entry records per-stage ok, any fallbacks, and failed tools so a
-stubbed run can never look green.
+Every audit entry records per-stage ok, any fallbacks, failed tools and
+`unmet_expectations`, so a stubbed or verdict-less run can never look green.
 """
 from __future__ import annotations
 
 import json
 import time
 from pathlib import Path
+
+try:
+    from .evidence import pack_verdict
+except ImportError:  # direct `python winre/audit.py <evidence_dir>`
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from winre.evidence import pack_verdict  # type: ignore
 
 
 def _stage_ok(evidence: Path, stage: str) -> dict:
@@ -148,7 +157,31 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
 
     quality_green = not fallbacks and not failed_tools \
         and not dynamic_conflict and gate_ok
-    truly_green = all_green and quality_green
+
+    # Unmet expectations (RevAI handoff 2026-09-27 item 2). A stage can be
+    # "ran" and still have produced nothing usable — the deep dive finishing
+    # with verdict: null used to be written ok=true, so `truly_green: true`
+    # sat next to a missing verdict. These are named, recorded, and they DO
+    # consume truly_green.
+    unmet: list[str] = []
+    deep_v = pack_verdict(evidence)
+    deep_check = next((c for c in checks if c["stage"] == "deep"), {})
+    if deep_check.get("ran") and not deep_v["present"]:
+        unmet.append("deep verdict missing (deep stage produced no verdict)")
+    # report stage: source says a judge produced it, but no verdict in it
+    rep = None
+    rf = evidence / "report" / "report.json"
+    if rf.is_file():
+        try:
+            rep = json.loads(rf.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            rep = None
+    if isinstance(rep, dict):
+        if not rep.get("verdict"):
+            unmet.append("report verdict missing (report carries no verdict)")
+        if rep.get("source") == "deterministic_fallback":
+            unmet.append("report source is deterministic_fallback")
+    truly_green = all_green and quality_green and not unmet
 
     # A dynamic stage that was REQUESTED but refused by the snapshot gate is
     # recorded explicitly (the stage file exists with ok=False + gate error).
@@ -165,6 +198,17 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
     except (OSError, json.JSONDecodeError):
         pass
 
+    # run-level execution plan (written by the driver BEFORE any stage; see
+    # snapshot_gate.execution_plan) — a third party can read how many VM
+    # executions the run intended and whether the gate could honor it.
+    execution_plan = None
+    ep = evidence / "execution_plan.json"
+    if ep.is_file():
+        try:
+            execution_plan = json.loads(ep.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            execution_plan = {"error": "execution_plan.json unreadable"}
+
     return {
         "truly_green": truly_green,
         "all_green": all_green,
@@ -172,11 +216,15 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
         "checks": checks,
         "fallback_stages": fallbacks,
         "failed_tools": failed_tools,
+        "unmet_expectations": unmet,
         "dynamic_conflict": dynamic_conflict,
         "dynamic_blocked": dynamic_blocked,
         "static_yara_wins": True,
         "static_verdict": static_verdict,
+        "deep_verdict": deep_v["verdict"],
+        "deep_verdict_source": deep_v["source"],
         "dynamic_verdict": dynamic_verdict,
+        "execution_plan": execution_plan,
         "snapshot_gate": {"mode": gm, "ok": gate_ok, "detail": gate},
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }

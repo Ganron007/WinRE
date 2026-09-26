@@ -505,7 +505,12 @@ def build_audit_report(pack_root: Path) -> dict:
          f"{audit.get('quality_green')}",
          f"- fallback stages: {audit.get('fallback_stages') or 'none'}",
          f"- failed tools: {audit.get('failed_tools') or 'none'}",
+         f"- unmet expectations: "
+         f"{', '.join(audit.get('unmet_expectations') or []) or 'none'}",
+         f"- deep verdict: {audit.get('deep_verdict')} "
+         f"(source: {audit.get('deep_verdict_source')})",
          f"- dynamic conflict: {audit.get('dynamic_conflict')}",
+         f"- execution plan: {json.dumps(audit.get('execution_plan'))}",
          f"- snapshot gate: {json.dumps(audit.get('snapshot_gate'))}", "",
          "| stage | ran | error |", "|---|---|---|"]
     for c in audit.get("checks") or []:

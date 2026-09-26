@@ -553,6 +553,27 @@ def _static_pre_scan(sample: Path, dyn_dir: Path, meta: dict) -> None:
         meta["malcat_triage"] = {"ok": False, "error": str(e)}
 
 
+def _dump_outcome(oep, dump_ok: bool, dump_error=None,
+                  file_ok: bool = True) -> tuple[str, str | None]:
+    """Classify the post-detonation OEP/dump pass: ok | failed | not_applicable.
+
+    "No OEP signal and nothing to dump" is an APPLICABILITY answer, not a
+    tool failure — an unpacked binary must not read like a broken dump
+    (RevAI handoff 2026-09-27 item 6). Pure function so the classification
+    is unit-tested (tests/test_contracts.py) instead of only observable on a
+    real detonation.
+    """
+    if dump_ok and file_ok:
+        return "ok", None
+    if not oep and not dump_ok:
+        return ("not_applicable",
+                "no OEP signal (module not packed or not at an entry point) "
+                "— no dump applies")
+    if not dump_ok:
+        return "failed", f"DumpModule failed: {dump_error or 'unknown'}"
+    return "failed", "DumpModule reported ok but no file after 15s"
+
+
 def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
     """Best-effort x64dbg OEP detect + dump. MCP-down is non-fatal.
 
@@ -567,14 +588,14 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
 
     if os.environ.get("REVENG_DYNAMIC_X64DBG", "1") in ("0", "false", "no"):
         meta["x64dbg_mcp_skipped"] = "REVENG_DYNAMIC_X64DBG=0"
-        _terminal(False, "REVENG_DYNAMIC_X64DBG=0")
+        _terminal(False, "REVENG_DYNAMIC_X64DBG=0", status="skipped")
         return
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from winre.mcp import X64DbgClient  # type: ignore
     except Exception as e:
         meta["x64dbg_mcp_skipped"] = f"client import: {e}"
-        _terminal(False, f"client import: {e}")
+        _terminal(False, f"client import: {e}", status="unavailable")
         return
     cli = X64DbgClient()
     if not cli.is_up():
@@ -584,7 +605,8 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
         flag = os.environ.get("WINRE_MCP_AUTOSTART", "1").strip().lower()
         if flag in ("0", "false", "no", "off"):
             meta["x64dbg_mcp_unreachable"] = True
-            _terminal(False, "x64dbg MCP unreachable and WINRE_MCP_AUTOSTART=0")
+            _terminal(False, "x64dbg MCP unreachable and WINRE_MCP_AUTOSTART=0",
+                      status="unavailable")
             return
         try:
             from winre.mcp.x64dbg_manager import ensure_mcp_local
@@ -592,12 +614,14 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
             if not ok:
                 meta["x64dbg_mcp_ensure_failed"] = info
                 meta["x64dbg_mcp_unreachable"] = True
-                _terminal(False, f"x64dbg MCP heal failed: {info}")
+                _terminal(False, f"x64dbg MCP heal failed: {info}",
+                          status="unavailable")
                 return
         except Exception as e:
             meta["x64dbg_mcp_ensure_error"] = str(e)[:200]
             meta["x64dbg_mcp_unreachable"] = True
-            _terminal(False, f"x64dbg MCP heal error: {str(e)[:200]}")
+            _terminal(False, f"x64dbg MCP heal error: {str(e)[:200]}",
+                      status="unavailable")
             return
     # x64dbg resolves module names through its expression parser (hyphens =
     # subtraction, hex stems = numbers) — stage an expression-safe copy
@@ -617,7 +641,8 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
         load_out = cli.load_binary(str(dbg_sample))
         if not load_out.get("ok"):
             meta["x64dbg_load_error"] = load_out.get("error")
-            _terminal(False, f"LoadBinary failed: {load_out.get('error')}")
+            _terminal(False, f"LoadBinary failed: {load_out.get('error')}",
+                      status="failed")
             return
         # module name resolution (WITH extension first; a bare stem can fail)
         wait_file = None
@@ -667,18 +692,29 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
         # x64dbg's savedata fallback writes ASYNC: wait for the file to land
         file_ok = (wait_file(str(dump_path), 15) if wait_file
                    else dump_path.is_file())
-        if dump.get("ok") and file_ok:
+        status, reason = _dump_outcome(oep, bool(dump.get("ok")),
+                                       dump.get("error"), bool(file_ok))
+        meta["x64dbg_mcp"].update({"status": status})
+        if status == "ok":
             meta["artifacts"]["x64dbg/dump/"] = str(dump_dir)
             _terminal(True, None, dump_path=str(dump_path),
-                      oep=oep, module=module,
+                      oep=oep, module=module, status="ok",
                       detect_ok=bool(detect.get("ok")),
                       analyze_ok=bool(analyze.get("ok")))
+        elif status == "not_applicable":
+            # No OEP signal and nothing dumpable: the module is not packed /
+            # not paused at an OEP. That is an APPLICABILITY answer, not a
+            # failure — say so in both records so no consumer counts it as a
+            # broken tool (RevAI handoff item 6).
+            rec = {"attempted": True, "ok": False, "status": status,
+                   "reason": reason, "not_applicable": reason,
+                   "module": module, "oep": oep,
+                   "detect_ok": bool(detect.get("ok")),
+                   "analyze_ok": bool(analyze.get("ok"))}
+            meta["x64dbg_dump"] = rec
+            meta["x64dbg_mcp"]["not_applicable"] = reason
         else:
-            _terminal(False,
-                      (f"DumpModule failed: {dump.get('error') or 'unknown'}"
-                       if not dump.get("ok")
-                       else "DumpModule reported ok but no file after 15s"),
-                      module=module, oep=oep,
+            _terminal(False, reason, status=status, module=module, oep=oep,
                       detect_ok=bool(detect.get("ok")),
                       analyze_ok=bool(analyze.get("ok")))
     except Exception as e:
@@ -870,6 +906,7 @@ def run_dynamic(
     sample_override: str | None = None,
     adaptive: bool = False,
     idle_stop_seconds: int = 10,
+    run_id: str | None = None,
 ) -> dict:
     cfg = _flare_cfg()
     # Section-aware dynamic dir: pipeline/remote drivers set WINRE_DYNAMIC_DIR
@@ -904,9 +941,28 @@ def run_dynamic(
         "network_mode": "fakenet_on_flare" if mode == "ssh" else "fakenet_local",
         "pe_sieve_requested": bool(enable_pesieve),
         "orchestrator_mode": mode,
+        # Which execution site this invocation is (audit trail: one marker
+        # consumption per dynamic execution).
+        "execution_kind": "dynamic",
+        # Per-run nonce (winre/run_nonce.py): the control plane passes --run-id
+        # and decides freshness by VALUE, never by comparing clocks. A manual
+        # CLI run gets its own nonce so META always carries one.
+        "run_id": (str(run_id).strip() or None) or os.environ.get(
+            "WINRE_RUN_ID", "").strip() or None,
+        "run_id_origin": None,
         # terminal record is ALWAYS present (no silent "no dump")
         "x64dbg_dump": {"attempted": False, "ok": False, "reason": "not-run"},
     }
+    if meta["run_id"]:
+        meta["run_id_origin"] = "control-plane nonce (--run-id / WINRE_RUN_ID)"
+    else:
+        try:
+            from winre.run_nonce import new_run_id
+            meta["run_id"] = new_run_id()
+            meta["run_id_origin"] = "orchestrator-local (no control-plane nonce)"
+        except Exception:
+            meta["run_id"] = None
+            meta["run_id_origin"] = "unavailable"
     # crash-visible pre-run record: if this process dies mid-run (observed:
     # native AV while Procmon's driver was starting), the pack still carries
     # a META with running=true instead of no evidence at all.
@@ -1320,6 +1376,12 @@ def main() -> int:
         default=os.environ.get("WINRE_ORCHESTRATOR_MODE", "ssh"),
         help="ssh = Remnux to Flare via SSH (legacy); local = run on Flare (recommended)",
     )
+    ap.add_argument(
+        "--run-id",
+        default=None,
+        help="per-run nonce stamped into META.json; the control plane decides "
+             "pack freshness by this value (never by comparing clocks)",
+    )
     args = ap.parse_args()
 
     arg = args.sample_or_sha.strip()
@@ -1355,6 +1417,7 @@ def main() -> int:
         sample_override=sample_override,
         adaptive=args.adaptive,
         idle_stop_seconds=args.idle_stop_seconds,
+        run_id=args.run_id,
     )
     if meta.get("skipped") or meta.get("ok"):
         return 0

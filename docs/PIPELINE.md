@@ -159,6 +159,22 @@ restore → agentic-dbg               (debugger pass; pull any dumps)
 restore → VM clean
 ```
 
+**Mode 4 is TWO runs, never one command.** `--dynamic` and `--agentic-dbg`
+are each a gated execution, and under `enforce` a clean restore buys exactly
+one. Run them as `--dynamic …` then restore then `--agentic-dbg …`. Passing
+both in a single invocation is refused **before any stage runs** (fail fast,
+exit code 2, nothing executed, nothing written to the ledger) with one clear
+message; the intended plan is still recorded in `execution_plan.json` so the
+refusal is auditable. Two ways to legitimately need two executions in one
+command: `WINRE_SNAPSHOT_GATE=observe` (advisory; deliberate benign test
+loops only) or hypervisor auto-restore (`WINRE_HYPERVISOR` /
+`WINRE_VM_PATH` / `WINRE_SNAPSHOT`), which re-arms the marker per execution.
+Check the plan any time:
+
+```bash
+python -m winre.snapshot_gate plan --dynamic --agentic-dbg   # exits 1 if over budget
+```
+
 Order rationale: detonation runs on the freshest VM (a resident debugger can
 alter behavior); the debugger pass is last because unpack results are
 independent of runtime observation.
@@ -166,8 +182,12 @@ independent of runtime observation.
 Notes:
 
 - `--agentic-dbg` writes into the same `agentic/` mode section — back up an
-  earlier agentic pack first if both are needed for comparison.
+  earlier agentic pack first if both are needed for comparison. Evidence is
+  append-only: a previous `dynamic/` pack in that section is moved to
+  `previous_runs/dynamic_<ts>/`, never deleted.
 - Dynamic packs are large (hundreds of MB with full dumps); the driver pulls
   them recursively.
-- Verify each gated step against the snapshot marker before running: a second
-  gated run off one restore must be blocked/reset first.
+- Freshness of a pulled dynamic pack is decided by the per-run **nonce**
+  (`dynamic/META.json → run_id`, echoed in `dynamic/STAGE.json → nonce`), not
+  by comparing the VM clock with the control plane's clock. `clock_skew_s`
+  (same stage file, plus `/health`) is a diagnostic only.

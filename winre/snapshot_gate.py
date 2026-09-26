@@ -67,6 +67,62 @@ def mode() -> str:
 _debug_consumed: set = set()
 
 
+# --- run-level execution plan (RevAI handoff 2026-09-27, item 1) --------------
+# Under `enforce` WITHOUT hypervisor auto-restore the clean marker is a
+# one-shot: the first execution consumes it, so ONE clean restore buys
+# exactly ONE execution. A run that asks for two (`--dynamic` +
+# `--agentic-dbg`) used to half-execute — debug consumed the marker, then
+# dynamic was refused mid-run. The plan is computed BEFORE any stage runs so
+# the driver can fail fast with one clear message, and it is recorded in the
+# pack (`execution_plan.json` → `audit.json`) so a third party can see how
+# many executions the run intended.
+def execution_plan(*, dynamic: bool = False, debug: bool = False) -> dict:
+    """How many VM executions does this run intend, and can the gate honor it?
+
+    No I/O: pure function of (requested flags, gate mode, hypervisor config).
+    `budget` is the number of executions the current posture allows per clean
+    restore — 1 for a bare `enforce`, one-per-execution when a hypervisor
+    re-arms the marker (L2), and unlimited when the gate is not enforcing.
+    """
+    m = mode()
+    hc = hypervisor_cfg()
+    sites: list[str] = []
+    if debug:
+        sites.append("debug")        # agentic-dbg: x64dbg executes the sample
+    if dynamic:
+        sites.append("dynamic")      # detonation: FakeNet/Procmon/Frida
+    requested = len(sites)
+    if m != "enforce":
+        budget, why = requested, f"gate={m} (advisory — no execution budget)"
+    elif hc:
+        budget, why = requested, (f"gate=enforce + {hc['hypervisor']} auto-restore "
+                                  f"re-arms the marker per execution")
+    else:
+        budget, why = (1 if requested else 0), (
+            "gate=enforce, no hypervisor auto-restore: the clean marker is "
+            "one-shot, so 1 execution per clean restore")
+    plan = {
+        "gate_mode": m,
+        "auto_restore": bool(hc),
+        "hypervisor": (hc or {}).get("hypervisor"),
+        "execution_sites": sites,
+        "executions_requested": requested,
+        "executions_available": budget,
+        "budget_rationale": why,
+        "ok": requested <= budget,
+    }
+    if not plan["ok"]:
+        plan["error"] = (
+            f"this run requests {requested} VM executions "
+            f"({' + '.join(sites)}) but the current posture allows {budget}: "
+            f"{why}. Restore the snapshot between them and run them as "
+            f"separate runs (--dynamic … restore … --agentic-dbg), or set "
+            f"WINRE_SNAPSHOT_GATE=observe for a deliberate benign test loop, "
+            f"or configure WINRE_HYPERVISOR/WINRE_VM_PATH/WINRE_SNAPSHOT so "
+            f"each execution re-arms the marker.")
+    return plan
+
+
 def _enc(ps: str) -> str:
     return base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
 
@@ -318,13 +374,21 @@ def preflight(kind: str, *, sha: str = "", cfg: dict | None = None,
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="WinRE snapshot gate")
-    ap.add_argument("cmd", choices=["status", "attest", "marker-create"])
+    ap.add_argument("cmd", choices=["status", "attest", "marker-create", "plan"])
     ap.add_argument("--action", default="restored",
                     choices=["restored", "verified_clean"])
     ap.add_argument("--sha", default="")
+    ap.add_argument("--dynamic", action="store_true",
+                    help="plan: count a detonation execution")
+    ap.add_argument("--agentic-dbg", action="store_true",
+                    help="plan: count a debugger execution")
     a = ap.parse_args()
     if a.cmd == "status":
         print(json.dumps(gate_status(), indent=2))
+    elif a.cmd == "plan":
+        plan = execution_plan(dynamic=a.dynamic, debug=a.agentic_dbg)
+        print(json.dumps(plan, indent=2))
+        raise SystemExit(0 if plan["ok"] else 1)
     elif a.cmd == "attest":
         print(json.dumps(attest(a.action, sha=a.sha), indent=2, default=str))
     else:

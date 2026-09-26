@@ -34,7 +34,8 @@ import sys
 import time
 from pathlib import Path
 
-from .evidence import EvidencePack, stage_result, utcnow
+from .evidence import (EvidencePack, stage_result, utcnow, verdict_fields,
+                       write_execution_plan)
 from . import audit as audit_mod
 from . import yara_gen
 
@@ -291,8 +292,12 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
         "sha256": sha, "sample_path": str(sample),
         "file_type": {"format": "pe"},
     }), encoding="utf-8")
+    # per-run nonce: the local driver verifies the stamp by VALUE too, so a
+    # stale META from a previous run can never pass as this run's pack
+    from .run_nonce import check as nonce_check, new_run_id
+    run_id = new_run_id()
     cmd = [sys.executable, str(orch), sha, "--mode", "local",
-           "--max-seconds", str(max_seconds)]
+           "--max-seconds", str(max_seconds), "--run-id", run_id]
     if enable_pesieve:
         cmd.append("--pesieve")
     if adaptive:
@@ -303,17 +308,23 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
                             encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         return stage_result("dynamic", False, error="orchestrator timeout",
-                            elapsed_s=round(time.time() - t0, 1))
+                            elapsed_s=round(time.time() - t0, 1), run_id=run_id)
     # orchestrator wrote dynamic/META.json (its own schema). DO NOT clobber it —
     # audit reads THAT file. Write our stage wrapper separately.
     meta = pack.read("dynamic", "META.json") or {}
-    ok = bool(meta.get("ok"))
+    nonce = nonce_check(meta, run_id)
+    ok = bool(nonce["fresh"] and meta.get("ok"))
     stage_meta = stage_result("dynamic", ok,
-                              error=meta.get("error") or ("" if ok else "no META ok"),
+                              error=meta.get("error") or ("" if ok else
+                                                         (nonce["reason"]
+                                                          if not nonce["fresh"]
+                                                          else "no META ok")),
                               summary=f"events={meta.get('frida_events')} ok={ok}",
                               frida_events=meta.get("frida_events"),
                               verdict=meta.get("verdict"),
-                              elapsed_s=round(time.time() - t0, 1))
+                              elapsed_s=round(time.time() - t0, 1),
+                              gate_pass=meta.get("gate_marker_consumed"),
+                              run_id=run_id, nonce=nonce)
     pack.write("dynamic", "STAGE.json", stage_meta)
     return stage_meta
 
@@ -425,13 +436,35 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
             out["agent"] = {"source": "deterministic_fallback",
                             "text": "agent unavailable on this host"}
 
+    # Verdict contract (RevAI handoff 2026-09-27 item 2): a deep dive that
+    # produced NO verdict is not a successful stage. ok is gated on a real
+    # verdict, and the flat verdict/source/key_evidence fields are mirrored
+    # at the TOP level of deep.json for third-party consumers.
+    verdict_obj, verdict_label, no_verdict = verdict_fields(
+        (out.get("agent") or {}).get("verdict"))
+    out.update({
+        "verdict": verdict_label,
+        "verdict_obj": verdict_obj,
+        "source": (out.get("agent") or {}).get("source"),
+        "confidence": (verdict_obj or {}).get("confidence"),
+        "key_evidence": (verdict_obj or {}).get("key_evidence") or [],
+        "llm_analysis": (out.get("agent") or {}).get("llm_analysis"),
+        "tool_failures": failures,
+        "no_verdict": no_verdict,
+    })
     pack.write("deep", "deep.json", out)
     pack.write("deep", "META.json", stage_result(
-        "deep", ok=True, error=None,
+        "deep", not no_verdict,
+        error=(("deep stage produced no verdict"
+                + (f" ({(out.get('agent') or {}).get('fallback_reason')})"
+                   if (out.get("agent") or {}).get("fallback_reason") else ""))
+               if no_verdict else None),
         summary=f"mcp={mcp} engine={engine} mode={mode} fallback={fallback}",
         engine=engine, mode=mode, fallback=fallback, tool_failures=failures,
+        verdict=verdict_label, no_verdict=no_verdict,
         elapsed_s=round(time.time() - t0, 1)))
-    return {"ok": True, "fallback": fallback, "failures": failures, "mcp": mcp,
+    return {"ok": not no_verdict, "fallback": fallback, "failures": failures,
+            "mcp": mcp, "verdict": verdict_label, "no_verdict": no_verdict,
             "agent": out.get("agent"), "llm_analysis": out.get("llm_analysis")}
 
 
@@ -487,12 +520,19 @@ def _report(pack: EvidencePack, sha: str, quick: dict, dynamic: dict | None,
     if dynamic_ran:
         analyst_next.insert(0, "Review dynamic artifacts (procmon.csv, pcap)")
         analyst_next.append("Restore FlareVM snapshot after dynamic run")
+    # The verdict is reproduced IN the report (not only in deep.json): a
+    # report whose source is llm_judge but that carries no verdict used to be
+    # a silent gap (RevAI handoff 2026-09-27 item 2).
+    v_obj, v_label, no_verdict = verdict_fields(agent.get("verdict"))
     report = {
         "sha256": sha,
         "generated_at": utcnow(),
         # honest source tags: llm_judge / static_deterministic / fallback
         "source": source if source in ("llm_judge", "static_deterministic")
         else "deterministic_fallback",
+        "verdict": v_label,
+        "verdict_obj": v_obj,
+        "no_verdict": no_verdict,
         "phase": "static+dynamic" if dynamic_ran else "static",
         "quick": {k: q.get(k) for k in ("ida", "ghidra", "malcat") if k in q},
         "dynamic": {
@@ -508,9 +548,16 @@ def _report(pack: EvidencePack, sha: str, quick: dict, dynamic: dict | None,
     pack.write("report", "ANALYST-NEXT.md", {
         "md": "\n".join([f"- {a}" for a in report["analyst_next"]]),
     })
+    fallback = report["source"] == "deterministic_fallback"
     pack.write("report", "META.json", stage_result(
-        "report", True, summary=f"source={report['source']} phase={report['phase']}",
-        source=report["source"]))
+        "report", not no_verdict,
+        error=("report carries no verdict (deep stage produced none)"
+               if no_verdict else None),
+        summary=f"source={report['source']} phase={report['phase']} "
+                f"verdict={v_label or 'none'}",
+        source=report["source"], verdict=v_label, no_verdict=no_verdict,
+        fallback=fallback))
+    report["ok"] = not no_verdict
     return report
 
 
@@ -540,6 +587,25 @@ def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = 
     sha = __import__("winre.evidence", fromlist=["sha256_file"]).sha256_file(sample)
     pack = EvidencePack(LOGS_DIR, sha, mode=mode).ensure()
     results: dict = {}
+
+    # ---- RUN-LEVEL EXECUTION PLAN (fail fast, before any stage) -----------
+    # `enforce` + no hypervisor auto-restore = ONE execution per clean
+    # restore. A run asking for two (--dynamic + --agentic-dbg) used to
+    # half-execute and then get refused mid-run; it is now refused up front
+    # with one clear message, and the plan is recorded for audit.json
+    # (RevAI handoff 2026-09-27 item 1).
+    from . import snapshot_gate as _gate
+    plan = _gate.execution_plan(dynamic=enable_dynamic, debug=enable_agentic_dbg)
+    write_execution_plan(pack, plan)
+    results["execution_plan"] = plan
+    if not plan.get("ok"):
+        print(f"[winre-pipeline] ABORT: {plan.get('error')}", flush=True)
+        (pack.root / "META.json").write_text(json.dumps({
+            "sha256": sha, "mode": mode, "aborted": True,
+            "error": plan.get("error"), "execution_plan": plan,
+            "generated_at": utcnow(),
+        }, indent=2) + "\n", encoding="utf-8")
+        return {"sha": sha, "results": results, "aborted": True}
 
     # ---- STATIC phase (default, clean) ----
     intake = _intake(sample, pack)
@@ -604,19 +670,29 @@ def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = 
             "engine": _deep_meta.get("engine"),
             "source": (results.get("report") or {}).get("source"),
             "phase": (results.get("report") or {}).get("phase"),
+            "verdict": audit_res.get("static_verdict"),
             "truly_green": audit_res["truly_green"],
+            "unmet_expectations": audit_res.get("unmet_expectations") or [],
+            "execution_plan": plan,
             "generated_at": utcnow(),
         }, indent=2) + "\n", encoding="utf-8")
     except OSError:
         pass
 
-    # summary line (verdict from the deep/rules engine - quick's verdict is a
-    # placeholder on remote runs)
+    # summary line: verdict from the deep/rules engine (quick's verdict is a
+    # placeholder on remote runs). "no verdict" is spelled out instead of
+    # being printed as a bare `unknown` (RevAI handoff item 6).
     phase = "static"
     if dynamic:
         phase += f"+dynamic({'ok' if dynamic.get('ok') else 'FAIL'})"
+    _sv = audit_res.get("static_verdict")
+    if not _sv:
+        _sv = ("none (deep stage produced no verdict)"
+               if any("verdict" in str(u) for u in
+                      (audit_res.get("unmet_expectations") or []))
+               else "none")
     print(f"[winre-pipeline] {sha} [{phase}] "
-          f"verdict={audit_res.get('static_verdict') or quick.get('verdict')} "
+          f"verdict={_sv} "
           f"truly_green={audit_res['truly_green']}", flush=True)
     return {"sha": sha, "results": results}
 
@@ -673,6 +749,8 @@ def main() -> int:
             mode=args.mode,
             adaptive=args.adaptive,
             idle_stop_seconds=args.idle_stop_seconds)
+        if res.get("aborted"):
+            return 2   # fail fast before anything executed
         if args.publish:
             from .reporting import publish_case
             from .evidence import EvidencePack as _EP
@@ -687,6 +765,8 @@ def main() -> int:
                        mode=args.mode,
                        adaptive=args.adaptive,
                        idle_stop_seconds=args.idle_stop_seconds)
+    if res.get("aborted"):
+        return 2   # fail fast before anything executed
     if args.publish:
         from .reporting import publish_case
         pub = publish_case(EvidencePack(LOGS_DIR, res["sha"], mode=args.mode).root,

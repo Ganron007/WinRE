@@ -118,31 +118,104 @@ def pack_sections(sha_dir: Path) -> list[dict]:
     return out
 
 
-def mark_dynamic_not_requested(pack: "EvidencePack") -> None:
+def verdict_fields(verdict) -> tuple[dict | None, str | None, bool]:
+    """Normalize a deep-dive verdict into (object, label, missing).
+
+    Both engines hand back a dict (agentic: normalized LLM object; static:
+    rules object); older/partial paths hand back a bare label string or
+    nothing at all. `missing=True` means "this stage produced no verdict",
+    which the audit must never let pass as green (RevAI handoff item 2).
+    """
+    if isinstance(verdict, dict):
+        label = str(verdict.get("verdict") or "").strip() or None
+        return (verdict if label else None), label, not bool(label)
+    if isinstance(verdict, str) and verdict.strip():
+        label = verdict.strip()
+        return {"verdict": label}, label, False
+    return None, None, True
+
+
+def pack_verdict(section_root: Path) -> dict:
+    """Read a section's verdict from deep.json (top level, then agent block).
+
+    Returns {"verdict", "verdict_obj", "source", "present"}. `present=False`
+    means the deep stage produced no verdict — an unmet expectation, not a
+    pass.
+    """
+    try:
+        d = json.loads((Path(section_root) / "deep" / "deep.json")
+                       .read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"verdict": None, "verdict_obj": None, "source": None,
+                "present": False}
+    agent = d.get("agent") or {}
+    raw = d.get("verdict_obj") if d.get("verdict") else agent.get("verdict")
+    obj, label, missing = verdict_fields(raw)
+    return {"verdict": label, "verdict_obj": obj,
+            "source": d.get("source") or agent.get("source"),
+            "present": not missing}
+
+
+def mark_dynamic_not_requested(pack: "EvidencePack") -> dict:
     """Fresh dynamic/STAGE.json for a run that did not request detonation.
 
-    Clears any previous run's dynamic artifacts first: a stale gate-blocked
-    STAGE.json must never make a static-only run look "dynamic blocked"
-    (found 2026-09-20). Never raises.
+    EVIDENCE IS APPEND-ONLY (RevAI handoff 2026-09-27 item 3): a static-only
+    run must never destroy a previous run's dynamic pack in the same mode
+    section. When a previous pack exists it is MOVED (never deleted) to
+    `previous_runs/dynamic_<ts>/` and the skip record points at it, so a
+    consumer can tell "this run detonated nothing" from "evidence discarded".
+
+    The stage wrapper is still rewritten on every static-only run: a stale
+    gate-blocked `ok: false` STAGE.json must not make a static-only run look
+    "dynamic blocked" (found 2026-09-20). Never raises.
     """
+    out: dict = {"ok": True, "ran": False, "skipped": "not requested",
+                 "cleared_previous": False, "preserved_previous": None}
     try:
         import shutil
         d = pack.stages.get("dynamic")
         if d and d.exists():
-            for ch in list(d.iterdir()):
-                if ch.is_dir():
-                    shutil.rmtree(ch, ignore_errors=True)
-                else:
-                    try:
-                        ch.unlink()
-                    except OSError:
-                        pass
+            # real evidence = anything that is not our own stage wrapper
+            payload = [ch for ch in d.iterdir() if ch.name != "STAGE.json"]
+            if payload:
+                stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+                dest = pack.root / "previous_runs" / f"dynamic_{stamp}"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.move(str(d), str(dest))
+                    d.mkdir(parents=True, exist_ok=True)
+                    out["preserved_previous"] = \
+                        f"previous_runs/{dest.name}"
+                    out["preserved_artifacts"] = len(payload)
+                except OSError as e:
+                    # never destroy: if the move fails, leave the pack alone
+                    # and say so (an honest gap beats silent evidence loss)
+                    out["preserved_previous"] = None
+                    out["preserve_error"] = str(e)[:150]
+        out["summary"] = ("dynamic not requested (static-only run)"
+                          + (f"; previous pack preserved at "
+                             f"{out['preserved_previous']}"
+                             if out["preserved_previous"] else ""))
         pack.write("dynamic", "STAGE.json", {
             "stage": "dynamic", "ok": True, "ran": False,
             "skipped": "not requested",
-            "summary": "dynamic not requested (static-only run)"})
-    except Exception:  # noqa: BLE001
-        pass
+            "summary": out["summary"],
+            "cleared_previous": False,
+            "preserved_previous": out["preserved_previous"],
+        })
+    except Exception as e:  # noqa: BLE001
+        out["error"] = str(e)[:150]
+    return out
+
+
+def write_execution_plan(pack: "EvidencePack", plan: dict) -> Path:
+    """Record the run-level execution plan in the pack (audit reads it)."""
+    payload = dict(plan)
+    payload["recorded_at"] = utcnow()
+    p = pack.root / "execution_plan.json"
+    p.write_text(json.dumps(payload, indent=2, default=str) + "\n",
+                 encoding="utf-8")
+    return p
 
 
 def stage_result(stage: str, ok: bool, *, error: str | None = None,

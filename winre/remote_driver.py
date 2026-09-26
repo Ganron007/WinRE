@@ -32,10 +32,14 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .envfile import load_dotenv  # noqa: F401  (ensures .env is loaded)
-from .evidence import EvidencePack, stage_result
+from .evidence import (EvidencePack, stage_result, verdict_fields
+                       as _verdict_fields, write_execution_plan)
+from . import run_nonce
+from .run_nonce import new_run_id
 
 REPO = Path(__file__).resolve().parents[1]
 LOCAL_LOGS = Path(os.environ.get("WINRE_PIPELINE_LOGS", str(REPO / "logs")))
@@ -395,10 +399,13 @@ def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict) -> dict:
 REMOTE_DYNAMIC_HELPER = r'''
 """Remote dynamic helper — runs orchestrator --mode local on the VM.
 
-Usage: python _remote_dynamic_helper.py <sha> <sample_path> <max_seconds> [--pesieve] [--adaptive] [--idle-stop=N] [--section=agentic|static]
+Usage: python _remote_dynamic_helper.py <sha> <sample_path> <max_seconds> [--pesieve] [--adaptive] [--idle-stop=N] [--section=agentic|static] [--run-id=<nonce>]
 Writes the session file, sets env, runs orchestrator, prints META.json tail.
 --section pins detonation into logs/<sha>/<section>/dynamic (mode-sectioned
 packs); default agentic for legacy callers.
+--run-id passes the control plane's per-run nonce through to the
+orchestrator, which stamps it into META.json; the control plane then decides
+pack freshness by that value instead of comparing clocks (winre/run_nonce.py).
 """
 import json
 import os
@@ -413,6 +420,7 @@ pesieve = "--pesieve" in sys.argv[4:]
 adaptive = "--adaptive" in sys.argv[4:]
 idle_stop = 10
 section = "agentic"
+run_id = None
 for _a in sys.argv[4:]:
     if _a.startswith("--section=") and _a.split("=", 1)[1] in ("agentic", "static"):
         section = _a.split("=", 1)[1]
@@ -421,6 +429,8 @@ for _a in sys.argv[4:]:
             idle_stop = int(_a.split("=", 1)[1])
         except ValueError:
             idle_stop = 10
+    if _a.startswith("--run-id=") and _a.split("=", 1)[1].strip():
+        run_id = _a.split("=", 1)[1].strip()
 
 pipeline = Path(__file__).resolve().parents[1]
 sessions = pipeline / "sessions"
@@ -437,13 +447,18 @@ env.setdefault("WINRE_ORCH_LOCK", str(pipeline / "lock" / "orchestrator.lock"))
 env["REVENG_LOGS_DIR"] = str(pipeline / "logs")
 env["WINRE_DYNAMIC_DIR"] = str(pipeline / "logs" / sha / section / "dynamic")
 env["REVENG_SESSIONS_DIR"] = str(sessions)
+if run_id:
+    env["WINRE_RUN_ID"] = run_id
 
 cmd = [sys.executable, str(pipeline / "winre" / "orchestrator.py"), sha,
        "--mode", "local", "--max-seconds", str(max_seconds)]
+if run_id:
+    cmd += ["--run-id", run_id]
 if pesieve:
     cmd.append("--pesieve")
 if adaptive:
     cmd += ["--adaptive", "--idle-stop-seconds", str(idle_stop)]
+print(f"run_id={run_id or 'none'}")
 try:
     r = subprocess.run(cmd, capture_output=True, text=True, env=env,
                        timeout=int(max_seconds) + 600,
@@ -455,10 +470,48 @@ except subprocess.TimeoutExpired:
 '''
 
 
+def clock_skew_s(cfg: dict | None = None, *, cached: dict | None = None,
+                 timeout: int = 30) -> dict:
+    """VM-vs-control-plane clock skew, in seconds (RevAI handoff item 4).
+
+    A skewed VM clock used to make every detonation look "not run" to the
+    control plane (freshness was a string compare on timestamps) and makes
+    a 5h-fast control plane look guilty even when Flare's clock was right.
+    Freshness no longer depends on clocks (winre/run_nonce.py) — this is a
+    DIAGNOSTIC, recorded in the pack (`clock_skew_s` in
+    dynamic/STAGE.json, pack META.json, audit.json) and surfaced by the UI
+    health probe, so a WinRE-only operator gets the same visibility RevAI
+    exposes on its Test connection.
+
+    cached: pass an earlier probe result to avoid a second SSH round-trip.
+    """
+    if cached:
+        return cached
+    cfg = cfg or flare_cfg()
+    out: dict = {"clock_skew_s": None, "vm_time": None,
+                 "control_plane_utc": datetime.now(timezone.utc)
+                 .strftime("%Y-%m-%dT%H:%M:%SZ")}
+    try:
+        p = ssh_run(cfg, "powershell -NoProfile -Command "
+                         "[DateTimeOffset]::Now.ToString('o')", timeout=timeout)
+        raw = [ln.strip() for ln in (p.stdout or "").splitlines()
+               if ln.strip() and "T" in ln]
+        if p.returncode == 0 and raw:
+            vm = datetime.fromisoformat(raw[-1].replace("Z", "+00:00"))
+            out["vm_time"] = vm.astimezone(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+            out["clock_skew_s"] = round(
+                (vm - datetime.now(timezone.utc)).total_seconds(), 1)
+    except Exception as e:
+        out["error"] = str(e)[:120]
+    return out
+
+
 def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                    max_seconds: int, enable_pesieve: bool,
                    adaptive: bool = False,
-                   idle_stop_seconds: int = 10) -> dict:
+                   idle_stop_seconds: int = 10,
+                   clock: dict | None = None) -> dict:
     """SSH: run orchestrator --mode local on the VM via helper, scp pack back."""
     t0 = time.time()
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -496,8 +549,13 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
         return blocked
     py = _remote_py(cfg)
     remote_sample = rf"C:\samples\{sample_name}"
+    # Helper source: the tracked file is the single source of truth; the
+    # embedded copy is a fallback for checkouts without it (two drifting
+    # copies of this script is how the --run-id arg nearly shipped missing).
     helper = REPO / "winre" / "_remote_dynamic_helper.py"
-    helper.write_text(REMOTE_DYNAMIC_HELPER, encoding="utf-8")
+    if not helper.is_file():
+        helper = REPO / "winre" / "_remote_dynamic_helper.embedded.py"
+        helper.write_text(REMOTE_DYNAMIC_HELPER, encoding="utf-8")
     try:
         scp_to(cfg, helper, rf'{cfg["remote_pipeline"]}\winre\_remote_dynamic_helper.py')
     except Exception as e:
@@ -505,6 +563,9 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                             elapsed_s=round(time.time() - t0, 1),
                             gate=gate.get("gate"))
 
+    # Per-run nonce: freshness is decided by this VALUE (winre/run_nonce.py),
+    # never by comparing the VM clock with the control plane's clock.
+    run_id = new_run_id()
     # Gate mode is a CONTROL-PLANE decision: forward it (and the marker path)
     # to the VM helper so an operator's observe/off override works end-to-end.
     # Without this the helper's own default (enforce) blocks benign test
@@ -521,7 +582,8 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
            f'{" --pesieve" if enable_pesieve else ""}'
            f'{" --adaptive" if adaptive else ""}'
            f' --idle-stop={int(idle_stop_seconds)}'
-           f' --section={pack.mode or "agentic"} 2>&1"')
+           f' --section={pack.mode or "agentic"}'
+           f' --run-id={run_id} 2>&1"')
     r = ssh_run(cfg, cmd, timeout=int(max_seconds) + 700)
     # honest RC check: the helper prints RC=<code> as its last line
     helper_rc = None
@@ -571,21 +633,30 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
         if err is None:
             err = str(e)
     meta = pack.read("dynamic", "META.json") or {}
-    # freshness: only trust a META produced by THIS run
-    fresh = bool(meta) and meta.get("finished_at", "") >= started_at
+    # Freshness = the orchestrator stamped OUR nonce (value comparison).
+    # No clocks in the decision: a skewed VM clock can neither make a fresh
+    # run look stale nor an old pack look fresh (RevAI handoff item 5).
+    nonce = run_nonce.check(meta, run_id)
+    fresh = bool(nonce["fresh"])
     gate_mode = snapshot_gate.mode()
     gate_pass = (gate_mode != "enforce") or bool(meta.get("gate_marker_consumed"))
     ok = bool(fresh and meta.get("ok"))
     if not ok and err is None:
         err = ("no fresh META from this run"
                if not fresh else f"orchestrator error: {meta.get('error')}")
+    # clock skew is a DIAGNOSTIC only (never part of the freshness decision)
+    skew = clock_skew_s(cfg, cached=clock)
     stage_meta = stage_result("dynamic", ok, error=err,
                               summary=f"events={meta.get('frida_events')} ok={ok}",
                               frida_events=meta.get("frida_events"),
                               verdict=meta.get("verdict"),
                               elapsed_s=round(time.time() - t0, 1),
                               gate_pass=gate_pass, gate=gate.get("gate"),
-                              helper_rc=helper_rc)
+                              helper_rc=helper_rc,
+                              run_id=run_id, nonce=nonce,
+                              clock_skew_s=(skew or {}).get("clock_skew_s"),
+                              control_plane_started_at=started_at,
+                              vm_finished_at=meta.get("finished_at"))
     pack.write("dynamic", "STAGE.json", stage_meta)
     return stage_meta
 
@@ -928,10 +999,35 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
         except Exception:
             pass
 
+    # Verdict contract (RevAI handoff 2026-09-27 item 2): a deep dive that
+    # produced NO verdict is not a successful stage. ok=True used to be
+    # written unconditionally, so `truly_green: true` could sit next to
+    # `verdict: null`. ok is now gated on a real verdict, and the flat
+    # verdict/source/key_evidence fields are mirrored at the TOP level of
+    # deep.json so a third-party consumer does not have to know they live
+    # under `agent`.
+    verdict_obj, verdict_label, no_verdict = _verdict_fields(
+        (out.get("agent") or {}).get("verdict"))
+    out.update({
+        "verdict": verdict_label,
+        "verdict_obj": verdict_obj,
+        "source": (out.get("agent") or {}).get("source"),
+        "confidence": (verdict_obj or {}).get("confidence"),
+        "key_evidence": (verdict_obj or {}).get("key_evidence") or [],
+        "llm_analysis": (out.get("agent") or {}).get("llm_analysis"),
+        "tool_failures": failures,
+        "no_verdict": no_verdict,
+    })
     pack.write("deep", "deep.json", out)
     pack.write("deep", "META.json", stage_result(
-        "deep", True, summary=f"mcp={mcp} engine={engine} mode={mode} fallback={fallback}",
+        "deep", not no_verdict,
+        error=(("deep stage produced no verdict"
+                + (f" ({(out.get('agent') or {}).get('fallback_reason')})"
+                   if (out.get("agent") or {}).get("fallback_reason") else ""))
+               if no_verdict else None),
+        summary=f"mcp={mcp} engine={engine} mode={mode} fallback={fallback}",
         engine=engine, mode=mode, fallback=fallback, tool_failures=failures,
+        verdict=verdict_label, no_verdict=no_verdict,
         elapsed_s=round(time.time() - t0, 1)))
     # neat closure: if the agent had debug tools, x64dbg + the sample must
     # not outlive this stage (covers manual single-stage runs; the full
@@ -1000,6 +1096,34 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
     sha = sha256_file(sample)
     pack = EvidencePack(LOCAL_LOGS, sha, mode=mode).ensure()
 
+    # ---- RUN-LEVEL EXECUTION PLAN (fail fast, before any stage) -----------
+    # Under `enforce` the clean marker is one-shot: a run that asks for two
+    # executions (--dynamic + --agentic-dbg) used to half-execute — the debug
+    # preflight consumed the marker, then dynamic was refused mid-run
+    # (RevAI handoff 2026-09-27 item 1). Refuse up front, with one clear
+    # message, and record the plan so audit.json states how many executions
+    # the run intended.
+    from . import snapshot_gate as _gate
+    plan = _gate.execution_plan(dynamic=enable_dynamic, debug=enable_agentic_dbg)
+    write_execution_plan(pack, plan)
+    results: dict = {"execution_plan": plan}
+    if not plan.get("ok"):
+        print(f"[winre-remote] ABORT: {plan.get('error')}", flush=True)
+        results["aborted"] = True
+        results["error"] = plan.get("error")
+        (pack.root / "META.json").write_text(json.dumps({
+            "sha256": sha, "mode": mode, "aborted": True,
+            "error": plan.get("error"),
+            "execution_plan": plan,
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }, indent=2) + "\n", encoding="utf-8")
+        return {"sha": sha, "results": results, "aborted": True}
+
+    # one clock probe per run: recorded as a diagnostic, never used for the
+    # freshness decision (winre/run_nonce.py)
+    clock = clock_skew_s(cfg)
+    results["clock"] = clock
+
     # upload the sample to the VM (C:\samples\<name>) — tools run there
     remote_sample = rf"C:\samples\{sample.name}"
     try:
@@ -1009,7 +1133,7 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
 
     # intake (local — we have the file)
     from .pipeline import _intake
-    results = {"intake": _intake(sample, pack)}
+    results["intake"] = _intake(sample, pack)
 
     # ---- STATIC phase (quick + deep over SSH/HTTP) ----
     results["quick"] = remote_quick(sample.name, pack, cfg)
@@ -1024,7 +1148,8 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
         results["dynamic"] = remote_dynamic(sample.name, sha, pack, cfg,
                                             max_seconds, enable_pesieve,
                                             adaptive=adaptive,
-                                            idle_stop_seconds=idle_stop_seconds)
+                                            idle_stop_seconds=idle_stop_seconds,
+                                            clock=clock)
         # DFIR-Nexus ingest pack: dynamic logs + static context in one 7z
         try:
             from .casepack import build_case
@@ -1067,7 +1192,11 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
             "engine": _deep_meta.get("engine"),
             "source": (results.get("report") or {}).get("source"),
             "phase": (results.get("report") or {}).get("phase"),
+            "verdict": audit_res.get("static_verdict"),
             "truly_green": audit_res["truly_green"],
+            "unmet_expectations": audit_res.get("unmet_expectations") or [],
+            "execution_plan": plan,
+            "clock_skew_s": (clock or {}).get("clock_skew_s"),
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }, indent=2) + "\n", encoding="utf-8")
     except OSError:
@@ -1077,9 +1206,18 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
     results["cleanup"] = _final_sweep(cfg, dynamic=enable_dynamic,
                                       debug=enable_agentic_dbg)
 
-    # audit's static_verdict is deep-aware (quick writes a placeholder)
+    # Verdict line: never print a bare "unknown" that could be either a real
+    # unknown verdict or a deep stage that produced nothing (RevAI handoff
+    # item 6) — the two are different facts.
     _verdict = (audit_res or {}).get("static_verdict")
-    print(f"[winre-remote] {sha} verdict={_verdict or results['quick'].get('verdict')} "
+    if _verdict:
+        _vs = str(_verdict)
+    else:
+        _vs = ("none (deep stage produced no verdict)"
+               if any("verdict" in str(u) for u in
+                      (audit_res.get("unmet_expectations") or []))
+               else "none")
+    print(f"[winre-remote] {sha} verdict={_vs} "
           f"dynamic={'ok' if results.get('dynamic',{}).get('ok') else 'not-run'} "
           f"truly_green={audit_res['truly_green']}", flush=True)
     return {"sha": sha, "results": results}
@@ -1135,6 +1273,9 @@ def main() -> int:
                     help="give the deep-dive agent bounded x64dbg tools "
                          "(engine langgraph+dbg; no detonation)")
     ap.add_argument("--dry-llm", action="store_true")
+    ap.add_argument("--adaptive", action="store_true",
+                    help="adaptive detonation window (cap = --max-seconds)")
+    ap.add_argument("--idle-stop-seconds", type=int, default=10)
     ap.add_argument("--mode", choices=["agentic", "static"], default="agentic",
                     help="deep-dive engine: agentic = LangGraph ReAct (RevAI "
                          "agentic); static = deterministic fixed-checklist, "
@@ -1154,7 +1295,12 @@ def main() -> int:
                               enable_pesieve=args.pesieve,
                               enable_dynamic=enable_dynamic, dry_llm=args.dry_llm,
                               enable_agentic_dbg=enable_agentic_dbg,
-                              mode=args.mode)
+                              mode=args.mode,
+                              adaptive=getattr(args, "adaptive", False),
+                              idle_stop_seconds=getattr(args, "idle_stop_seconds", 10))
+    if res.get("aborted"):
+        # fail fast BEFORE anything executed (execution plan over budget)
+        return 2
     if args.publish:
         from .evidence import EvidencePack
         from .reporting import publish_case

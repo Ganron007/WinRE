@@ -368,6 +368,12 @@ def _pack_views(root: Path, files: dict) -> dict:
         "checks": audit.get("checks") or [],
         "fallback_stages": audit.get("fallback_stages") or [],
         "failed_tools": audit.get("failed_tools") or [],
+        # named gaps that block green (e.g. a deep dive with no verdict)
+        "unmet_expectations": audit.get("unmet_expectations") or [],
+        "deep_verdict": audit.get("deep_verdict"),
+        "deep_verdict_source": audit.get("deep_verdict_source"),
+        # how many VM executions the run intended vs what the gate allowed
+        "execution_plan": audit.get("execution_plan"),
         "dynamic_conflict": audit.get("dynamic_conflict"),
         "dynamic_blocked": audit.get("dynamic_blocked"),
         "snapshot_gate": audit.get("snapshot_gate"),
@@ -472,8 +478,17 @@ def _vm_health() -> dict:
     def _probe_llm():
         results["llm"] = _llm_cached()
 
+    def _probe_clock():
+        # clock skew is a DIAGNOSTIC (RevAI handoff item 4): freshness uses
+        # the run nonce, not timestamps — but an operator still wants to see
+        # whether the VM and this console agree on the time.
+        try:
+            results["clock"] = remote_driver.clock_skew_s(timeout=8)
+        except Exception as e:
+            results["clock"] = {"clock_skew_s": None, "error": str(e)[:120]}
+
     threads = [threading.Thread(target=f, daemon=True) for f in
-               (_probe_ssh, _probe_mcp, _probe_llm)]
+               (_probe_ssh, _probe_mcp, _probe_llm, _probe_clock)]
     for t in threads:
         t.start()
     for t in threads:

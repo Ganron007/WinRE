@@ -654,6 +654,48 @@ else {
 }
 if (-not $CheckMode) { Manual "TAKE/UPDATE the VM snapshot NOW so the marker is baked in (restores re-create it)." }
 
+# --- 5b. Clock sync + machine-readable clock state -------------------------
+# RevAI handoff 2026-09-27 item 4: a 5h-fast CONTROL PLANE made every
+# detonation read dynamic=not-run (freshness used to compare timestamps).
+# Flare's own clock was right, but the VM must not stay a second suspect:
+# w32time runs Automatic + resynced, and the facts are written where the
+# control plane can read them (C:\WinRE\vm_clock.json -> remote_driver
+# .clock_skew_s). Freshness itself no longer depends on clocks
+# (winre/run_nonce.py) - this is diagnosis, not the gate.
+Write-Host ""
+Write-Host "--- clock sync ---"
+$clockFile = "C:\WinRE\vm_clock.json"
+if ($CheckMode) {
+    if (Test-Path $clockFile) { Ok "clock state file present" }
+    else { Warn "clock state file missing (re-run setup)" }
+} else {
+    Act "w32time -> Automatic + resync"
+    try {
+        Set-Service -Name w32time -StartupType Automatic -ErrorAction Stop
+        Start-Service -Name w32time -ErrorAction SilentlyContinue
+        & w32tm.exe /resync /force 2>&1 | Out-Null
+        $svc = Get-Service -Name w32time
+        Ok ("w32time {0}" -f $svc.StartType)
+    } catch {
+        Warn ("w32time config failed: {0}" -f $_.Exception.Message)
+    }
+    # record Get-Date -Format o + w32tm /query /status for the control plane
+    $status = (& w32tm.exe /query /status 2>&1 | Out-String).Trim()
+    $state = [ordered]@{
+        vm_time        = (Get-Date -Format o)
+        vm_time_utc    = (Get-Date).ToUniversalTime().ToString("o")
+        timezone       = (Get-TimeZone).Id
+        w32time_start  = (Get-Service -Name w32time -EA SilentlyContinue).StartType.ToString()
+        w32time_status = $status
+        collected_at   = (Get-Date -Format o)
+        collected_by   = "install/setup-flarevm.ps1"
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path $clockFile) | Out-Null
+    Set-Content -LiteralPath $clockFile -Encoding UTF8 `
+        -Value ($state | ConvertTo-Json -Depth 4)
+    Ok "clock state -> $clockFile"
+}
+
 # --- 6. VM desktop status shortcut ---------------------------------------------
 Write-Host ""
 Write-Host "--- VM desktop status shortcut ---"
