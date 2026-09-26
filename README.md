@@ -158,6 +158,10 @@ python -m winre.pipeline C:\samples\foo.exe --mode static --dynamic --max-second
 #    --mode static|agentic selects the deep-dive engine (default agentic);
 #    --dynamic is the opt-in segregated detonation (omit for static-only);
 #    exit 0 only when truly_green; evidence pack under logs/<sha>/<mode>/
+#    --dynamic and --agentic-dbg are EACH a gated execution and one clean
+#    snapshot restore buys exactly one: passing both in one command is refused
+#    up front (exit 2, nothing executed). Check first with
+#      python -m winre.snapshot_gate plan --dynamic --agentic-dbg
 
 # 8. UI console (control plane — operator host, drives FlareVM over SSH)
 python winre\ui\app.py --port 5001
@@ -165,6 +169,14 @@ python winre\ui\app.py --port 5001
 #    UI-only mode: with FLARE_* (+ WINRE_LLM_* for agentic) in .env this is
 #    all you need — one FlareVM is enough, no CLI steps required. dry-LLM
 #    defaults off when the LLM endpoint answers, on when it doesn't.
+
+# 9. Contract tests (offline — no VM, no samples, ~3s)
+python -m pytest tests\ -q
+#    test_contracts.py   one assertion per pipeline contract: one execution
+#                        per clean restore, a verdict-less run is never green,
+#                        static-only runs never destroy a dynamic pack, pack
+#                        freshness by run nonce (never by clocks)
+#    test_entrypoints.py every CLI entry point answers --help with no traceback
 ```
 
 Docs index: [`docs/`](docs/README.md). Per-feature docs: `docs/PIPELINE.md` · `docs/SQL-GHIDRA.md` · `docs/SQL-IDA.md` · `docs/X64DBG-MCP.md` · `docs/WINDBG-MCP.md` · `docs/DYNAMIC-ORCHESTRATOR.md`. Malcat-specific notes live in [`docs/PREREQUISITES.md`](docs/PREREQUISITES.md) (optional-commercial section).
