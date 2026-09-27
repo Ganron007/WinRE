@@ -402,6 +402,9 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
             "packed_signal": agent_result.get("packed_signal"),
             "unpack_prepass": agent_result.get("unpack_prepass"),
             "windbg_dump": agent_result.get("windbg_dump"),
+            # per-role models actually used (default/planner/judgment) so the
+            # routing is verifiable per case, not trusted (RevAI item 7)
+            "llm_roles": agent_result.get("llm_roles"),
         }
         # pull the unpack artifact into the pack (VM-local mode: plain copy)
         _pa = (agent_result.get("unpack_prepass") or {})
@@ -451,6 +454,7 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
         "llm_analysis": (out.get("agent") or {}).get("llm_analysis"),
         "tool_failures": failures,
         "no_verdict": no_verdict,
+        "llm_roles": (out.get("agent") or {}).get("llm_roles"),
     })
     pack.write("deep", "deep.json", out)
     pack.write("deep", "META.json", stage_result(
@@ -533,6 +537,7 @@ def _report(pack: EvidencePack, sha: str, quick: dict, dynamic: dict | None,
         "verdict": v_label,
         "verdict_obj": v_obj,
         "no_verdict": no_verdict,
+        "llm_roles": dp.get("llm_roles") or (agent.get("llm_roles")),
         "phase": "static+dynamic" if dynamic_ran else "static",
         "quick": {k: q.get(k) for k in ("ida", "ghidra", "malcat") if k in q},
         "dynamic": {
@@ -674,6 +679,7 @@ def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = 
             "truly_green": audit_res["truly_green"],
             "unmet_expectations": audit_res.get("unmet_expectations") or [],
             "execution_plan": plan,
+            "llm_roles": audit_res.get("llm_roles"),
             "generated_at": utcnow(),
         }, indent=2) + "\n", encoding="utf-8")
     except OSError:

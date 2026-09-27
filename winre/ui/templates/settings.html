@@ -41,12 +41,36 @@
       <div class="table-wrap"><table><tbody>
         <tr><td class="mono">WINRE_LLM_BASE_URL</td><td class="mono">{{ cfg.llm.base_url or '—' }}</td></tr>
         <tr><td class="mono">WINRE_LLM_MODEL</td><td class="mono">{{ cfg.llm.model or '—' }}</td></tr>
+        <tr><td class="mono">WINRE_LLM_PLANNER_MODEL</td><td class="mono">{{ (cfg.llm.roles.raw or {}).get('WINRE_LLM_PLANNER_MODEL') or '— (defaults to WINRE_LLM_MODEL)' }}</td></tr>
+        <tr><td class="mono">WINRE_LLM_VERDICT_MODEL</td><td class="mono">{{ (cfg.llm.roles.raw or {}).get('WINRE_LLM_VERDICT_MODEL') or '— (defaults to WINRE_LLM_MODEL)' }}</td></tr>
         <tr><td class="mono">WINRE_LLM_REASONING</td><td class="mono">{{ cfg.llm.reasoning or '—' }}</td></tr>
         <tr><td class="mono">WINRE_LLM_CONTEXT_TOKENS</td><td class="mono">{{ cfg.llm.context_tokens }}</td></tr>
         <tr><td class="mono">WINRE_LLM_MAX_OUTPUT_TOKENS</td><td class="mono">{{ cfg.llm.max_output_tokens }}</td></tr>
         <tr><td class="mono">WINRE_LLM_API_KEY</td><td>{% if cfg.llm.key_set %}
           <span class="badge up">set (masked)</span>{% else %}<span class="badge warn">not set</span>{% endif %}</td></tr>
       </tbody></table></div>
+      {% if cfg.llm.roles and not cfg.llm.roles.error %}
+      <p class="muted" style="font-size:var(--tx-xs); margin:10px 0 4px">resolved role routing
+        (recorded per run in <span class="mono">deep.json → llm_roles</span>,
+         <span class="mono">report.json</span> and <span class="mono">audit.json</span>):</p>
+      <div class="table-wrap"><table><tbody>
+        <tr><td class="mono">planner — 35-tool ReAct loop</td><td class="mono">{{ cfg.llm.roles.planner }}
+          {%- if cfg.llm.roles.reachable is defined %}
+          {%- if cfg.llm.roles.reachable.planner %} <span class="badge up">answers</span>
+          {%- else %} <span class="badge warn">no answer</span>{% endif %}{% endif %}</td></tr>
+        <tr><td class="mono">judgment — final verdict</td><td class="mono">{{ cfg.llm.roles.judgment }}
+          {%- if cfg.llm.roles.reachable is defined %}
+          {%- if cfg.llm.roles.reachable.judgment %} <span class="badge up">answers</span>
+          {%- else %} <span class="badge warn">no answer</span>{% endif %}{% endif %}</td></tr>
+        <tr><td class="mono">default — unpinned roles</td><td class="mono">{{ cfg.llm.roles.default }}
+          {%- if cfg.llm.roles.pinned %}<span class="badge flat">pinned: {{ cfg.llm.roles.pinned | join(', ') }}</span>
+          {%- else %}<span class="badge flat">single model</span>{% endif %}</td></tr>
+      </tbody></table></div>
+      <p class="muted" style="font-size:var(--tx-xs)">
+        A pin never moves the other roles: each one defaults to
+        <span class="mono">WINRE_LLM_MODEL</span>, and the default is resolved
+        from that variable alone.</p>
+      {% endif %}
       <p class="muted" style="font-size:var(--tx-xs)">
         Without a reachable LLM, deep dives record
         <span class="mono">deterministic_fallback</span> — the spine still runs.</p>

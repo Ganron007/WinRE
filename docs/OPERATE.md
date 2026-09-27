@@ -69,7 +69,30 @@ WINRE_LLM_REASONING=high
 WINRE_VT_API_KEY=<virustotal-key>   # hash-only triage (optional)
 WINRE_LLM_CONTEXT_TOKENS=1000000     # model window - evidence budget (default)
 WINRE_LLM_MAX_OUTPUT_TOKENS=32768    # assistant output cap (default)
+# optional role pins (blank = use WINRE_LLM_MODEL for that role)
+#WINRE_LLM_PLANNER_MODEL=            # 35-tool ReAct loop (call/token heavy)
+#WINRE_LLM_VERDICT_MODEL=            # final judge (verdict + finalize pass)
 ```
+
+**Role routing (optional).** Two pins split the LLM roles so the expensive
+model is paid for once: the **planner** runs the 35-tool ReAct loop (the
+token- and call-heavy part) and the **judgment** model produces the verdict
+and its finalize pass. Everything else in WinRE is deterministic, so there is
+nothing else to route.
+
+- Each pin defaults to `WINRE_LLM_MODEL`; a pin **never** moves another role.
+  `WINRE_LLM_MODEL` is the default for every unpinned role and is resolved
+  from that variable alone — a pin can never become the default (RevAI hit
+  exactly that bug in production on 2026-09-27 and had to undo it).
+- The resolved routing is recorded **per run** in `deep.json → llm_roles`,
+  `report.json` and `audit.json`, so which model produced the tool loop and
+  which produced the verdict is verifiable per case rather than trusted.
+- `/settings` shows the pins verbatim, the resolved routing, and whether each
+  pinned model actually answers — a pin to a model the provider does not
+  serve shows as *no answer* instead of silently becoming a deterministic
+  fallback mid-run.
+- `python -m pytest tests/test_llm_roles.py -q` covers the resolution matrix
+  and the "a pin must not move the pipeline" invariant.
 
 Full-context policy: tool results are sized from the model window
 (~3.6 chars/token, 30% reserved for prompt/history/answer; per-call cap up

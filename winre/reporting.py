@@ -509,6 +509,7 @@ def build_audit_report(pack_root: Path) -> dict:
          f"{', '.join(audit.get('unmet_expectations') or []) or 'none'}",
          f"- deep verdict: {audit.get('deep_verdict')} "
          f"(source: {audit.get('deep_verdict_source')})",
+         f"- llm roles: {json.dumps(audit.get('llm_roles'))}",
          f"- dynamic conflict: {audit.get('dynamic_conflict')}",
          f"- execution plan: {json.dumps(audit.get('execution_plan'))}",
          f"- snapshot gate: {json.dumps(audit.get('snapshot_gate'))}", "",

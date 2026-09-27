@@ -629,6 +629,27 @@ def _run_pipeline_in_thread(sample_path: str, max_seconds: int,
     t.start()
 
 
+def _llm_roles_view(probe: bool = True) -> dict:
+    """Resolved per-role LLM routing for the settings page (RevAI item 7).
+
+    Shows what each role resolved to and whether the pinned model actually
+    answers — a pin to a model the provider does not serve must be visible
+    here, not discovered later as a silent deterministic fallback.
+    """
+    try:
+        from winre import llm_client
+        view = dict(llm_client.resolved())
+        view["raw"] = llm_client.pins()   # what the operator typed, verbatim
+        if probe:
+            try:
+                view["reachable"] = llm_client.available_roles()
+            except Exception as e:
+                view["reachable_error"] = str(e)[:120]
+        return view
+    except Exception as e:
+        return {"error": str(e)[:150]}
+
+
 def create_app() -> "Flask":
     app = Flask(__name__)
     app.config["JSON_SORT_KEYS"] = False
@@ -1119,6 +1140,8 @@ def create_app() -> "Flask":
             "llm": {
                 "base_url": _os.environ.get("WINRE_LLM_BASE_URL", ""),
                 "model": _os.environ.get("WINRE_LLM_MODEL", ""),
+                "reasoning": _os.environ.get("WINRE_LLM_REASONING", ""),
+                "roles": _llm_roles_view(),
                 "reasoning": _os.environ.get("WINRE_LLM_REASONING", ""),
                 "context_tokens": _os.environ.get(
                     "WINRE_LLM_CONTEXT_TOKENS", "1000000"),

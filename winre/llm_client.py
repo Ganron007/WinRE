@@ -9,6 +9,23 @@ Reads configuration from the environment, which is loaded from <repo>/.env
     WINRE_LLM_MODEL      model name (whatever your provider exposes)
     WINRE_LLM_REASONING  reasoning effort: low|medium|high|max (optional)
 
+Role separation (RevAI handoff 2026-09-27, item 7) — OPTIONAL pins, each
+defaulting to WINRE_LLM_MODEL:
+
+    WINRE_LLM_PLANNER_MODEL   the 35-tool ReAct loop (tool selection: the
+                              token-heavy, call-heavy role)
+    WINRE_LLM_VERDICT_MODEL   the final judge (verdict JSON + finalize pass)
+
+    WINRE_LLM_MODEL           the DEFAULT for any role that is not pinned
+
+THE TRAP (RevAI hit it in production on 2026-09-27): a role pin must never be
+able to move the whole pipeline. Their `get_llm_model()` returned the
+*judgment* model, so pinning VERDICT dragged triage, deep dive and reports onto
+it and the default became dead config. Here `default` is resolved ONLY from
+WINRE_LLM_MODEL and roles fall back TO it — never the reverse. `roles()` is the
+single resolver: no call site may read a role variable directly (asserted by
+tests/test_llm_roles.py).
+
 Deterministic-first: the pipeline never lets the LLM run tools or decide
 stages; it only interprets evidence. Every response is source-tagged
 (llm_judge vs deterministic_fallback) by the caller.
@@ -27,6 +44,64 @@ BASE_URL = os.environ.get("WINRE_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
 API_KEY = os.environ.get("WINRE_LLM_API_KEY", "")
 MODEL = os.environ.get("WINRE_LLM_MODEL", "local")
 REASONING = os.environ.get("WINRE_LLM_REASONING", "").strip().lower()
+
+#: role name -> env var that pins it (the default role is deliberately unpinned)
+ROLE_VARS = {
+    "planner": "WINRE_LLM_PLANNER_MODEL",
+    "judgment": "WINRE_LLM_VERDICT_MODEL",
+}
+
+
+def roles() -> dict:
+    """Resolve the per-role models. Read at CALL time (not import) so the UI,
+    the tests and a settings change all see the current environment.
+
+    Returns {"default", "planner", "judgment", "pinned": {role: var}}.
+    Invariants (tests/test_llm_roles.py):
+      * `default` comes from WINRE_LLM_MODEL only — never from a role pin,
+      * an unset or blank pin falls back to `default`,
+      * `pinned` lists only the roles that are genuinely pinned.
+    """
+    default = (os.environ.get("WINRE_LLM_MODEL") or "").strip() or "local"
+    out: dict = {"default": default}
+    pinned: dict = {}
+    for role, var in ROLE_VARS.items():
+        val = (os.environ.get(var) or "").strip()
+        if val:
+            out[role] = val
+            pinned[role] = var
+        else:
+            out[role] = default
+    out["pinned"] = pinned
+    return out
+
+
+def model_for(role: str = "default") -> str:
+    """Resolved model name for a role ('default' | 'planner' | 'judgment')."""
+    r = roles()
+    return r.get(role) or r["default"]
+
+
+def pins() -> dict:
+    """Raw env values of the optional role pins, for DISPLAY only.
+
+    {WINRE_LLM_PLANNER_MODEL: "", WINRE_LLM_VERDICT_MODEL: ""} — the settings
+    page shows exactly what the operator typed, so a typo in a pin stays
+    visible. Routing never reads this; it reads `roles()`.
+    """
+    return {var: (os.environ.get(var) or "") for var in ROLE_VARS}
+
+
+def resolved() -> dict:
+    """Audit-facing record: what each role resolved to, and what was pinned."""
+    r = roles()
+    return {
+        "default": r["default"],
+        "planner": r["planner"],
+        "judgment": r["judgment"],
+        "pinned": dict(r["pinned"]),
+        "single_model": r["planner"] == r["judgment"] == r["default"],
+    }
 
 
 class LLMError(RuntimeError):
@@ -84,11 +159,12 @@ def available() -> bool:
     """Reachability probe: try a 1-token chat; swallow any error.
 
     (A GET /models probe can 404/401 on some providers, so a tiny chat is the
-    most reliable liveness check.)
+    most reliable liveness check.) Uses the DEFAULT model — see
+    `available_roles()` for the per-role view.
     """
     try:
         _post("/chat/completions", {
-            "model": MODEL,
+            "model": model_for("default"),
             "messages": [{"role": "user", "content": "ping"}],
             "max_tokens": 1,
             **_reasoning_field(),
@@ -96,6 +172,34 @@ def available() -> bool:
         return True
     except Exception:
         return False
+
+
+def available_roles() -> dict:
+    """Per-role reachability: {role: bool} for the default + any distinct pin.
+
+    A pin to a model the provider does not serve must be visible, otherwise
+    the run silently falls back to deterministic and the pin looks honored.
+    Only distinct models are probed (max 3 calls, and 1 when nothing is
+    pinned, so the common case costs exactly what `available()` always did).
+    """
+    r = roles()
+    names = [r["default"], r["planner"], r["judgment"]]
+    out: dict = {}
+    for name in dict.fromkeys(n for n in names if n):
+        try:
+            _post("/chat/completions", {
+                "model": name,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+                **_reasoning_field(),
+            }, timeout=15)
+            ok = True
+        except Exception:
+            ok = False
+        for role in ("default", "planner", "judgment"):
+            if r.get(role) == name:
+                out[role] = ok
+    return out
 
 
 def complete(prompt: str, *, system: str | None = None,

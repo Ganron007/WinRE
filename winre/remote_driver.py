@@ -967,6 +967,8 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
             "packed_signal": agent_result.get("packed_signal"),
             "unpack_prepass": agent_result.get("unpack_prepass"),
             "windbg_dump": agent_result.get("windbg_dump"),
+            # per-role models actually used (RevAI handoff item 7)
+            "llm_roles": agent_result.get("llm_roles"),
         }
         # pull the unpack artifact into the pack (it lives on the VM otherwise)
         art = _pull_unpack_artifact(cfg, pack,
@@ -1017,6 +1019,7 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
         "llm_analysis": (out.get("agent") or {}).get("llm_analysis"),
         "tool_failures": failures,
         "no_verdict": no_verdict,
+        "llm_roles": (out.get("agent") or {}).get("llm_roles"),
     })
     pack.write("deep", "deep.json", out)
     pack.write("deep", "META.json", stage_result(
@@ -1196,6 +1199,7 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
             "truly_green": audit_res["truly_green"],
             "unmet_expectations": audit_res.get("unmet_expectations") or [],
             "execution_plan": plan,
+            "llm_roles": audit_res.get("llm_roles"),
             "clock_skew_s": (clock or {}).get("clock_skew_s"),
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }, indent=2) + "\n", encoding="utf-8")

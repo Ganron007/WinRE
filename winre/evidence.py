@@ -147,12 +147,13 @@ def pack_verdict(section_root: Path) -> dict:
                        .read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {"verdict": None, "verdict_obj": None, "source": None,
-                "present": False}
+                "llm_roles": None, "present": False}
     agent = d.get("agent") or {}
     raw = d.get("verdict_obj") if d.get("verdict") else agent.get("verdict")
     obj, label, missing = verdict_fields(raw)
     return {"verdict": label, "verdict_obj": obj,
             "source": d.get("source") or agent.get("source"),
+            "llm_roles": d.get("llm_roles") or agent.get("llm_roles"),
             "present": not missing}
 
 

@@ -79,6 +79,23 @@ WINRE_LLM_API_KEY=<key>
 WINRE_LLM_REASONING=high          # low|medium|high|max — optional
 ```
 
+Two **optional** role pins (RevAI handoff 2026-09-27, item 7) split the two
+LLM roles WinRE actually has. Each defaults to `WINRE_LLM_MODEL`, and a pin
+never moves the other role:
+
+```
+#WINRE_LLM_PLANNER_MODEL=         # 35-tool ReAct loop (call/token heavy)
+#WINRE_LLM_VERDICT_MODEL=         # final judge (verdict + finalize pass)
+```
+
+The resolved routing is recorded per run (`deep.json → llm_roles`,
+`report.json`, `audit.json`) so which model produced the tool loop and which
+produced the verdict is verifiable per case. Mapping to RevAI's three roles:
+WinRE's triage, scripted deep dive and reports are deterministic (zero LLM
+calls), so `REVAI_LLM_MODEL` is the direct equivalent of `WINRE_LLM_MODEL`,
+`REVAI_LLM_PLANNER_MODEL` of `WINRE_LLM_PLANNER_MODEL`, and
+`REVAI_LLM_VERDICT_MODEL` of `WINRE_LLM_VERDICT_MODEL`.
+
 Resolution order (highest first):
 
 1. **Real process environment variables** — the `.env` file never

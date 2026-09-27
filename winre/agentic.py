@@ -1156,6 +1156,20 @@ def _normalize_verdict(verdict: dict) -> dict:
     return verdict
 
 
+def _llm_roles() -> dict:
+    """Resolved per-role models for this run (llm_client is the only resolver).
+
+    Recorded in deep.json so a consumer can verify WHICH model produced the
+    tool loop and WHICH produced the verdict, per case, instead of trusting
+    the environment (RevAI handoff 2026-09-27, item 7).
+    """
+    try:
+        from winre.llm_client import resolved
+        return resolved()
+    except Exception as e:                      # never block a run on config
+        return {"error": f"role resolution failed: {str(e)[:120]}"}
+
+
 def run_langgraph_deep_dive(sample_name: str, sha: str, *,
                             max_steps: int = 14,
                             log_dir: Path | None = None,
@@ -1340,27 +1354,35 @@ dynamic tool errors, fall back to static — do not retry more than once.
         return {"verdict": "unknown", "source": "deterministic_fallback",
                 "history": history, "llm_analysis": None, "dry": True,
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
-                "windbg_dump": windbg_dump}
+                "windbg_dump": windbg_dump, "llm_roles": _llm_roles()}
 
     api_key = os.environ.get("WINRE_LLM_API_KEY", "")
     api_url = (os.environ.get("WINRE_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
                ).rstrip("/")
     if api_url.endswith("/chat/completions"):
         api_url = api_url[: -len("/chat/completions")]
-    model = os.environ.get("WINRE_LLM_MODEL", "local")
     if not api_key and "127.0.0.1" not in api_url:
         return {"verdict": "unknown", "source": "deterministic_fallback",
                 "history": history,
                 "llm_analysis": "WINRE_LLM_API_KEY not set for remote endpoint",
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
-                "windbg_dump": windbg_dump}
+                "windbg_dump": windbg_dump, "llm_roles": _llm_roles()}
 
     try:
         _max_out = int(os.environ.get("WINRE_LLM_MAX_OUTPUT_TOKENS", "32768"))
     except ValueError:
         _max_out = 32768
-    llm = ChatOpenAI(model=model, api_key=api_key or "none",
-                     base_url=api_url, temperature=0.0, max_tokens=_max_out)
+    # Role separation (RevAI handoff item 7): the ReAct tool loop is the
+    # call-heavy/token-heavy role, the final judge is the judgment role. Both
+    # default to WINRE_LLM_MODEL; WINRE_LLM_PLANNER_MODEL /
+    # WINRE_LLM_VERDICT_MODEL pin them independently. Resolved ONLY through
+    # llm_client.roles() — no role variable is read here.
+    llm_roles = _llm_roles()
+    _mk = lambda role: ChatOpenAI(          # noqa: E731 - one-line factory
+        model=llm_roles[role], api_key=api_key or "none",
+        base_url=api_url, temperature=0.0, max_tokens=_max_out)
+    llm = _mk("planner")        # tool selection / investigation
+    judge = _mk("judgment")     # verdict + finalize pass
     system_prompt = f"""You are an agentic malware reverse-engineering assistant on a Windows
 FlareVM analysis pipeline. Sample: {sample_name} (SHA {sha[:16]}).
 
@@ -1473,7 +1495,7 @@ to your final answer immediately.
         return {"verdict": "unknown", "source": "deterministic_fallback",
                 "history": history, "llm_analysis": f"agent error: {e}",
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
-                "windbg_dump": windbg_dump}
+                "windbg_dump": windbg_dump, "llm_roles": _llm_roles()}
 
     # parse final flat JSON from AI messages (newest first). Models wrap
     # verdicts in prose/fences, so try every {...} candidate, not just the
@@ -1536,7 +1558,7 @@ to your final answer immediately.
                 _extra = ("" if _attempt == 1 else
                           "\n\nSTRICT: reply with ONLY the flat JSON object, "
                           "starting with { and ending with }.")
-                fid = llm.invoke([_HM(content=(
+                fid = judge.invoke([_HM(content=(
                     "Convert the following analysis into the required flat JSON "
                     "verdict object ONLY (keys: verdict (malicious/unknown/benign), "
                     "confidence (high/medium/low), summary, key_evidence (list of "
@@ -1567,11 +1589,11 @@ to your final answer immediately.
                 "history": history, "llm_analysis": llm_text[:200_000],
                 "fallback_reason": fallback_reason,
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
-                "windbg_dump": windbg_dump}
+                "windbg_dump": windbg_dump, "llm_roles": _llm_roles()}
     return {"verdict": verdict, "source": "llm_judge",
             "history": history, "llm_analysis": llm_text[:200_000],
             "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
-                "windbg_dump": windbg_dump}
+            "windbg_dump": windbg_dump, "llm_roles": _llm_roles()}
 
 
 if __name__ == "__main__":
