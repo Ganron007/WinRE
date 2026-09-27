@@ -326,6 +326,15 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
                               gate_pass=meta.get("gate_marker_consumed"),
                               run_id=run_id, nonce=nonce)
     pack.write("dynamic", "STAGE.json", stage_meta)
+    # sibling skip record when the VM refused the execution (the local driver
+    # has no control-plane preflight: the gate acts inside the orchestrator)
+    if not ok and "snapshot gate" in str(meta.get("error") or ""):
+        from .evidence import dynamic_skip_record, write_dynamic_skip
+        write_dynamic_skip(pack, dynamic_skip_record(
+            reason="snapshot_gate_blocked", ok=False,
+            error=meta.get("error"),
+            summary="blocked by snapshot gate (no detonation ran)",
+            extra={"gate_mode": meta.get("gate_mode")}))
     return stage_meta
 
 

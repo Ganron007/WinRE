@@ -530,8 +530,9 @@ def build_evidence_bundle(pack_root: Path) -> dict:
             ("intake", ["intake.json", "META.json"]),
             ("quick", ["quick.json", "01-tools-raw.json", "META.json"]),
             ("deep", ["deep.json", "01-tools-raw.json", "META.json"]),
-            ("dynamic", ["META.json", "STAGE.json", "frida_trace.json",
-                         "procmon_summary.json", "network.json"]),
+            ("dynamic", ["META.json", "STAGE.json", "SKIP.json",
+                         "frida_trace.json", "procmon_summary.json",
+                         "network.json"]),
             ("yara", ["rule_report.json", "META.json"]),
             ("report", ["report.json", "iocs.json", "META.json"])):
         d = pack_root / stage

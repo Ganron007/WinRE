@@ -546,6 +546,14 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
             pack.write("dynamic", "STAGE.json", blocked)
         except Exception:
             pass
+        # sibling skip record: a consumer can tell "never asked" from
+        # "asked and the gate refused" without parsing the stage wrapper
+        from .evidence import dynamic_skip_record, write_dynamic_skip
+        write_dynamic_skip(pack, dynamic_skip_record(
+            reason="snapshot_gate_blocked", ok=False,
+            error=gate.get("error"),
+            summary="blocked by snapshot gate (no detonation ran)",
+            extra={"gate_mode": gate.get("gate", {}).get("mode")}))
         return blocked
     py = _remote_py(cfg)
     remote_sample = rf"C:\samples\{sample_name}"

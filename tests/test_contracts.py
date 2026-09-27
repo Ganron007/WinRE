@@ -255,6 +255,86 @@ def test_static_only_run_preserves_previous_dynamic_pack(tmp_path):
     assert not (dyn / "procmon.csv").exists()
 
 
+def test_static_only_run_writes_a_sibling_skip_record(tmp_path):
+    """RevAI asked for a sibling dynamic/SKIP.json so a consumer never has to
+    interpret the stage wrapper (their guard: 'a skip-only section is not a
+    pack'). Written from one builder so it cannot drift from STAGE.json."""
+    pack = _pack(tmp_path)
+    ev.mark_dynamic_not_requested(pack)
+    skip = pack.read("dynamic", "SKIP.json")
+    stg = pack.read("dynamic", "STAGE.json")
+    assert skip is not None, "SKIP.json must exist for a static-only run"
+    assert skip["schema"] == "winre-dynamic-skip/v1"
+    assert skip["reason"] == "not_requested"
+    assert skip["ran"] is False and skip["skipped"] is True
+    assert skip["has_detonation_evidence"] is False
+    # the two records must agree
+    assert skip["preserved_previous"] == stg["preserved_previous"]
+    assert skip["cleared_previous"] is False and stg["cleared_previous"] is False
+    assert skip["summary"] == stg["summary"]
+
+
+def test_skip_record_points_at_the_preserved_pack(tmp_path):
+    pack = _pack(tmp_path)
+    (pack.stages["dynamic"] / "procmon.csv").write_text("a\n", encoding="utf-8")
+    ev.mark_dynamic_not_requested(pack)
+    skip = pack.read("dynamic", "SKIP.json")
+    assert skip["preserved_previous"]
+    assert skip["preserved_artifacts"] == 1
+    kept = pack.root / skip["preserved_previous"]
+    assert (kept / "procmon.csv").is_file()
+
+
+def test_skip_record_points_at_an_already_archived_pack(tmp_path):
+    """After the pack is already in previous_runs/, a later static-only run
+    must still tell a SKIP.json-only reader where the last detonation is
+    (found live 2026-09-27: it said 'no earlier pack' while two were there)."""
+    pack = _pack(tmp_path)
+    (pack.stages["dynamic"] / "procmon.csv").write_text("a\n", encoding="utf-8")
+    ev.mark_dynamic_not_requested(pack)                 # moves it
+    first = pack.read("dynamic", "SKIP.json")["preserved_previous"]
+    ev.mark_dynamic_not_requested(pack)                 # nothing left to move
+    skip = pack.read("dynamic", "SKIP.json")
+    stg = pack.read("dynamic", "STAGE.json")
+    assert skip["preserved_previous"] == first
+    assert skip.get("preserved_already_archived") is True
+    assert stg["preserved_previous"] == first
+    assert (pack.root / first / "procmon.csv").is_file()
+
+
+def test_gate_blocked_run_gets_a_blocked_skip_record(tmp_path):
+    """A refusal is a different fact from 'never asked' — the reason must say
+    so, and the audit must still see dynamic_blocked."""
+    from winre.evidence import dynamic_skip_record, write_dynamic_skip
+    pack = _pack(tmp_path)
+    pack.write("dynamic", "STAGE.json", {
+        "stage": "dynamic", "ok": False,
+        "error": "snapshot gate: VM dirty (no clean marker)",
+        "summary": "blocked by snapshot gate"})
+    write_dynamic_skip(pack, dynamic_skip_record(
+        reason="snapshot_gate_blocked", ok=False,
+        error="snapshot gate: VM dirty (no clean marker)",
+        summary="blocked by snapshot gate (no detonation ran)"))
+    skip = pack.read("dynamic", "SKIP.json")
+    assert skip["reason"] == "snapshot_gate_blocked"
+    assert skip["ok"] is False
+    assert "snapshot gate" in skip["error"]
+    res = audit_mod.audit(pack.root)
+    assert res["dynamic_blocked"] is True
+
+
+def test_skip_wrapper_is_not_mistaken_for_evidence(tmp_path):
+    """Only SKIP.json + STAGE.json in dynamic/ means 'no pack here' — the
+    wrappers must never be archived as if they were evidence."""
+    pack = _pack(tmp_path)
+    ev.mark_dynamic_not_requested(pack)
+    ev.mark_dynamic_not_requested(pack)      # second run: nothing to preserve
+    skip = pack.read("dynamic", "SKIP.json")
+    assert skip["preserved_previous"] is None
+    assert not (pack.root / "previous_runs").exists() or \
+        not list((pack.root / "previous_runs").glob("*"))
+
+
 def test_static_only_run_does_not_look_gate_blocked(tmp_path):
     pack = _pack(tmp_path)
     # previous run was refused by the gate

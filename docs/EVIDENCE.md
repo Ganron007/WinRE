@@ -32,6 +32,10 @@ logs/<sha256>/<static|agentic>/         ← one self-contained case per engine
 │   │                                 rides along as a diagnostic only)
 │   │                                 (refused run: ok=false, 'blocked by snapshot gate';
 │   │                                 audit exposes dynamic_blocked=true)
+│   ├── SKIP.json                      sibling skip record (third-party ingestion:
+│   │                                 reason=not_requested | snapshot_gate_blocked,
+│   │                                 ran=false, has_detonation_evidence=false,
+│   │                                 preserved_previous, cleared_previous=false)
 │   │                                 (not requested: ran=false, skipped='not requested',
 │   │                                 preserved_previous → previous_runs/dynamic_<ts>/;
 │   │                                 cleared_previous is always false — a static-only

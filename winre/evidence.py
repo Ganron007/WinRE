@@ -157,14 +157,72 @@ def pack_verdict(section_root: Path) -> dict:
             "present": not missing}
 
 
+#: files that are NOT detonation evidence (our own stage/skip wrappers)
+_DYNAMIC_WRAPPERS = ("STAGE.json", "SKIP.json")
+
+
+def dynamic_skip_record(*, reason: str, ok: bool, error: str | None = None,
+                        summary: str = "", preserved_previous: str | None = None,
+                        preserved_artifacts: int | None = None,
+                        extra: dict | None = None) -> dict:
+    """The payload of a sibling `dynamic/SKIP.json`, in ONE place.
+
+    A consumer that only wants to know "did this section detonate, and is the
+    previous pack safe?" reads that single file instead of interpreting the
+    stage wrapper (RevAI handoff 2026-09-27 item 3 asked for a sibling skip
+    file; the audit/UI read STAGE.json, so both are written from here and
+    cannot drift).
+
+    `reason` is the machine-readable cause: "not_requested" (this run never
+    asked) or "snapshot_gate_blocked" (it asked and the gate refused).
+    """
+    out = {
+        "schema": "winre-dynamic-skip/v1",
+        "stage": "dynamic",
+        "ran": False,
+        "skipped": True,
+        "ok": bool(ok),
+        "reason": reason,
+        "error": error,
+        "summary": summary or reason,
+        "cleared_previous": False,
+        "preserved_previous": preserved_previous,
+        "has_detonation_evidence": False,
+        "note": ("This run produced NO detonation evidence in this section. "
+                 "An earlier pack, if any, is at `preserved_previous` "
+                 "(previous runs are moved, never deleted)."),
+        "recorded_at": utcnow(),
+    }
+    if preserved_artifacts is not None:
+        out["preserved_artifacts"] = int(preserved_artifacts)
+    if extra:
+        out.update(extra)
+    return out
+
+
+def write_dynamic_skip(pack: "EvidencePack", payload: dict) -> Path | None:
+    """Write the sibling `dynamic/SKIP.json` (never touches STAGE.json)."""
+    try:
+        p = pack.stages.get("dynamic")
+        if p is None:
+            return None
+        p.mkdir(parents=True, exist_ok=True)
+        path = p / "SKIP.json"
+        path.write_text(json.dumps(payload, indent=2, default=str) + "\n",
+                        encoding="utf-8")
+        return path
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def mark_dynamic_not_requested(pack: "EvidencePack") -> dict:
-    """Fresh dynamic/STAGE.json for a run that did not request detonation.
+    """Fresh dynamic/STAGE.json + SKIP.json for a run that never detonated.
 
     EVIDENCE IS APPEND-ONLY (RevAI handoff 2026-09-27 item 3): a static-only
     run must never destroy a previous run's dynamic pack in the same mode
     section. When a previous pack exists it is MOVED (never deleted) to
-    `previous_runs/dynamic_<ts>/` and the skip record points at it, so a
-    consumer can tell "this run detonated nothing" from "evidence discarded".
+    `previous_runs/dynamic_<ts>/` and both records point at it, so a consumer
+    can tell "this run detonated nothing" from "evidence discarded".
 
     The stage wrapper is still rewritten on every static-only run: a stale
     gate-blocked `ok: false` STAGE.json must not make a static-only run look
@@ -176,8 +234,8 @@ def mark_dynamic_not_requested(pack: "EvidencePack") -> dict:
         import shutil
         d = pack.stages.get("dynamic")
         if d and d.exists():
-            # real evidence = anything that is not our own stage wrapper
-            payload = [ch for ch in d.iterdir() if ch.name != "STAGE.json"]
+            # real evidence = anything that is not one of our own wrappers
+            payload = [ch for ch in d.iterdir() if ch.name not in _DYNAMIC_WRAPPERS]
             if payload:
                 stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
                 dest = pack.root / "previous_runs" / f"dynamic_{stamp}"
@@ -185,8 +243,7 @@ def mark_dynamic_not_requested(pack: "EvidencePack") -> dict:
                 try:
                     shutil.move(str(d), str(dest))
                     d.mkdir(parents=True, exist_ok=True)
-                    out["preserved_previous"] = \
-                        f"previous_runs/{dest.name}"
+                    out["preserved_previous"] = f"previous_runs/{dest.name}"
                     out["preserved_artifacts"] = len(payload)
                 except OSError as e:
                     # never destroy: if the move fails, leave the pack alone
@@ -197,6 +254,20 @@ def mark_dynamic_not_requested(pack: "EvidencePack") -> dict:
                           + (f"; previous pack preserved at "
                              f"{out['preserved_previous']}"
                              if out["preserved_previous"] else ""))
+        if not out["preserved_previous"]:
+            # Nothing left in dynamic/ to move — but an earlier pack from this
+            # section may already sit in previous_runs/ (a previous static-only
+            # run moved it there). Point at the newest one, so a consumer that
+            # reads ONLY SKIP.json still learns where this section's most recent
+            # detonation lives.
+            arch = pack.root / "previous_runs"
+            if arch.is_dir():
+                prior = sorted(arch.glob("dynamic_*"))
+                if prior:
+                    out["preserved_previous"] = f"previous_runs/{prior[-1].name}"
+                    out["preserved_already_archived"] = True
+                    out["summary"] += (f"; most recent earlier pack: "
+                                       f"{out['preserved_previous']}")
         pack.write("dynamic", "STAGE.json", {
             "stage": "dynamic", "ok": True, "ran": False,
             "skipped": "not requested",
@@ -204,6 +275,12 @@ def mark_dynamic_not_requested(pack: "EvidencePack") -> dict:
             "cleared_previous": False,
             "preserved_previous": out["preserved_previous"],
         })
+        write_dynamic_skip(pack, dynamic_skip_record(
+            reason="not_requested", ok=True, summary=out["summary"],
+            preserved_previous=out["preserved_previous"],
+            preserved_artifacts=out.get("preserved_artifacts"),
+            extra=({"preserved_already_archived": True}
+                   if out.get("preserved_already_archived") else None)))
     except Exception as e:  # noqa: BLE001
         out["error"] = str(e)[:150]
     return out

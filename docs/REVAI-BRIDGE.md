@@ -279,3 +279,24 @@ Evidence is append-only per mode section: a later static-only run never
 deletes an earlier dynamic pack — the previous pack is moved to
 `previous_runs/dynamic_<ts>/` and the fresh `dynamic/STAGE.json` points at it
 (`preserved_previous`, `cleared_previous: false`).
+
+**`dynamic/SKIP.json` — the one file to read for "did this detonate?".** It is
+written whenever a run produced no detonation evidence, and it separates the
+two reasons a consumer must not confuse:
+
+```json
+{"schema": "winre-dynamic-skip/v1", "ran": false, "skipped": true,
+ "reason": "not_requested", "has_detonation_evidence": false,
+ "cleared_previous": false, "preserved_previous": "previous_runs/dynamic_<ts>",
+ "preserved_artifacts": 71}
+```
+
+- `reason: "not_requested"` — the run never asked to detonate.
+- `reason: "snapshot_gate_blocked"` — it asked and the snapshot gate refused
+  (`ok: false`, `error` carries the gate reason); the audit also reports
+  `dynamic_blocked: true`.
+- `preserved_previous` → an earlier pack exists there; `cleared_previous` is
+  always `false` (nothing is ever deleted).
+- A `dynamic/` folder containing **only** `STAGE.json` + `SKIP.json` is not a
+  pack: `has_detonation_evidence: false` says so directly, so no consumer needs
+  a "skip-only is not a pack" guard of its own.
