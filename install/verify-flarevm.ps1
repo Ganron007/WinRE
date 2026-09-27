@@ -384,8 +384,12 @@ Remove-Item "C:\WinRE\logs\ghidrasql-servers.json",
             "C:\WinRE\logs\ghidra-sql-audit.jsonl",
             "C:\WinRE\logs\ida-sql-audit.jsonl" `
             -Force -ErrorAction SilentlyContinue
+# bytecode caches are not evidence either: the SQL/MCP helpers recreate them on
+# every run, so a verify would otherwise bake one into a golden snapshot
+Get-ChildItem "C:\WinRE" -Recurse -Directory -Filter "__pycache__" `
+    -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 if (@(Get-ChildItem "C:\samples" -Filter "_sqlprobe*" -ErrorAction SilentlyContinue).Count -eq 0) {
-    Ok "probe artifacts + SQL runtime state cleaned (samples/cache/logs)"
+    Ok "probe artifacts + SQL runtime state cleaned (samples/cache/logs/pycache)"
 } else {
     Warn "probe artifacts still present under C:\samples"
 }

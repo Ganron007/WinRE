@@ -59,6 +59,22 @@ $null = New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP "winre-sy
 scp -i $SshKey -o StrictHostKeyChecking=no -o ConnectTimeout=15 -r $Staging\* "$dest" 2>&1 | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) { Die "scp failed rc=$LASTEXITCODE" }
 
+# scp's glob does NOT pick up dotfiles on Windows, so `.env.template` and
+# `.gitignore` were silently left stale on the VM (found 2026-09-27: the
+# template still lacked the LLM role pins that setup-flarevm.ps1 treats as
+# "present, nothing to do"). Copy them explicitly by name. `.env` is never
+# shipped - the VM must hold no secrets.
+$dotStaged = Get-ChildItem -LiteralPath $Staging -Force -File |
+    Where-Object { $_.Name.StartsWith(".") -and $_.Name -ne ".env" }
+if ($dotStaged) {
+    Step ("scp dotfiles -> " + (($dotStaged.Name) -join ", "))
+    foreach ($f in $dotStaged) {
+        scp -i $SshKey -o StrictHostKeyChecking=no -o ConnectTimeout=15 $f.FullName "$dest" 2>&1 |
+            ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -ne 0) { Die "scp dotfile $($f.Name) failed rc=$LASTEXITCODE" }
+    }
+}
+
 Step "remote verify"
 $probe = ssh -i $SshKey -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes "$User@$FlareHost" "powershell -NoProfile -Command (Test-Path 'C:\WinRE\winre\orchestrator.py')" 2>&1
 if ("$probe".Trim() -eq "True") { Step "DEPLOY_OK" } else { Write-Output $probe; Die "remote verify failed" }
