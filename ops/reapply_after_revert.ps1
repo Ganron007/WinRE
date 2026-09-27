@@ -145,6 +145,21 @@ Write-Host "`n--- 5. setup-flarevm.ps1 (VM) ---"
 $out = Invoke-VM "Set-Location C:\WinRE; & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\setup-flarevm.ps1 2>&1 | Select-Object -Last 40" 1800
 Write-Host $out
 
+# --- 5b. MCP autostart (boot task + logon launcher) --------------------------
+# The chain's own header promises autostart repair, but nothing used to call
+# this: reverting to a snapshot that predates WinRE-MCP-Boot left :9009/:9097
+# dead until an operator remembered a second script (found 2026-09-27). The
+# script is idempotent (it reports "already installed" and re-registers), so
+# calling it on every re-apply is the safe behaviour.
+Write-Host "`n--- 5b. MCP autostart (WinRE-MCP-Boot + logon launcher) ---"
+$autostart = "C:\WinRE\install\install_mcp_autostart.ps1"
+if ((Invoke-VM "Test-Path '$autostart'" 60).Trim() -eq "True") {
+    $asOut = Invoke-VM "Set-Location C:\WinRE; & powershell -NoProfile -ExecutionPolicy Bypass -File $autostart 2>&1 | Select-Object -Last 12" 600
+    Write-Host $asOut
+} else {
+    Write-Host "  [MISS] $autostart not on the VM - run ops\sync_to_flare.ps1 (it ships with the repo)" -ForegroundColor Red
+}
+
 # --- 6. verify ----------------------------------------------------------------
 Write-Host "`n--- 6. verify-flarevm.ps1 (VM) ---"
 $verify = Invoke-VM "Set-Location C:\WinRE; & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\verify-flarevm.ps1 2>&1" 600

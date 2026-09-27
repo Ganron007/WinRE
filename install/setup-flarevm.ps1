@@ -83,8 +83,16 @@ if (-not (Test-Path $py)) {
     if ($pyCmd) {
         Act "install Python 3.13 (all users) via chocolatey"
         if (-not $CheckMode) {
-            if (Get-Command choco -ErrorAction SilentlyContinue) {
-                & choco install python313 -y --no-progress 2>$null | Out-Null
+            # Repeat-safe: only shell out to choco when the interpreter is
+            # actually absent. A re-run used to print a scary "installing…"
+            # block for an already-present Python (no-op, but it reads like a
+            # fresh change and costs minutes on a slow link).
+            if (-not (Test-Path $py)) {
+                if (Get-Command choco -ErrorAction SilentlyContinue) {
+                    & choco install python313 -y --no-progress 2>$null | Out-Null
+                }
+            } else {
+                Info "python 3.13 already present at $py - skipping choco"
             }
             if (-not (Test-Path $py) -and $pyCmd) {
                 # launcher fallback: resolve the 3.13 interpreter path

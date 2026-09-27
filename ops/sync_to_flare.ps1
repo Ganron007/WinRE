@@ -15,7 +15,15 @@ param(
     [string]$FlareHost = $env:FLARE_HOST,
     [string]$User = $env:FLARE_USER,
     [string]$SshKey  = $env:FLARE_SSH_KEY,
-    [string]$RemoteRoot = $env:FLARE_REMOTE_ROOT
+    [string]$RemoteRoot = $env:FLARE_REMOTE_ROOT,
+    # Remove remote files inside the mirrored source trees that no longer exist
+    # on the host. OFF by default: the sync is additive so a re-run can never
+    # destroy something a user staged by hand. Turn it on for a true mirror
+    # (after a revert, or when a file was renamed/removed upstream) - and read
+    # the printed manifest first.
+    [switch]$Prune,
+    # Report-only for -Prune: list what would be deleted, delete nothing.
+    [switch]$PruneDryRun
 )
 
 $ErrorActionPreference = "Stop"
@@ -72,6 +80,69 @@ if ($dotStaged) {
         scp -i $SshKey -o StrictHostKeyChecking=no -o ConnectTimeout=15 $f.FullName "$dest" 2>&1 |
             ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) { Die "scp dotfile $($f.Name) failed rc=$LASTEXITCODE" }
+    }
+}
+
+# --- prune: drop remote files that no longer exist upstream ------------------
+# Only the mirrored SOURCE trees are ever considered. Runtime/state on the VM
+# (logs, cache, samples, sessions, lock, local-runs, integrations, .env,
+# .clean_snapshot, vm_clock.json) is out of scope by construction, so -Prune
+# can never touch evidence, credentials or the snapshot marker.
+if ($Prune -or $PruneDryRun) {
+    Step "prune: remote files with no upstream counterpart"
+    $rel = Get-ChildItem -LiteralPath $Staging -Recurse -File -Force |
+        ForEach-Object { $_.FullName.Substring($Staging.Length + 1).Replace('\','/') }
+    $stagedList = ($rel -join "`n")
+    $pruneScript = @"
+`$ErrorActionPreference='SilentlyContinue'
+`$root='$($RemoteRoot.Replace('\','\\'))'
+`$staged=@{}
+@'
+$stagedList
+'@ -split "`n" | Where-Object { `$_ } | ForEach-Object { `$staged[`$_] = 1 }
+`$srcDirs=@('winre','tools','ops','install','docs','tests','assets')
+`$cand=@()
+foreach (`$d in `$srcDirs) { `$p=Join-Path `$root `$d
+  if (Test-Path `$p) {
+    Get-ChildItem `$p -Recurse -File -Force | ForEach-Object {
+      `$r=`$_.FullName.Substring(`$root.Length+1).Replace('\','/')
+      if ((`$_.Name -eq '__init__.py') -or (`$_.Extension -eq '.pyc')) { return }
+      if (-not `$staged.ContainsKey(`$r)) { `$cand += `$r }
+    }
+  }
+}
+if (`$cand.Count -eq 0) { 'PRUNE_NONE'; exit 0 }
+`$cand | Sort-Object | ForEach-Object { 'PRUNE ' + `$_ }
+"@
+    $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($pruneScript))
+    $plist = ssh -i $SshKey -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes "$User@$FlareHost" "powershell -NoProfile -EncodedCommand $enc" 2>&1 | Out-String
+    $lines = @($plist -split "`r?`n" | Where-Object { $_.Trim() -like "PRUNE*" })
+    if (($plist -match "PRUNE_NONE") -or $lines.Count -eq 0) {
+        Step "prune: nothing to remove (remote tree matches upstream)"
+    } else {
+        foreach ($l in $lines) { Write-Host ("  " + $l.Trim()) -ForegroundColor Yellow }
+        if ($PruneDryRun) {
+            Step "prune dry-run: $($lines.Count) file(s) WOULD be removed (re-run without -PruneDryRun to apply)"
+        } else {
+            $targets = @($lines | ForEach-Object { $_.Trim() -replace '^PRUNE\s+','' })
+            $del = @"
+`$ErrorActionPreference='SilentlyContinue'
+@'
+$($targets -join "`n")
+'@ -split "`n" | Where-Object { `$_ } | ForEach-Object {
+  `$f=Join-Path '$($RemoteRoot.Replace('\','\\'))' `$_
+  if (Test-Path `$f) { Remove-Item -LiteralPath `$f -Force; 'REMOVED ' + `$_ } else { 'ABSENT ' + `$_ }
+}
+"@
+            $denc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($del))
+            $dout = ssh -i $SshKey -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes "$User@$FlareHost" "powershell -NoProfile -EncodedCommand $denc" 2>&1 | Out-String
+            $removed = @($dout -split "`r?`n" | Where-Object { $_.Trim() -like "REMOVED*" })
+            if ($removed.Count -eq 0) {
+                Warn "prune: 0 files removed (targets may be locked - rerun or reboot)"
+            } else {
+                Step "prune: removed $($removed.Count) stale file(s)"
+            }
+        }
     }
 }
 
