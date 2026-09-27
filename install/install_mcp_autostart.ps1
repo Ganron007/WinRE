@@ -70,4 +70,36 @@ Register-ScheduledTask -TaskName $bootTask -Action $action -Trigger $trigger `
     -Principal $principal -Settings $settings -Force | Out-Null
 Write-Host "installed scheduled task: $bootTask (AtStartup, SYSTEM)" -ForegroundColor Green
 
+# --- start NOW, not only on the next boot -----------------------------------
+# An AtStartup trigger cannot fire for a boot that already happened, so after
+# a snapshot revert the task exists but :9009/:9097 stay dead until someone
+# reboots or starts the servers by hand (found 2026-09-27: the post-revert
+# deployment finished "0 FAIL" yet left MCP down, so smoke_flare.py failed
+# 2/9). Triggering the task we just registered runs the SAME launcher in the
+# SAME SYSTEM context as a real boot, and start_servers.ps1 is idempotent
+# ("already up on :port - skip"), so this is safe to repeat.
+$ports = @(9009, 9097)
+$up = @($ports | Where-Object {
+    Get-NetTCPConnection -State Listen -LocalPort $_ -ErrorAction SilentlyContinue
+})
+if ($up.Count -eq $ports.Count) {
+    Write-Host "MCP already listening on :$($up -join ', :') - no start needed" -ForegroundColor DarkGray
+} else {
+    Start-ScheduledTask -TaskName $bootTask
+    Write-Host "triggered $bootTask (servers starting as SYSTEM)" -ForegroundColor Cyan
+    $deadline = (Get-Date).AddSeconds(60)
+    do {
+        Start-Sleep -Seconds 3
+        $up = @($ports | Where-Object {
+            Get-NetTCPConnection -State Listen -LocalPort $_ -ErrorAction SilentlyContinue
+        })
+    } while ($up.Count -lt $ports.Count -and (Get-Date) -lt $deadline)
+    if ($up.Count -eq $ports.Count) {
+        Write-Host "MCP up now: :$($up -join ' :')" -ForegroundColor Green
+    } else {
+        $missing = @($ports | Where-Object { $up -notcontains $_ })
+        Write-Warning "MCP not up after 60s (missing :$($missing -join ' :')). Servers start on next boot; inspect logs\mcp\."
+    }
+}
+
 Write-Host "MCP autostart installed: boot task + logon launcher -> :9009 :9097 (x64dbg :9094 on demand)." -ForegroundColor Cyan
