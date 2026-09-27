@@ -13,6 +13,30 @@ Legend: `[base]` = FlareVM installer ships it · `[setup]` = WinRE
 `[stage]` = `ops/provision_tools.ps1` can download it on the host and scp to
 the air-gapped VM.
 
+## Who owns what (the deployment contract)
+
+- **`[user]` = the licensed binaries only: IDA Pro and Malcat.** The operator
+  installs and activates them. If they are absent that is an operator state,
+  reported by name — never our failure, and never a silent skip.
+- **Everything else is ours**: either the FlareVM base ships it or
+  `setup-flarevm.ps1` installs and configures it. **Nothing is skipped.** A
+  missing tool we own is a `FAIL`, not a warning.
+- **The SQL and MCP wiring around the user's binaries is ours too.** If IDA Pro
+  is installed, `idasql.exe` must be discoverable and the live SQL gate must
+  pass. If Malcat is installed, its MCP must answer on `:9009`. A licensed tool
+  that is present but not wired is our bug, not a skip.
+
+`install/verify-flarevm.ps1` enforces this with a **required tool census**: it
+probes every tool above plus the python module set, and ends with one line
+that must read `SKIPPED BY US: 0`:
+
+```
+census: 40/41 required present | operator-installed absent: 1 (IDA Pro (licensed)) | SKIPPED BY US: 0
+```
+
+Anything in the `SKIPPED BY US` list fails the battery, names the tool and
+names who provides it.
+
 ## Static analysis
 
 | Tool | Expected default | Env override | Needed for | Missing → |

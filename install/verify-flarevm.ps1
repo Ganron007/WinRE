@@ -273,7 +273,7 @@ if (-not $upxHit) {
         Select-Object -First 1 -ExpandProperty FullName
 }
 if ($upxHit) { Ok "UPX -> $upxHit" } else { Fail "UPX missing (FlareVM base / provision_tools.ps1)" }
-Test-Tool "radare2" @("C:\Tools\radare2\radare2.exe") @("radare2.exe", "r2.exe") "optional - absent in FlareVM 2026; r2_decompile degrades" -Optional
+Test-Tool "radare2" @("C:\Tools\radare2\radare2.exe") @("radare2.exe", "r2.exe") "ops\provision_tools.ps1 (required: r2_decompile + sink_sites)"
 # r2 smoke: an installed-but-broken r2 must fail HERE, not mid-pipeline
 $r2Hit = Resolve-Tool @("C:\Tools\radare2\radare2.exe") @("radare2.exe", "r2.exe")
 if ($r2Hit) {
@@ -345,6 +345,149 @@ Write-Host ""
 Write-Host "--- LLM config (control-plane concern) ---"
 if (Test-Path "C:\WinRE\.env") { Info "C:\WinRE\.env present (unused on the VM - LLM runs on the control plane)" }
 else { Info "no C:\WinRE\.env (fine - LLM config lives on the control plane via .env)" }
+
+# --- REQUIRED TOOL CENSUS -------------------------------------------------
+# Operator directive, encoded so it cannot be forgotten:
+#
+#   * The USER installs and ACTIVATES the licensed binaries: IDA Pro and
+#     Malcat. If they are absent, that is an operator state, never our
+#     failure - and never a silent skip: it is reported by name.
+#   * EVERYTHING ELSE is ours - present in the FlareVM base or installed /
+#     configured by setup-flarevm.ps1. Nothing may be skipped: a missing tool
+#     we own is a FAIL, not a warning.
+#   * The SQL and MCP WIRING around the user's binaries is OURS: if IDA Pro is
+#     installed, idasql must be discoverable (and the live SQL gate above must
+#     pass); if Malcat is installed, its MCP must answer. A licensed tool that
+#     is present but not wired is OUR bug -> FAIL, not a skip.
+#
+# Three classes:
+#   ours     - always required; absent = FAIL
+#   user     - the licensed binary; absent = INFO (operator has not installed)
+#   ours-if  - our wiring; required only when its user tool is present
+$script:ReqTotal = 0
+$script:ReqOk = 0
+$script:ReqUserAbsent = @()
+$script:ReqMissing = @()
+
+function Test-Required {
+    param(
+        [string]$Name,
+        [string[]]$Paths = @(),
+        [string[]]$Names = @(),
+        [string]$Provider = "setup-flarevm.ps1",
+        [ValidateSet("ours", "user")][string]$Class = "ours"
+    )
+    $script:ReqTotal++
+    $resolved = Resolve-Tool $Paths $Names
+    if ($resolved) {
+        $script:ReqOk++
+        Ok "  [census] $Name -> $resolved"
+        return $true
+    }
+    if ($Class -eq "user") {
+        $script:ReqUserAbsent += $Name
+        Info "  [census] $Name absent - operator installs + activates this one (not our skip)"
+    } else {
+        $script:ReqMissing += $Name
+        Fail "  [census] REQUIRED and missing: $Name ($Provider)"
+    }
+    return $false
+}
+
+Write-Host ""
+Write-Host "--- required tool census (nothing may be skipped) ---"
+
+# --- our tools: base-provided or installed by setup ------------------------
+Test-Required "Ghidra"          @("C:\ProgramData\chocolatey\lib\ghidra\tools\ghidra_*_PUBLIC\ghidraRun.bat", "C:\Tools\ghidra_*_PUBLIC\ghidraRun.bat") @() "FlareVM base / choco (setup)"
+Test-Required "ghidrasql"       @("C:\Tools\ghidrasql\ghidrasql.exe") @() "ops\provision_tools.ps1 (C:\Tools-staged\sql)"
+Test-Required "LibGhidraHost"   @("C:\ProgramData\chocolatey\lib\ghidra\tools\ghidra_*_PUBLIC\Ghidra\Extensions\LibGhidraHost", "C:\Tools\ghidra_*_PUBLIC\Ghidra\Extensions\LibGhidraHost") @() "ops\provision_tools.ps1"
+Test-Required "Java 21"         @("C:\Program Files\Eclipse Adoptium\jdk-21*", "C:\Program Files\Java\*21*") @("java") "choco temurin21 (setup)"
+Test-Required "capa"            @("C:\Tools\capa\capa.exe") @("capa") "FlareVM base / pip fallback"
+Test-Required "capa-rules"      @("C:\Tools\capa-rules") @() "ops\provision_tools.ps1"
+Test-Required "floss"           @("C:\Tools\FLOSS\floss.exe") @("floss") "pip flare-floss (setup)"
+Test-Required "diec"            @("C:\Tools\die\diec.exe") @("diec") "FlareVM base / provision_tools"
+Test-Required "yara-x"          @("C:\Tools\yr\yr.exe", "C:\Tools\yara-x\yr.exe") @("yr", "yara-x") "FlareVM base / provision_tools"
+Test-Required "yara-rules"      @("C:\Tools\yara-rules") @() "ops\reapply_after_revert.ps1 (step 4)"
+Test-Required "strings64"       @("C:\Tools\sysinternals\strings64.exe") @() "FlareVM base"
+Test-Required "radare2"         @("C:\Tools\radare2\radare2.exe") @("radare2", "r2") "ops\provision_tools.ps1"
+Test-Required "scdbg"           @("C:\Tools\scdbg\scdbg.exe") @() "FlareVM base"
+Test-Required "UPX"             @("C:\Tools\upx") @("upx") "FlareVM base"
+Test-Required "GoReSym"         @("C:\Tools\goresym\goresym.exe", "C:\Tools\GoReSym\GoReSym.exe") @() "FlareVM base / provision_tools"
+Test-Required "ilspycmd"        @("C:\ProgramData\chocolatey\bin\ilspycmd.exe", "$env:USERPROFILE\.dotnet\tools\ilspycmd.exe", "C:\Tools\ilspycmd\ilspycmd.exe") @("ilspycmd") "FlareVM base / provision_tools"
+Test-Required "zig"             @("C:\Tools\zig\zig.exe") @("zig") "ops\provision_tools.ps1 (dp64/dp32 build)"
+Test-Required "x64dbg"          @("C:\Tools\x64dbg\release\x64\x64dbg.exe", "C:\Tools\x64dbg\x64dbg.exe") @() "FlareVM base"
+Test-Required "x64dbg MCP dp64" @("C:\Tools\x64dbg\release\x64\plugins\x64dbg-MCP-Server.dp64") @() "zig build + setup deploy (ours)"
+Test-Required "FakeNet-NG"      @("C:\Tools\fakenet\fakenet3.5\fakenet.exe") @("fakenet") "FlareVM base"
+Test-Required "Procmon"         @("C:\Tools\sysinternals\Procmon64.exe") @() "FlareVM base"
+Test-Required "pe-sieve"        @("C:\ProgramData\chocolatey\bin\pe-sieve.exe") @("pe-sieve", "pe-sieve64.exe") "choco / FlareVM base"
+Test-Required "hollows_hunter"  @("C:\Tools\hollows_hunter\hollows_hunter.exe") @() "FlareVM base"
+Test-Required "Procdump"        @("C:\Tools\sysinternals\Procdump64.exe") @() "FlareVM base"
+Test-Required "tshark"          @("C:\Program Files\Wireshark\tshark.exe") @("tshark") "FlareVM base"
+Test-Required "7-Zip"           @("C:\Program Files\7-Zip\7z.exe") @("7z") "FlareVM base"
+Test-Required "cdb/WinDbg"      @("C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe", "C:\Program Files\Windows Kits\10\Debuggers\x64\cdb.exe") @() "FlareVM base / flarevm-postfix"
+Test-Required "Python 3.13"     @("C:\Python313\python.exe") @() "choco python313 (setup)"
+
+# --- python modules (installed offline from staged wheels by setup) ---------
+if (Test-Path "C:\Python313\python.exe") {
+    foreach ($m in @("frida", "flask", "pefile", "psutil", "oletools", "pypdf",
+                     "dnfile", "z3", "speakeasy", "mcp_windbg", "floss")) {
+        $script:ReqTotal++
+        & C:\Python313\python.exe -c "import $m" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $script:ReqOk++
+            Ok "  [census] py:$m"
+        } else {
+            $script:ReqMissing += "py:$m"
+            Fail "  [census] REQUIRED python module missing: $m (setup installs from C:\Tools-staged\wheels)"
+        }
+    }
+}
+
+# --- user-installed licensed binaries (operator installs + activates) -------
+$idaBin = Test-Required "IDA Pro (licensed)" @("C:\Program Files\IDA Professional 9.3\idat.exe", "C:\Program Files\IDA Professional 9.2\idat.exe", "C:\Tools\IDA*\idat.exe") @() "operator installs + activates" -Class user
+$malcatBin = Test-Required "Malcat (licensed)" @("C:\Tools\malcat\bin\malcat.mcp.py", "C:\Program Files\Malcat\bin\malcat.mcp.py") @() "operator installs + activates" -Class user
+
+# --- OUR wiring around the user's binaries: required whenever they exist ---
+$script:ReqTotal++
+if ($idaBin) {
+    $idasql = Resolve-Tool @($env:WINRE_IDASQL, $env:IDASQL,
+                             "C:\Program Files\IDA Professional 9.3\idasql.exe",
+                             "C:\Program Files\IDA Professional 9.2\idasql.exe") @("idasql.exe")
+    if ($idasql) {
+        $script:ReqOk++
+        Ok "  [census] idasql (our SQL wiring) -> $idasql"
+    } else {
+        $script:ReqMissing += "idasql"
+        Fail "  [census] IDA Pro is installed but idasql.exe is not discoverable - our job: set IDASQL/WINRE_IDASQL (the live SQL gate above also has to pass)"
+    }
+} else {
+    $script:ReqOk++
+    Info "  [census] idasql wiring not applicable (operator has not installed IDA Pro)"
+}
+$script:ReqTotal++
+if ($malcatBin) {
+    $mcpUp = Get-NetTCPConnection -State Listen -LocalPort 9009 -ErrorAction SilentlyContinue
+    if ($mcpUp) {
+        $script:ReqOk++
+        Ok "  [census] Malcat MCP :9009 answering (our wiring)"
+    } else {
+        $script:ReqMissing += "Malcat MCP :9009"
+        Fail "  [census] Malcat is installed but its MCP is NOT answering :9009 - our wiring (install\install_mcp_autostart.ps1, winre\mcp\start_servers.ps1)"
+    }
+} else {
+    $script:ReqOk++
+    Info "  [census] Malcat MCP wiring not applicable (operator has not installed Malcat)"
+}
+
+Write-Host ""
+if ($script:ReqMissing.Count -eq 0) {
+    $ua = if ($script:ReqUserAbsent.Count) { $script:ReqUserAbsent -join ", " } else { "none" }
+    Ok ("census: {0}/{1} required present | operator-installed absent: {2} ({3}) | SKIPPED BY US: 0" -f `
+        $script:ReqOk, $script:ReqTotal, $script:ReqUserAbsent.Count, $ua)
+} else {
+    Fail ("census: {0}/{1} required present | SKIPPED BY US: {2} -> {3}" -f `
+        $script:ReqOk, $script:ReqTotal, $script:ReqMissing.Count, ($script:ReqMissing -join ", "))
+}
 
 Write-Host ""
 Write-Host "--- clock (control-plane skew diagnosis) ---"
