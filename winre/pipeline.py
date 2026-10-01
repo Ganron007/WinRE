@@ -422,6 +422,10 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
         out["agent"] = {
             "source": agent_result.get("source"),
             "verdict": agent_result.get("verdict"),
+            # WHICH role actually produced the verdict. Dropping it here made
+            # deep.json unable to show the routing even though the run knew it
+            # (code audit 2026-09-28).
+            "verdict_judged_by": agent_result.get("verdict_judged_by"),
             "llm_analysis": agent_result.get("llm_analysis"),
             "fallback_reason": agent_result.get("fallback_reason"),
             "tool_calls": len(agent_result.get("history") or []),

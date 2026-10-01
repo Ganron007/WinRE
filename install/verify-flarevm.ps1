@@ -340,24 +340,54 @@ $ports = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
 # A listening socket is not proof of life: an unrelated or unlicensed
 # listener satisfies a port check, and that is exactly how a deployment
 # initialize request and require bytes back (code audit 2026-09-28).
-function Test-McpHandshake([int]$Port, [int]$TimeoutMs = 4000) {
-    try {
-        $cli = New-Object System.Net.Sockets.TcpClient
-        $iar = $cli.BeginConnect("127.0.0.1", $Port, $null, $null)
-        if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutMs)) { $cli.Close(); return $false }
-        $cli.EndConnect($iar)
-        $st = $cli.GetStream()
-        $st.ReadTimeout = $TimeoutMs
-        $req = '{"jsonrpc":"2.0","id":1,"method":"initialize",' +
-               '"params":{"protocolVersion":"2024-11-05","capabilities":{},' +
-               '"clientInfo":{"name":"winre-verify","version":"1.0"}}}' + [char]10
-        $by = [Text.Encoding]::UTF8.GetBytes($req)
-        $st.Write($by, 0, $by.Length)
-        $buf = New-Object byte[] 4096
-        $n = $st.Read($buf, 0, $buf.Length)
-        $cli.Close()
-        return ($n -gt 0)
-    } catch { return $false }
+function Test-McpServer([int]$Port, [int]$TimeoutMs = 6000) {
+    # BOTH servers on this box speak HTTP, not raw line-delimited JSON-RPC:
+    # Malcat runs zeromcp/1.3.0 and mcp_windbg runs --transport
+    # streamable-http. A bare JSON line is never answered by an HTTP server,
+    # so the first version of this probe reported a HEALTHY server as DEAD
+    # (found live on 2026-09-28). Send a COMPLETE HTTP request instead, and
+    # follow the redirect mcp_windbg issues for /mcp -> /mcp/.
+    $body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":' +
+           '{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":' +
+           '{"name":"winre-verify","version":"1.0"}}}'
+    foreach ($path in @("/mcp", "/mcp/")) {
+        try {
+            $cli = New-Object System.Net.Sockets.TcpClient
+            $iar = $cli.BeginConnect("127.0.0.1", $Port, $null, $null)
+            if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutMs)) { $cli.Close(); continue }
+            $cli.EndConnect($iar)
+            $st = $cli.GetStream()
+            $st.ReadTimeout = $TimeoutMs
+            $req = "POST $path HTTP/1.1`r`n" +
+                   "Host: 127.0.0.1:$Port`r`n" +
+                   "Content-Type: application/json`r`n" +
+                   "Accept: application/json, text/event-stream`r`n" +
+                   "Content-Length: $($body.Length)`r`n" +
+                   "Connection: close`r`n`r`n$body"
+            $by = [Text.Encoding]::UTF8.GetBytes($req)
+            $st.Write($by, 0, $by.Length)
+            $buf = New-Object byte[] 8192
+            $n = $st.Read($buf, 0, $buf.Length)
+            $cli.Close()
+            if ($n -le 0) { continue }
+            $txt = [Text.Encoding]::UTF8.GetString($buf, 0, $n)
+            if (-not $txt.StartsWith("HTTP/")) {
+                # a raw JSON-RPC transport: an object back is proof of life
+                if ($txt.TrimStart().StartsWith("{")) { return "OK (raw JSON-RPC reply)" }
+                continue
+            }
+            $status = ($txt -split "`r`n")[0]
+            if ($status -match "HTTP/[0-9.]+ 200") {
+                # 200 alone would satisfy an unrelated web server, so require
+                # positive MCP evidence in the reply
+                if ($txt -match '"jsonrpc"' -or $txt -match "mcp-session-id" -or
+                    $txt -match "event: message") { return "OK (MCP initialize answered)" }
+                return "WEAK (HTTP 200, no MCP marker in body)"
+            }
+            # 30x means the endpoint moved: try the other spelling
+        } catch { }
+    }
+    return "DEAD (no MCP response to initialize)"
 }
 foreach ($p in @(@{n = "Malcat"; port = 9009; required = [bool]$malcatBin },
                  @{n = "x64dbg"; port = 9094; required = $false },
@@ -368,9 +398,10 @@ foreach ($p in @(@{n = "Malcat"; port = 9009; required = [bool]$malcatBin },
         else { Warn "$($p.n) MCP NOT listening :$($p.port) (on-demand: the x64dbg manager starts it)" }
         continue
     }
-    if (Test-McpHandshake $p.port) { Ok "$($p.n) MCP ANSWERING :$($p.port) (pid $($hit.OwningProcess); initialize got a reply)" }
-    elseif ($p.required) { Fail "$($p.n) MCP socket open but DEAD: no reply to an initialize request on :$($p.port)" }
-    else { Warn "$($p.n) MCP socket open but silent on :$($p.port)" }
+    $probe = Test-McpServer $p.port
+    if ($probe -like "OK*") { Ok "$($p.n) MCP ANSWERING :$($p.port) (pid $($hit.OwningProcess); $probe)" }
+    elseif ($p.required) { Fail "$($p.n) MCP socket open but DEAD: $probe on :$($p.port) - present-but-unwired is a FAIL" }
+    else { Warn "$($p.n) MCP socket open but silent on :$($p.port) ($probe)" }
 }
 $bootTask = Get-ScheduledTask -TaskName "WinRE-MCP-Boot" -ErrorAction SilentlyContinue
 if ($bootTask) { Ok "scheduled task WinRE-MCP-Boot present (state=$($bootTask.State)) - this is what serves :9009/:9097 after a revert" }
@@ -539,7 +570,7 @@ if ($malcatBin) {
     $mcpUp = Get-NetTCPConnection -State Listen -LocalPort 9009 -ErrorAction SilentlyContinue
     if ($mcpUp) {
         $script:ReqOk++
-        Ok "  [census] Malcat MCP :9009 answering (our wiring)"
+        Ok "  [census] Malcat MCP :9009 answering (our wiring; probed above with a real initialize)"
     } else {
         $script:ReqMissing += "Malcat MCP :9009"
         Fail "  [census] Malcat is installed but its MCP is NOT answering :9009 - our wiring (install\install_mcp_autostart.ps1, winre\mcp\start_servers.ps1)"

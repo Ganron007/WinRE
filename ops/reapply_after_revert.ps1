@@ -163,12 +163,14 @@ foreach ($r in @("yara-rules", "capa-rules")) {
 # --- 5. setup on the VM -------------------------------------------------------
 Write-Host "`n--- 5. setup-flarevm.ps1 (VM) ---"
 $setupCmd = "Set-Location C:\WinRE; & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\setup-flarevm.ps1 2>&1 | Select-Object -Last 40"
-$out = Invoke-VM $setupCmd 1800
+# the remote exit code has to be ECHOED: `exit N` writes nothing to stdout,
+# so the capture came back EMPTY and the chain reported "FAILED (rc=)" and
+# exited 1 even on a healthy VM (code audit 2026-09-28). One call, output
+# and code together.
+$setupWrap = "Set-Location C:\WinRE; `$o = & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\setup-flarevm.ps1 2>&1 | Select-Object -Last 40; `$rc = `$LASTEXITCODE; `$o | Out-String; Write-Output ('RC=' + `$rc)"
+$out = Invoke-VM $setupWrap 1800
 Write-Host $out
-# capture the remote exit code: without this a setup that failed 20 ways
-# still let the chain print "Re-apply done" and exit 0 (code audit
-# 2026-09-28, CRITICAL - an unusable deployment read as a success)
-$setupRc = (Invoke-VM "Set-Location C:\WinRE; & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\setup-flarevm.ps1 *> `$null; exit `$LASTEXITCODE" 1800).Trim()
+$setupRc = if ($out -match "RC=(\d+)") { $Matches[1] } else { "unknown" }
 
 # --- 5b. MCP autostart (boot task + logon launcher) --------------------------
 # The chain's own header promises autostart repair, but nothing used to call
@@ -187,10 +189,10 @@ if ((Invoke-VM "Test-Path '$autostart'" 60).Trim() -eq "True") {
 
 # --- 6. verify ----------------------------------------------------------------
 Write-Host "`n--- 6. verify-flarevm.ps1 (VM) ---"
-$verifyCmd = "Set-Location C:\WinRE; & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\verify-flarevm.ps1 2>&1"
-$verify = Invoke-VM $verifyCmd 600
+$verifyWrap = "Set-Location C:\WinRE; `$o = & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\verify-flarevm.ps1 2>&1; `$rc = `$LASTEXITCODE; `$o | Out-String; Write-Output ('RC=' + `$rc)"
+$verify = Invoke-VM $verifyWrap 900
 Write-Host $verify
-$verifyRc = (Invoke-VM "Set-Location C:\WinRE; & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\verify-flarevm.ps1 *> `$null; exit `$LASTEXITCODE" 900).Trim()
+$verifyRc = if ($verify -match "RC=(\d+)") { $Matches[1] } else { "unknown" }
 if ($verifyRc -ne "0") {
     Write-Host "`n=== verify-flarevm.ps1 FAILED (rc=$verifyRc) - the deployment is NOT ready ===" -ForegroundColor Red
     Write-Host "    Fix every FAIL above and re-run this script (it is idempotent), or run:" -ForegroundColor Red

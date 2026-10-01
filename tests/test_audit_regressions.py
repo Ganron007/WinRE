@@ -167,6 +167,16 @@ def test_aborted_run_writes_a_non_green_audit():
         assert "truly_green" in abort, "the abort audit must be explicitly red"
 
 
+def test_verdict_judged_by_reaches_the_artifact():
+    """The routing must be readable from deep.json, not only in memory."""
+    for f in ("winre/remote_driver.py", "winre/pipeline.py"):
+        src = _src(f)
+        proj = src.split('out["agent"] = {')[1]
+        assert '"verdict_judged_by"' in proj.split("}")[0], (
+            f"{f} builds deep.json's agent block without verdict_judged_by, so "
+            "the artifact cannot show which role judged")
+
+
 def test_ui_survives_an_over_budget_refusal():
     assert 'res["results"].get("audit")' in _src("winre/ui/app.py"), (
         "run_remote_pipeline returns no results[audit] when it aborts; "
@@ -220,10 +230,17 @@ def test_verify_does_not_warn_about_census_required_items():
 
 def test_mcp_liveness_is_a_handshake_not_a_port_check():
     src = _src("install/verify-flarevm.ps1")
-    assert "Test-McpHandshake" in src, (
+    assert "Test-McpServer" in src, (
         "a listening socket is not proof of life - an unrelated or unlicensed "
         "listener satisfied the old check")
     assert "jsonrpc" in src and "initialize" in src
+    # both MCP servers here are HTTP (zeromcp, streamable-http): a bare JSON
+    # line is never answered, which made the first version of this probe
+    # report a healthy server as DEAD
+    assert "POST $path HTTP/1.1" in src, (
+        "the MCP probe must send a COMPLETE HTTP request")
+    assert "mcp-session-id" in src, (
+        "a bare HTTP 200 from an unrelated web server must not satisfy it")
     assert BOOT_TASK in src, (
         "the task that actually serves :9009/:9097 after a revert must be "
         "verified, not assumed")
