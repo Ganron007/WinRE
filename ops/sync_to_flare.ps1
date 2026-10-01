@@ -48,10 +48,18 @@ if (-not $RemoteRoot) { $RemoteRoot = "C:\WinRE" }
 
 $Repo = Split-Path -Parent $PSScriptRoot
 $Staging = Join-Path $env:TEMP "winre-sync-$PID"
-$Excludes = @(".git","__pycache__","logs","cache","local-runs","dist",".env","docs\internal","internal")
+# a leftover staging dir from a crashed run would be scp'd AND counted as
+# "staged" (so prune could never see those files) - refuse to reuse it
+if (Test-Path $Staging) { Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue }
+# TOP-LEVEL name filter (see the Copy loop): "docs\internal" could never
+# match here because $_.Name never contains a backslash - so the
+# gitignored handoff notes were silently shipped to the VM on every run.
+# Nested paths are pruned explicitly below instead.
+$Excludes = @(".git","__pycache__","logs","cache","local-runs","dist",".env","internal",".pytest_cache",".mypy_cache")
 
 function Die([string]$m) { Write-Error "[sync_to_flare] FATAL: $m"; exit 2 }
 function Step([string]$m) { Write-Host "[sync_to_flare] $m" }
+function Warn([string]$m) { Write-Host "[sync_to_flare] WARN $m" -ForegroundColor Yellow }
 
 Step "staging repo -> $Staging"
 New-Item -ItemType Directory -Force -Path $Staging | Out-Null
@@ -60,11 +68,18 @@ Get-ChildItem -LiteralPath $Repo -Force | Where-Object { $_.Name -notin $Exclude
 }
 # strip any pycache left inside staged tree
 Get-ChildItem -LiteralPath $Staging -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+# nested local-only content (the filter above is top-level by name only)
+foreach ($nested in @("docs\internal", ".pytest_cache", ".mypy_cache")) {
+    $np = Join-Path $Staging $nested
+    if (Test-Path $np) { Remove-Item -LiteralPath $np -Recurse -Force -ErrorAction SilentlyContinue }
+}
 
 $dest = "$User@$FlareHost`:$($RemoteRoot.Replace('\','/'))"
 Step "scp -> $dest"
 $null = New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP "winre-sync-tmp")
-scp -i $SshKey -o StrictHostKeyChecking=no -o ConnectTimeout=15 -r $Staging\* "$dest" 2>&1 | ForEach-Object { Write-Host $_ }
+# BatchMode: without it a rejected key makes scp prompt for a password and
+# hang forever inside a non-interactive chain
+scp -i "$SshKey" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 -r "$Staging\*" "$dest" 2>&1 | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) { Die "scp failed rc=$LASTEXITCODE" }
 
 # scp's glob does NOT pick up dotfiles on Windows, so `.env.template` and
@@ -77,7 +92,7 @@ $dotStaged = Get-ChildItem -LiteralPath $Staging -Force -File |
 if ($dotStaged) {
     Step ("scp dotfiles -> " + (($dotStaged.Name) -join ", "))
     foreach ($f in $dotStaged) {
-        scp -i $SshKey -o StrictHostKeyChecking=no -o ConnectTimeout=15 $f.FullName "$dest" 2>&1 |
+        scp -i "$SshKey" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 "$($f.FullName)" "$dest" 2>&1 |
             ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) { Die "scp dotfile $($f.Name) failed rc=$LASTEXITCODE" }
     }
@@ -93,20 +108,31 @@ if ($Prune -or $PruneDryRun) {
     $rel = Get-ChildItem -LiteralPath $Staging -Recurse -File -Force |
         ForEach-Object { $_.FullName.Substring($Staging.Length + 1).Replace('\','/') }
     $stagedList = ($rel -join "`n")
+    # The remote script resolves the root ITSELF and derives relative paths
+    # from the resolved FullName. The previous version doubled the backslashes
+    # in the root string and then took Substring(Length+1): the FileSystem
+    # provider normalises the doubled separators back, so every key was off
+    # by two and EVERY remote source file looked stale. Fixing only the
+    # arithmetic would have deleted the whole tree, so the derivation is now
+    # done from the resolved path, scoped, and every deletion is re-checked.
     $pruneScript = @"
 `$ErrorActionPreference='SilentlyContinue'
-`$root='$($RemoteRoot.Replace('\','\\'))'
+`$root=(Get-Item -LiteralPath '$RemoteRoot' -ErrorAction SilentlyContinue)
+if (-not `$root) { 'PRUNE_NO_ROOT'; exit 0 }
+`$prefix=`$root.FullName.TrimEnd('\') + '\'
 `$staged=@{}
 @'
 $stagedList
 '@ -split "`n" | Where-Object { `$_ } | ForEach-Object { `$staged[`$_] = 1 }
 `$srcDirs=@('winre','tools','ops','install','docs','tests','assets')
 `$cand=@()
-foreach (`$d in `$srcDirs) { `$p=Join-Path `$root `$d
+foreach (`$d in `$srcDirs) { `$p=Join-Path `$root.FullName `$d
   if (Test-Path `$p) {
     Get-ChildItem `$p -Recurse -File -Force | ForEach-Object {
-      `$r=`$_.FullName.Substring(`$root.Length+1).Replace('\','/')
       if ((`$_.Name -eq '__init__.py') -or (`$_.Extension -eq '.pyc')) { return }
+      # only files INSIDE the mirrored tree can be relative to it
+      if (-not `$_.FullName.StartsWith(`$prefix)) { return }
+      `$r=`$_.FullName.Substring(`$prefix.Length).Replace('\','/')
       if (-not `$staged.ContainsKey(`$r)) { `$cand += `$r }
     }
   }
@@ -116,8 +142,13 @@ if (`$cand.Count -eq 0) { 'PRUNE_NONE'; exit 0 }
 "@
     $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($pruneScript))
     $plist = ssh -i $SshKey -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes "$User@$FlareHost" "powershell -NoProfile -EncodedCommand $enc" 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -and $plist -notmatch "PRUNE_") {
+        Die "prune probe failed (ssh rc=$LASTEXITCODE) - refusing to report an empty diff"
+    }
     $lines = @($plist -split "`r?`n" | Where-Object { $_.Trim() -like "PRUNE*" })
-    if (($plist -match "PRUNE_NONE") -or $lines.Count -eq 0) {
+    if ($plist -match "PRUNE_NO_ROOT") {
+        Warn "prune: remote root $RemoteRoot not found on the VM - nothing compared"
+    } elseif (($plist -match "PRUNE_NONE") -or $lines.Count -eq 0) {
         Step "prune: nothing to remove (remote tree matches upstream)"
     } else {
         foreach ($l in $lines) { Write-Host ("  " + $l.Trim()) -ForegroundColor Yellow }
@@ -127,18 +158,35 @@ if (`$cand.Count -eq 0) { 'PRUNE_NONE'; exit 0 }
             $targets = @($lines | ForEach-Object { $_.Trim() -replace '^PRUNE\s+','' })
             $del = @"
 `$ErrorActionPreference='SilentlyContinue'
+`$root=(Get-Item -LiteralPath '$RemoteRoot' -ErrorAction SilentlyContinue)
+if (-not `$root) { 'NOREADY_NO_ROOT'; exit 0 }
 @'
 $($targets -join "`n")
 '@ -split "`n" | Where-Object { `$_ } | ForEach-Object {
-  `$f=Join-Path '$($RemoteRoot.Replace('\','\\'))' `$_
-  if (Test-Path `$f) { Remove-Item -LiteralPath `$f -Force; 'REMOVED ' + `$_ } else { 'ABSENT ' + `$_ }
+  `$rel=`$_
+  `$f=Join-Path `$root.FullName `$rel
+  # belt and braces: never delete outside the mirrored source trees
+  `$top=(`$rel -split '/')[0]
+  if (`$top -notin @('winre','tools','ops','install','docs','tests','assets')) { 'SKIPPED_OUTSIDE ' + `$rel; return }
+  if (Test-Path `$f) {
+    Remove-Item -LiteralPath `$f -Force
+    # report what ACTUALLY happened - the old script printed REMOVED even
+    # when the file was locked or ACL-denied (silent no-op prune)
+    if (Test-Path `$f) { 'FAILED ' + `$rel } else { 'REMOVED ' + `$rel }
+  } else { 'ABSENT ' + `$rel }
 }
 "@
-            $denc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($del))
+                        $denc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($del))
             $dout = ssh -i $SshKey -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes "$User@$FlareHost" "powershell -NoProfile -EncodedCommand $denc" 2>&1 | Out-String
             $removed = @($dout -split "`r?`n" | Where-Object { $_.Trim() -like "REMOVED*" })
+            $failed  = @($dout -split "`r?`n" | Where-Object { $_.Trim() -like "FAILED*" })
+            $skipped = @($dout -split "`r?`n" | Where-Object { $_.Trim() -like "SKIPPED_OUTSIDE*" })
             if ($removed.Count -eq 0) {
                 Warn "prune: 0 files removed (targets may be locked - rerun or reboot)"
+            } elseif ($failed.Count -gt 0) {
+                Warn "prune: $($failed.Count) file(s) could NOT be removed - see the FAILED lines above"
+            } elseif ($skipped.Count -gt 0) {
+                Warn "prune: $($skipped.Count) target(s) skipped as outside the mirrored source trees"
             } else {
                 Step "prune: removed $($removed.Count) stale file(s)"
             }
@@ -150,7 +198,7 @@ Step "remote verify"
 $probe = ssh -i $SshKey -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes "$User@$FlareHost" "powershell -NoProfile -Command (Test-Path 'C:\WinRE\winre\orchestrator.py')" 2>&1
 if ("$probe".Trim() -eq "True") { Step "DEPLOY_OK" } else { Write-Output $probe; Die "remote verify failed" }
 
-Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue
+try { Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue } catch {}
 Step "DONE"
 exit 0
 

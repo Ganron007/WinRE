@@ -315,11 +315,25 @@ if ($idasqlZip -and (Test-Path $idasqlZip.FullName)) {
 Write-Host "--- Staging to VM (C:\Tools-staged) ---" -ForegroundColor Cyan
 if (-not $FlareHost) { Write-Host "[WARN] FLARE_HOST not set - staging locally only ($stage)" -ForegroundColor Yellow }
 else {
-    $scpArgs = @("-i", $SshKey, "-o", "StrictHostKeyChecking=no")
+    # BatchMode matters: without it a rejected key makes scp prompt for a
+    # password and hang forever inside a non-interactive chain
+    $scpArgs = @("-i", $SshKey, "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes")
+    $dirStageFailed = @()
     ssh @scpArgs "${User}@${FlareHost}" "cmd /c if not exist C:\Tools-staged mkdir C:\Tools-staged" 2>$null | Out-Null
     Get-ChildItem $stage -File | ForEach-Object {
         scp @scpArgs $_.FullName "${User}@${FlareHost}:C:/Tools-staged/" 2>$null
         Write-Host "  staged: $($_.Name)"
+    }
+    # DIRECTORIES as well: capa-rules and x64dbg-mcp-server are cloned, not
+    # downloaded as files. Only -File was shipped, so the VM never received
+    # them while NEXT STEPS below promised both - and the census then failed
+    # on exactly what this script claimed it had staged (code audit
+    # 2026-09-28, CRITICAL).
+    Get-ChildItem $stage -Directory | ForEach-Object {
+        ssh @scpArgs "${User}@${FlareHost}" "cmd /c if not exist C:\Tools-staged\$($_.Name) mkdir C:\Tools-staged\$($_.Name)" 2>$null | Out-Null
+        scp @scpArgs "$($_.FullName)/*" "${User}@${FlareHost}:C:/Tools-staged/$($_.Name)/" 2>$null
+        if ($LASTEXITCODE -ne 0) { $dirStageFailed += $_.Name }
+        Write-Host "  staged dir: $($_.Name)"
     }
     # SQL-first artifacts keep their own subdir (setup looks there first)
     if (Test-Path $sqlStage) {
@@ -347,6 +361,7 @@ Write-Host " 10. Run: powershell -File C:\WinRE\install\setup-flarevm.ps1"
 Write-Host "     (unzips staged zig, builds the MCP plugin, verifies everything)"
 Write-Host ""
 $failed = @()
+if ($dirStageFailed.Count -gt 0) { $failed += "staged dirs: $($dirStageFailed -join '+ ')" }
 if (-not $ghidraOk) { $failed += "Ghidra" }
 if (-not $x64Ok) { $failed += "x64dbg" }
 if (-not $zigOk) { $failed += "zig" }

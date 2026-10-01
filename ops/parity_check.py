@@ -103,6 +103,12 @@ def _remote_hashes(root: str, ssh_key: str, host: str, user: str,
 
 
 def main() -> int:
+    # --help must answer instead of hashing the tree over SSH
+    if "-h" in sys.argv or "--help" in sys.argv:
+        print("usage: python -m ops.parity_check [--quiet]\n\n"
+              "Compare every tracked repo file host<->VM by hash.")
+        print("exit 0 identical, 1 differences, 2 unusable.")
+        return 0
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--quiet", action="store_true", help="one summary line only")
     ap.add_argument("--root", default=None,

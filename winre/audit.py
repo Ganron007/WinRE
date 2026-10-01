@@ -153,7 +153,13 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
             else:
                 gate_ok = True
     except json.JSONDecodeError:
+        # FAIL CLOSED: an unreadable STAGE.json used to leave gate_ok at its
+        # initialiser True, so a truncated file could keep a run green even
+        # though the dynamic stage ran with no gate evidence (code audit
+        # 2026-09-28).
         gate = gate or {"error": "dynamic STAGE.json unreadable"}
+        if gm == "enforce" and dynamic.get("ran"):
+            gate_ok = False
 
     quality_green = not fallbacks and not failed_tools \
         and not dynamic_conflict and gate_ok

@@ -488,8 +488,13 @@ def _exec_site_gate(kind: str, sha: str, meta: dict) -> bool:
     marker = Path(os.environ.get(
         "WINRE_SNAPSHOT_MARKER", r"C:\WinRE\.clean_snapshot"))
     gmode = os.environ.get("WINRE_SNAPSHOT_GATE", "enforce").strip().lower()
-    if gmode not in ("observe", "enforce"):
-        gmode = "observe"
+    if gmode not in ("observe", "enforce", "off"):
+        # FAIL CLOSED: an unrecognised value used to be rewritten to "observe",
+        # which also made the "off" branch below unreachable and ate the
+        # one-shot marker anyway (code audit 2026-09-28).
+        meta["gate_mode_config_error"] = (
+            f"unknown WINRE_SNAPSHOT_GATE={gmode!r}; enforcing")
+        gmode = "enforce"
     meta["gate_mode"] = gmode
     if gmode == "off":
         meta["gate"] = "off"

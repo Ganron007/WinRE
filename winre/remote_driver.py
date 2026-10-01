@@ -521,39 +521,39 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     from . import snapshot_gate
     gate = snapshot_gate.preflight("dynamic", sha=sha, cfg=cfg, consume=False)
     if not gate.get("allowed"):
-        # Honesty: a blocked run must not leave the PREVIOUS run's dynamic
-        # artifacts in the pack - audits/reports would read stale evidence
-        # (observed 2026-09-18: blocked enforce run still showed events=533).
-        try:
-            import shutil as _sh
-            dyn_dir = pack.stages.get("dynamic")
-            if dyn_dir and dyn_dir.exists():
-                for ch in list(dyn_dir.iterdir()):
-                    if ch.is_dir():
-                        _sh.rmtree(ch, ignore_errors=True)
-                    else:
-                        try:
-                            ch.unlink()
-                        except OSError:
-                            pass
-        except Exception:
-            pass
+        # Honesty without destruction: the PREVIOUS run's artifacts must not be
+        # presented as this run's evidence (2026-09-18: a blocked enforce run
+        # still showed events=533) - but they are EVIDENCE, so they are MOVED
+        # to previous_runs/ and the pointer is recorded. Deleting them (the old
+        # behaviour) broke the append-only contract and left a record that
+        # claimed "moved, never deleted" while pointing nowhere (code audit
+        # 2026-09-28, HIGH).
+        from .evidence import (dynamic_skip_record, preserve_dynamic,
+                               write_dynamic_skip)
+        prev = preserve_dynamic(pack)
         blocked = stage_result("dynamic", False, error=gate.get("error"),
                               elapsed_s=round(time.time() - t0, 1),
                               gate_pass=False, gate=gate.get("gate"),
-                              summary="blocked by snapshot gate")
+                              summary="blocked by snapshot gate"
+                                      + (f"; previous pack preserved at "
+                                         f"{prev['preserved_previous']}"
+                                         if prev.get("preserved_previous") else ""),
+                              preserved_previous=prev.get("preserved_previous"),
+                              cleared_previous=False)
         try:
             pack.write("dynamic", "STAGE.json", blocked)
         except Exception:
             pass
         # sibling skip record: a consumer can tell "never asked" from
         # "asked and the gate refused" without parsing the stage wrapper
-        from .evidence import dynamic_skip_record, write_dynamic_skip
         write_dynamic_skip(pack, dynamic_skip_record(
             reason="snapshot_gate_blocked", ok=False,
             error=gate.get("error"),
-            summary="blocked by snapshot gate (no detonation ran)",
-            extra={"gate_mode": gate.get("gate", {}).get("mode")}))
+            summary="blocked by snapshot gate (no detonation ran in this run)",
+            preserved_previous=prev.get("preserved_previous"),
+            preserved_artifacts=prev.get("preserved_artifacts") or None,
+            extra={"gate_mode": gate.get("gate", {}).get("mode"),
+                   "preserve_error": prev.get("preserve_error")}))
         return blocked
     py = _remote_py(cfg)
     remote_sample = rf"C:\samples\{sample_name}"
@@ -1115,6 +1115,7 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
     # message, and record the plan so audit.json states how many executions
     # the run intended.
     from . import snapshot_gate as _gate
+    _gate.reset_session()      # debug-session scope is per run, not per process
     plan = _gate.execution_plan(dynamic=enable_dynamic, debug=enable_agentic_dbg)
     write_execution_plan(pack, plan)
     results: dict = {"execution_plan": plan}
@@ -1122,9 +1123,32 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
         print(f"[winre-remote] ABORT: {plan.get('error')}", flush=True)
         results["aborted"] = True
         results["error"] = plan.get("error")
+        # An audit must ALWAYS reflect the latest attempt: without this the
+        # previous run's `truly_green: true` survived a refused run and the UI
+        # showed a green section whose newest run never executed anything
+        # (code audit 2026-09-28, HIGH).
+        _aborted_audit = {
+            "truly_green": False, "all_green": False, "quality_green": False,
+            "aborted": True, "aborted_reason": plan.get("error"),
+            "execution_plan": plan,
+            "unmet_expectations": ["run aborted before any stage: execution "
+                                   "plan exceeds the snapshot-gate budget"],
+            "checks": [], "fallback_stages": [], "failed_tools": [],
+            "dynamic_conflict": False, "dynamic_blocked": False,
+            "static_yara_wins": True, "static_verdict": None,
+            "deep_verdict": None, "deep_verdict_source": None,
+            "llm_roles": None, "dynamic_verdict": None,
+            "snapshot_gate": {"mode": _gate.mode(), "ok": False,
+                              "detail": {"aborted": True}},
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        results["audit"] = _aborted_audit
+        (pack.root / "audit.json").write_text(
+            json.dumps(_aborted_audit, indent=2) + "\n", encoding="utf-8")
         (pack.root / "META.json").write_text(json.dumps({
             "sha256": sha, "mode": mode, "aborted": True,
             "error": plan.get("error"),
+            "truly_green": False,
             "execution_plan": plan,
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }, indent=2) + "\n", encoding="utf-8")
@@ -1174,9 +1198,16 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
     # yara (local, from evidence)
     try:
         rep = yara_gen.generate_rules(pack.root, pack.stages["yara"])
-        pack.write("yara", "META.json", stage_result("yara", True,
-                                                     summary=f"rule={rep.get('rule_id')}"))
-        results["yara"] = {"ok": True, "rule_id": rep.get("rule_id")}
+        # mirror the local path: an evidence-free rule is a fallback, so the
+        # audit can see it (the remote writer previously omitted it entirely,
+        # making `condition: false` rules invisible - code audit 2026-09-28)
+        pack.write("yara", "META.json", stage_result(
+            "yara", True, summary=f"rule={rep.get('rule_id')}",
+            rule_id=rep.get("rule_id"),
+            fallback=bool(rep.get("empty_rule")),
+            error="empty rule (no evidence)" if rep.get("empty_rule") else None))
+        results["yara"] = {"ok": True, "rule_id": rep.get("rule_id"),
+                           "empty_rule": rep.get("empty_rule")}
     except Exception as e:
         results["yara"] = {"ok": False, "error": str(e)}
 

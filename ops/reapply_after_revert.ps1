@@ -61,8 +61,28 @@ $t = "$flareUser@$flareHost"
 $sshOpts = @("-i", $flareKey, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15")
 
 function Invoke-VM([string]$script, [int]$timeoutSec = 300) {
+    # $timeoutSec used to be accepted and IGNORED: callers passed 60/600/1800
+    # believing each step was bounded, while a hung remote command blocked
+    # the chain forever with no output (code audit 2026-09-28). Bound it on
+    # the VM side with a job, and keep ssh alive so a dead link also fails.
     $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
-    return ssh @sshOpts $t "powershell -NoProfile -EncodedCommand $enc" 2>&1 | Out-String
+    $bounded = @"
+`$j = Start-Job -ScriptBlock { param(`$enc2)
+    powershell -NoProfile -EncodedCommand `$enc2 | Out-String
+} -ArgumentList "$enc"
+if (Wait-Job `$j -Timeout $timeoutSec) { Receive-Job `$j }
+else {
+    "TIMEOUT after $timeoutSec s - the remote step is hung"
+    Stop-Job `$j -EA SilentlyContinue
+}
+Remove-Job `$j -Force -EA SilentlyContinue
+"@
+    $benc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bounded))
+    $out = ssh @sshOpts $t "powershell -NoProfile -EncodedCommand $benc" 2>&1 | Out-String
+    if ($out -match "TIMEOUT after") {
+        Write-Host "  [TIMEOUT] a re-apply step exceeded ${timeoutSec}s and was killed" -ForegroundColor Red
+    }
+    return $out
 }
 
 function Get-File([string]$local, [string]$remoteDir) {
@@ -142,8 +162,13 @@ foreach ($r in @("yara-rules", "capa-rules")) {
 
 # --- 5. setup on the VM -------------------------------------------------------
 Write-Host "`n--- 5. setup-flarevm.ps1 (VM) ---"
-$out = Invoke-VM "Set-Location C:\WinRE; & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\setup-flarevm.ps1 2>&1 | Select-Object -Last 40" 1800
+$setupCmd = "Set-Location C:\WinRE; & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\setup-flarevm.ps1 2>&1 | Select-Object -Last 40"
+$out = Invoke-VM $setupCmd 1800
 Write-Host $out
+# capture the remote exit code: without this a setup that failed 20 ways
+# still let the chain print "Re-apply done" and exit 0 (code audit
+# 2026-09-28, CRITICAL - an unusable deployment read as a success)
+$setupRc = (Invoke-VM "Set-Location C:\WinRE; & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\setup-flarevm.ps1 *> `$null; exit `$LASTEXITCODE" 1800).Trim()
 
 # --- 5b. MCP autostart (boot task + logon launcher) --------------------------
 # The chain's own header promises autostart repair, but nothing used to call
@@ -162,8 +187,19 @@ if ((Invoke-VM "Test-Path '$autostart'" 60).Trim() -eq "True") {
 
 # --- 6. verify ----------------------------------------------------------------
 Write-Host "`n--- 6. verify-flarevm.ps1 (VM) ---"
-$verify = Invoke-VM "Set-Location C:\WinRE; & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\verify-flarevm.ps1 2>&1" 600
+$verifyCmd = "Set-Location C:\WinRE; & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\verify-flarevm.ps1 2>&1"
+$verify = Invoke-VM $verifyCmd 600
 Write-Host $verify
+$verifyRc = (Invoke-VM "Set-Location C:\WinRE; & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\verify-flarevm.ps1 *> `$null; exit `$LASTEXITCODE" 900).Trim()
+if ($verifyRc -ne "0") {
+    Write-Host "`n=== verify-flarevm.ps1 FAILED (rc=$verifyRc) - the deployment is NOT ready ===" -ForegroundColor Red
+    Write-Host "    Fix every FAIL above and re-run this script (it is idempotent), or run:" -ForegroundColor Red
+    Write-Host "      ssh $User@$FlareHost powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\verify-flarevm.ps1" -ForegroundColor Red
+    exit 1
+}
+if ($setupRc -ne "0") {
+    Write-Host "`n=== setup-flarevm.ps1 reported rc=$setupRc (verify passed, so the box is usable; re-run setup to clear it) ===" -ForegroundColor Yellow
+}
 
 # --- 7. explicit checks + post-steps ------------------------------------------
 Write-Host "`n--- 7. critical checks ---"
@@ -172,7 +208,12 @@ $envPresent = Test-Path 'C:\WinRE\.env'
 $marker = Test-Path 'C:\WinRE\.clean_snapshot'
 $freeLic = @(Get-ChildItem (Join-Path $env:APPDATA 'Hex-Rays\IDA Pro') -Filter 'idafree*.hexlic' -ErrorAction SilentlyContinue).Count
 $proLic = @(Get-ChildItem 'C:\Program Files\IDA Professional 9.3' -Filter 'idapro*.hexlic' -ErrorAction SilentlyContinue).Count
+# the RESOLVED interpreter, not a hardcoded path: reapply_after_revert.ps1
+# printing an empty "setuptools:" field is how the hardcode hid a failure
 $setuptools = & 'C:\Python313\python.exe' -c 'import setuptools; print(setuptools.__version__)' 2>$null
+if (-not $setuptools) {
+    $setuptools = & py -3.13 -c 'import setuptools; print(setuptools.__version__)' 2>$null
+}
 "VM .env present: $envPresent  (must be False)"
 "clean marker:    $marker"
 "IDA pro/free:    $proLic/$freeLic  (free must be 0 after setup auto-fix)"

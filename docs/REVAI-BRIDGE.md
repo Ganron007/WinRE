@@ -260,8 +260,8 @@ Three WinRE outputs are part of the contract:
 - **Case pack (DFIR-Nexus ingest):** `case-<sha16>-<mode>.7z` at the **pack
   root** (`logs/<sha>/<mode>/`), *not* inside a stage directory — it is a
   derived bundle, not a stage artifact, so do not read it as one. It contains
-  the dynamic logs plus static context, unpack dumps, `manifest.json` and
-  `timeline.json` (`.zip` fallback when 7-Zip is absent). The authoritative
+  the dynamic logs plus static context, unpack dumps, `case_manifest.json` and
+  `case_timeline.json` (`.zip` fallback when 7-Zip is absent). The authoritative
   per-stage files remain the ones in `intake/`, `quick/`, `deep/`, `dynamic/`,
   `yara/`, `report/`.
 

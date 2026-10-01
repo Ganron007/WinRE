@@ -128,18 +128,29 @@ def test_model_for_role(monkeypatch):
 # --- one resolver, two call sites -------------------------------------------
 
 def test_only_the_resolver_reads_role_variables():
-    """No module may read a role variable directly — that is how routing
-    drifts. llm_client.ROLE_VARS is the single mapping."""
+    """No module may read a role variable directly - that is how routing
+    drifts. llm_client.ROLE_VARS is the single mapping.
+
+    Covers ALL THREE variables including WINRE_LLM_MODEL: the console used
+    to read the default variable itself and rendered a row that contradicted
+    the routing table twenty lines below it, and this guard never saw it
+    because it only knew the two pins (code audit 2026-09-28).
+    """
+    import os as _os
     offenders: list[str] = []
-    for p in sorted(REPO.glob("winre/**/*.py")):
+    for p in sorted(REPO.glob("winre/**/*.py")) + sorted(REPO.glob("tools/*.py")):
         if p.name == "llm_client.py":
             continue
         src = p.read_text(encoding="utf-8")
-        for var in ROLE_VARS:
-            # a bare os.environ.get("<VAR>") read outside the resolver
+        for var in (*ROLE_VARS, "WINRE_LLM_MODEL"):
+            # every spelling that bypasses roles(): os.environ.get,
+            # os.getenv, os.environ[...] and a bare _os.environ access
             for needle in (f'os.environ.get("{var}"',
                            f"os.environ.get('{var}'",
-                           f'os.environ["{var}"]'):
+                           f'os.environ["{var}"]',
+                           f"getenv(\"{var}\"",
+                           f"_os.environ.get(\"{var}\"",
+                           f"_os.environ.get('{var}'"):
                 if needle in src:
                     offenders.append(f"{p.relative_to(REPO).as_posix()}: {var}")
     assert not offenders, f"role variables read outside the resolver: {offenders}"
@@ -158,11 +169,21 @@ def test_agent_builds_one_client_per_role():
 
 
 def test_dry_and_fallback_paths_still_record_roles(monkeypatch):
-    """Even a dry or keyless run records what WOULD have been used."""
+    """Even a dry or keyless run records what WOULD have been used.
+
+    Was `assert src.count(...) >= 5`, which passes at exactly 5: adding a
+    sixth return path without llm_roles still went green (code audit
+    2026-09-28). Every `return {` in the function must carry the routing.
+    """
+    import re as _re
     from winre import agentic
     src = inspect.getsource(agentic.run_langgraph_deep_dive)
-    assert src.count('"llm_roles": _llm_roles()') >= 5
-    assert src.count('return {"verdict"') >= 5
+    returns = _re.findall(r'return \{\s*"verdict"', src)
+    assert returns, "no verdict return paths found - the probe is stale"
+    for m in _re.finditer(r'return \{(?:[^{}]|\{[^{}]*\})*\}', src):
+        assert '"llm_roles"' in m.group(0), (
+            "a verdict return path does not record the resolved routing: "
+            + m.group(0)[:120])
 
 
 # --- per-run verifiability --------------------------------------------------

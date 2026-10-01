@@ -215,6 +215,40 @@ def write_dynamic_skip(pack: "EvidencePack", payload: dict) -> Path | None:
         return None
 
 
+def preserve_dynamic(pack: "EvidencePack", *, stamp: str | None = None) -> dict:
+    """MOVE an existing dynamic pack aside; never delete it. Append-only.
+
+    Used by every path that leaves `dynamic/` without a detonation of its own
+    (static-only run, gate refusal). The old gate-refusal path deleted the
+    pack and then wrote a record claiming "moved, never deleted" - a directly
+    self-contradicting artifact (code audit 2026-09-28, HIGH).
+    """
+    out: dict = {"preserved_previous": None, "preserved_artifacts": 0,
+                 "cleared_previous": False}
+    try:
+        import shutil
+        d = pack.stages.get("dynamic")
+        if not (d and d.exists()):
+            return out
+        payload = [ch for ch in d.iterdir() if ch.name not in _DYNAMIC_WRAPPERS]
+        if not payload:
+            return out
+        stamp = stamp or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        dest = pack.root / "previous_runs" / f"dynamic_{stamp}"
+        n = 1
+        while dest.exists():          # never collide: a same-second move would
+            n += 1                     # NEST into the existing dir and the
+            dest = pack.root / "previous_runs" / f"dynamic_{stamp}-{n}"  # pointer
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(d), str(dest))
+        d.mkdir(parents=True, exist_ok=True)
+        out["preserved_previous"] = f"previous_runs/{dest.name}"
+        out["preserved_artifacts"] = len(payload)
+    except Exception as e:            # noqa: BLE001
+        out["preserve_error"] = str(e)[:150]
+    return out
+
+
 def mark_dynamic_not_requested(pack: "EvidencePack") -> dict:
     """Fresh dynamic/STAGE.json + SKIP.json for a run that never detonated.
 

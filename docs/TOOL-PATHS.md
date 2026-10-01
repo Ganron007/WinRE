@@ -9,7 +9,7 @@ evidence). If you installed something somewhere else, set the env override
 listed here — **no code changes needed**.
 
 Legend: `[base]` = FlareVM installer ships it · `[setup]` = WinRE
-`setup-flarevm.ps1` installs/verifies it · `[user]` = you install it ·
+`setup-flarevm.ps1` installs/verifies it · `[ours]` = we install/verify it (missing = FAIL in verify) · `[user]` = you install + activate it (absent = WARN, the SQL/MCP WIRING around it is still ours) ·
 `[stage]` = `ops/provision_tools.ps1` can download it on the host and scp to
 the air-gapped VM.
 
@@ -18,13 +18,17 @@ the air-gapped VM.
 - **`[user]` = the licensed binaries only: IDA Pro and Malcat.** The operator
   installs and activates them. If they are absent that is an operator state,
   reported by name — never our failure, and never a silent skip.
-- **Everything else is ours**: either the FlareVM base ships it or
+- **`[ours]` = everything else**: either the FlareVM base ships it or
   `setup-flarevm.ps1` installs and configures it. **Nothing is skipped.** A
-  missing tool we own is a `FAIL`, not a warning.
+  missing tool we own is a `FAIL`, not a warning. The table above tags every
+  row; the rows that used to say `[user]` for a tool the census requires (Ghidra,
+  goresym, ILSpy CLI) were corrected on 2026-09-28 after the code audit found
+  the doc contradicting the census.
 - **The SQL and MCP wiring around the user's binaries is ours too.** If IDA Pro
   is installed, `idasql.exe` must be discoverable and the live SQL gate must
-  pass. If Malcat is installed, its MCP must answer on `:9009`. A licensed tool
-  that is present but not wired is our bug, not a skip.
+  pass. If Malcat is installed, its MCP must answer an `initialize` request on
+  `:9009` — a listening socket is not enough. A licensed tool that is present
+  but not wired is our bug, not a skip.
 
 `install/verify-flarevm.ps1` enforces this with a **required tool census**: it
 probes every tool above plus the python module set, and ends with one line
@@ -41,7 +45,7 @@ names who provides it.
 
 | Tool | Expected default | Env override | Needed for | Missing → |
 |---|---|---|---|---|
-| Ghidra 11/12.x + CADRE loader `[user]` | `C:\ProgramData\chocolatey\lib\ghidra\tools\ghidra_*_PUBLIC` (also `C:\Tools\ghidra_*_PUBLIC`; glob auto-detect) | `GHIDRA_INSTALL_DIR` (pyghidra fast-path) | ghidra_query, ghidra_decompile, signature SQL | deep skips ghidra tools → static weakens, honest skip |
+| Ghidra 11/12.x + CADRE loader `[ours]` | `C:\ProgramData\chocolatey\lib\ghidra\tools\ghidra_*_PUBLIC` (also `C:\Tools\ghidra_*_PUBLIC`; glob auto-detect) | `GHIDRA_INSTALL_DIR` (pyghidra fast-path) | ghidra_query, ghidra_decompile, signature SQL | deep skips ghidra tools → static weakens, honest skip |
 | capa + mandiant rules `[base]` | `C:\Tools\capa\capa.exe` + `C:\Tools\capa-rules` | — | capability clusters (verdict driver) | capa evidence absent (pip fallback auto-tried) |
 | floss [base]/[setup] | 
 lare-floss pip module (installed offline from staged wheels) or C:\\Tools\\FLOSS\\floss.exe | - | decoded/stack strings | floss evidence absent |
@@ -52,8 +56,8 @@ lare-floss pip module (installed offline from staged wheels) or C:\\Tools\\FLOSS
 | radare2 `[base]` | `C:\Tools\radare2\radare2.exe` | — | r2_decompile, sink_sites | those tools skip |
 | scdbg `[base]` | `C:\Tools\scdbg\scdbg.exe` | — | shellcode extraction emulation | shellcode_extract degrades |
 | UPX `[base]` | `C:\Tools\upx\upx-*\upx.exe` (versioned dir glob) | — | `upx_unpack` (static), UPX-packed test fixtures | upx_unpack skips honestly |
-| goresym `[user]`/`[stage]` | `C:\Tools\GoReSym\GoReSym.exe` | — | Go binaries only | goresym tool skips (Go detection gates it) |
-| ILSpy CLI `[user]`/`[base]` | `ilspycmd` on PATH (`C:\ProgramData\chocolatey\bin\ilspycmd.exe`, FlareVM) or `%USERPROFILE%\.dotnet\tools\ilspycmd.exe` or `C:\Tools\ilspycmd` | `WINRE_ILSPY` | .NET decompile | dotnet_analyze degrades to metadata-only |
+| goresym `[ours]`/`[stage]` | `C:\Tools\GoReSym\GoReSym.exe` | — | Go binaries only | goresym tool skips (Go detection gates it) |
+| ILSpy CLI `[ours]`/`[base]` | `ilspycmd` on PATH (`C:\ProgramData\chocolatey\bin\ilspycmd.exe`, FlareVM) or `%USERPROFILE%\.dotnet\tools\ilspycmd.exe` or `C:\Tools\ilspycmd` | `WINRE_ILSPY` | .NET decompile | dotnet_analyze degrades to metadata-only |
 | IDA Pro/Free + idasql `[user]` | `C:\Program Files\IDA Professional 9.3` (also probed: IDA Free 9.3/8.3, `C:\Tools\IDA*`) | **`WINRE_IDA_DIR`** (dir with `idat.exe`); **`IDASQL`** / `WINRE_IDASQL` (idasql.exe full path) | ida_query, .i64 creation | License states: **pro** (idapro*.hexlic in install dir, no AppData free license → fully supported) · **shadowed** (Pro present but a stale FREE license in the user profile wins license resolution → move the stale file aside, backup kept) · **free** (no Pro anywhere → instant honest skip + actionable message, GUI-only) · **missing** (setup verify fails open, Ghidra canonical) |
 | Malcat (portable) `[user]` | `C:\Tools\malcat\bin` (also probed: `C:\Program Files\Malcat\bin`, `%USERPROFILE%\Downloads\malcat\bin`) — must contain `bin\malcat.mcp.py` | `MALCAT_BIN_DIR` (`MALCAT_LICENSE` optional - offline headless analysis needs no license file; `MALCAT_KEY`/`-k` enables ONLINE Kesakode only) | quick triage views, agent malcat tools, unpack compare | all malcat evidence skips honestly; Ghidra + x64dbg carry the analysis. Kesakode: offline headless is OEM-gated (FULL here); online (-k) removed by policy - the capability probe is `tools/malcat_kesakode.py` (`kesakode_offline` evidence); threat intel comes from signer/markers + control-plane VT hash lookup |
 

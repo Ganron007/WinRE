@@ -109,18 +109,34 @@ Write-Host "[winre-mcp] starting WinRE MCP servers (boot-safe)..." -ForegroundCo
 # Canonical portable location: C:\Tools\malcat (folder name 'malcat').
 $malcatBin = "C:\Tools\malcat\bin\malcat.mcp.py"
 if (-not (Test-Path $malcatBin)) { $malcatBin = "C:\Program Files\Malcat\bin\malcat.mcp.py" }
-if (-not (Test-Path $malcatBin)) { $malcatBin = "C:\Users\flare-vm\Downloads\malcat\bin\malcat.mcp.py" }
+# the RUNNING user, not a hardcoded lab account: with the wrong user this
+# path never exists, Malcat MCP silently fails to start at boot, and the
+# script still ended with "done" and exit 0 (code audit 2026-09-28)
+if (-not (Test-Path $malcatBin)) {
+    $malcatBin = Join-Path $env:USERPROFILE "Downloads\malcat\bin\malcat.mcp.py"
+}
+# and the interpreter must be RESOLVED, not assumed: a hardcoded
+# C:\Python313 turned into a silent no-start on a box where Python lives
+# elsewhere (verify-flarevm.ps1 already resolves it; do the same here)
+if (-not $pyExe) {
+    $pyExe = "C:\Python313\python.exe"
+    if (-not (Test-Path $pyExe)) {
+        $r = (& py -3.13 -c "import sys; print(sys.executable)" 2>$null)
+        if ($r -and (Test-Path $r.Trim())) { $pyExe = $r.Trim() }
+    }
+}
+if (-not (Test-Path $pyExe)) { Write-Error "[start_servers] no python interpreter found - MCP servers cannot start"; exit 1 }
 if (Test-Path $malcatBin) {
     # Offline-only policy: never pass -k (online Kesakode). The VM holds no
     # secrets - no C:\WinRE\.env, no MALCAT_KEY.
     $argsList = @($malcatBin, "-p", "$MalcatPort")
-    Start-Hidden "C:\Python313\python.exe" $argsList "malcat" $MalcatPort
+    Start-Hidden $pyExe $argsList "malcat" $MalcatPort
 } else {
     Write-Host "[winre-mcp] WARN: malcat.mcp.py not found — skipping Malcat MCP" -ForegroundColor Yellow
 }
 
 # --- WinDbg MCP (mcp_windbg, 10 tools, dump/kernel/remote) ---
-Start-Hidden "C:\Python313\python.exe" @("-u", "-m", "mcp_windbg",
+Start-Hidden $pyExe @("-u", "-m", "mcp_windbg",
     "--transport", "streamable-http", "--host", "127.0.0.1", "--port", "$WinDbgPort") `
     "windbg" $WinDbgPort
 

@@ -32,17 +32,32 @@ NO_HELP = {
 
 
 def _entry_points() -> list[str]:
+    """Every module that can be run with -m and takes arguments.
+
+    The predicate used to require `def main(`, which silently excluded every
+    module whose CLI is `def _main(argv)`: snapshot_gate, audit and all three
+    SQL clients. Those are documented CLIs - and verify-flarevm.ps1 invokes the
+    SQL ones - so they had ZERO --help coverage. ops/*.py are documented CLIs
+    too (code audit 2026-09-28).
+    """
+    import re as _re
     mods: list[str] = []
-    for p in sorted(list(REPO.glob("winre/**/*.py")) + list(REPO.glob("tools/*.py"))):
+    paths = (sorted(REPO.glob("winre/**/*.py"))
+             + sorted(REPO.glob("tools/*.py"))
+             + sorted(REPO.glob("ops/*.py")))
+    for p in paths:
         try:
             src = p.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        if "__main__" in src and "def main(" in src:
-            rel = p.relative_to(REPO).as_posix()[:-3].replace("/", ".")
-            if rel.endswith(".__init__"):
-                rel = rel[:-9]
-            mods.append(rel)
+        if "__main__" not in src:
+            continue
+        if not _re.search(r"def (?:main|_main|_cli|cli_main)\s*\(", src):
+            continue
+        rel = p.relative_to(REPO).as_posix()[:-3].replace("/", ".")
+        if rel.endswith(".__init__"):
+            rel = rel[:-9]
+        mods.append(rel)
     return mods
 
 
@@ -50,7 +65,8 @@ EPS = _entry_points()
 
 
 def test_entry_points_were_discovered():
-    assert len(EPS) >= 20, f"entry-point discovery looks broken: {EPS}"
+    assert len(EPS) >= 26, (
+        f"only {len(EPS)} entry points discovered")
 
 
 def _env() -> dict:

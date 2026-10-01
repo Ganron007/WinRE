@@ -296,6 +296,17 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
     # stale META from a previous run can never pass as this run's pack
     from .run_nonce import check as nonce_check, new_run_id
     run_id = new_run_id()
+    # Drop the previous run's META.json BEFORE launching: audit falls back to
+    # META.json when STAGE.json is missing, so a stale ok:true + frida_events
+    # would make a run that never detonated look like it did (code audit
+    # 2026-09-28). The remote driver already did this; the local one did not.
+    for _stale in (pack.stages["dynamic"] / "META.json",
+                   pack.stages["dynamic"] / "STAGE.json"):
+        try:
+            if _stale.exists():
+                _stale.unlink()
+        except OSError:
+            pass
     cmd = [sys.executable, str(orch), sha, "--mode", "local",
            "--max-seconds", str(max_seconds), "--run-id", run_id]
     if enable_pesieve:
@@ -326,15 +337,22 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
                               gate_pass=meta.get("gate_marker_consumed"),
                               run_id=run_id, nonce=nonce)
     pack.write("dynamic", "STAGE.json", stage_meta)
-    # sibling skip record when the VM refused the execution (the local driver
-    # has no control-plane preflight: the gate acts inside the orchestrator)
+    # The VM refused the execution (the local driver has no control-plane
+    # preflight: the gate acts inside the orchestrator). Preserve any previous
+    # pack rather than leaving stale artifacts beside a record that says there
+    # are none (code audit 2026-09-28, HIGH).
     if not ok and "snapshot gate" in str(meta.get("error") or ""):
-        from .evidence import dynamic_skip_record, write_dynamic_skip
+        from .evidence import (dynamic_skip_record, preserve_dynamic,
+                               write_dynamic_skip)
+        prev = preserve_dynamic(pack)
         write_dynamic_skip(pack, dynamic_skip_record(
             reason="snapshot_gate_blocked", ok=False,
             error=meta.get("error"),
-            summary="blocked by snapshot gate (no detonation ran)",
-            extra={"gate_mode": meta.get("gate_mode")}))
+            summary="blocked by snapshot gate (no detonation ran in this run)",
+            preserved_previous=prev.get("preserved_previous"),
+            preserved_artifacts=prev.get("preserved_artifacts") or None,
+            extra={"gate_mode": meta.get("gate_mode"),
+                   "preserve_error": prev.get("preserve_error")}))
     return stage_meta
 
 
@@ -609,14 +627,43 @@ def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = 
     # with one clear message, and the plan is recorded for audit.json
     # (RevAI handoff 2026-09-27 item 1).
     from . import snapshot_gate as _gate
+    # Debug-session scope is per RUN, never per process: a long-lived host
+    # (the console) that debugged this sha earlier must not be allowed to
+    # execute again off a freshly restored, armed snapshot.
+    _gate.reset_session()
     plan = _gate.execution_plan(dynamic=enable_dynamic, debug=enable_agentic_dbg)
     write_execution_plan(pack, plan)
     results["execution_plan"] = plan
     if not plan.get("ok"):
         print(f"[winre-pipeline] ABORT: {plan.get('error')}", flush=True)
+        results["aborted"] = True
+        results["error"] = plan.get("error")
+        # An audit must ALWAYS reflect the latest attempt. Without this the
+        # previous run's truly_green:true survived a refused run, so the UI
+        # and AUDIT-REPORT.md showed a green section whose newest run never
+        # executed anything (code audit 2026-09-28, HIGH).
+        _aborted_audit = {
+            "truly_green": False, "all_green": False, "quality_green": False,
+            "aborted": True, "aborted_reason": plan.get("error"),
+            "execution_plan": plan,
+            "unmet_expectations": ["run aborted before any stage: execution "
+                                   "plan exceeds the snapshot-gate budget"],
+            "checks": [], "fallback_stages": [], "failed_tools": [],
+            "dynamic_conflict": False, "dynamic_blocked": False,
+            "static_yara_wins": True, "static_verdict": None,
+            "deep_verdict": None, "deep_verdict_source": None,
+            "llm_roles": None, "dynamic_verdict": None,
+            "snapshot_gate": {"mode": _gate.mode(), "ok": False,
+                              "detail": {"aborted": True}},
+            "generated_at": utcnow(),
+        }
+        results["audit"] = _aborted_audit
+        (pack.root / "audit.json").write_text(
+            json.dumps(_aborted_audit, indent=2) + "\n", encoding="utf-8")
         (pack.root / "META.json").write_text(json.dumps({
             "sha256": sha, "mode": mode, "aborted": True,
-            "error": plan.get("error"), "execution_plan": plan,
+            "error": plan.get("error"), "truly_green": False,
+            "execution_plan": plan,
             "generated_at": utcnow(),
         }, indent=2) + "\n", encoding="utf-8")
         return {"sha": sha, "results": results, "aborted": True}

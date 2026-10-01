@@ -687,16 +687,26 @@ if ($CheckMode) {
     } catch {
         Warn ("w32time config failed: {0}" -f $_.Exception.Message)
     }
-    # record Get-Date -Format o + w32tm /query /status for the control plane
+    # record Get-Date -Format o + w32tm /query /status for the control plane.
+    # Resolve the service ONCE and stay null-safe: the old inline
+    # (Get-Service ...).StartType.ToString() threw "cannot call a method on a
+    # null-valued expression" when w32time was absent, which aborted setup
+    # AFTER the marker was already written - a half-deployed box that still
+    # looked armed (found by the code audit 2026-09-28).
     $status = (& w32tm.exe /query /status 2>&1 | Out-String).Trim()
+    $w32svc = Get-Service -Name w32time -ErrorAction SilentlyContinue
+    $w32start = if ($w32svc) { $w32svc.StartType.ToString() } else { "absent" }
     $state = [ordered]@{
         vm_time        = (Get-Date -Format o)
         vm_time_utc    = (Get-Date).ToUniversalTime().ToString("o")
         timezone       = (Get-TimeZone).Id
-        w32time_start  = (Get-Service -Name w32time -EA SilentlyContinue).StartType.ToString()
+        w32time_start  = $w32start
         w32time_status = $status
         collected_at   = (Get-Date -Format o)
         collected_by   = "install/setup-flarevm.ps1"
+    }
+    if (-not $w32svc) {
+        Warn "w32time service not found on this image - clock state recorded as 'absent'; enable it for trustworthy timestamps"
     }
     New-Item -ItemType Directory -Force -Path (Split-Path $clockFile) | Out-Null
     Set-Content -LiteralPath $clockFile -Encoding UTF8 `

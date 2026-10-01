@@ -63,13 +63,22 @@ if (-not (Test-Path $py)) {
 if (Test-Path $py) {
     $v = & $py --version 2>&1
     Ok "python -> $py ($v)"
+    # angr is deliberately NOT here: setup-flarevm.ps1 lists it in
+    # $optionalMods (no offline wheel exists for it, so it cannot be
+    # installed on the air-gapped asset set). It used to be checked here,
+    # which made "0 FAIL" unreachable for a VM setup had legitimately
+    # completed (code audit 2026-09-28). setup and verify must agree -
+    # tests/test_tool_census.py asserts that they do.
     foreach ($mod in @("frida", "flask", "pefile", "psutil", "oletools",
-                       "pypdf", "dnfile", "z3", "angr", "speakeasy", "mcp_windbg")) {
+                       "pypdf", "dnfile", "z3", "speakeasy", "mcp_windbg")) {
         # version probe must tolerate modules without __version__
         $mv = & $py -c "import importlib; m = importlib.import_module('$mod'); print(getattr(m, '__version__', 'import-ok'))" 2>$null
         if ($LASTEXITCODE -eq 0 -and $mv) { Ok "python module $mod == $mv" }
         else { Fail "python module $mod not importable (pip install $mod)" }
     }
+    $angrVer = & $py -c "import angr, importlib.metadata as md; print(md.version('angr'))" 2>$null
+    if ($LASTEXITCODE -eq 0 -and $angrVer) { Ok "python module angr == $($angrVer.Trim())" }
+    else { Info "python module angr NOT installed - OPTIONAL by design (setup lists it in optionalMods: no offline wheel exists for the air-gapped asset set and the deep stage never imports it)" }
 } else {
     Fail "python missing at $py (install Python 3.13 - see docs/PREREQUISITES.md)"
 }
@@ -144,7 +153,7 @@ if ($ghidra) {
             $probe = if (Test-Path $probe) { $probe } else { $null }
         }
         if ($probe -and (Test-Path "C:\WinRE\tools\flare_ghidra_sql.py")) {
-            $out = & C:\Python313\python.exe "C:\WinRE\tools\flare_ghidra_sql.py" query `
+            $out = & $py "C:\WinRE\tools\flare_ghidra_sql.py" query `
                 "SELECT name, size FROM funcs WHERE size > 150 ORDER BY size DESC LIMIT 3" `
                 --file $probe 2>&1 | Out-String
             try { $j = $out | ConvertFrom-Json } catch { $j = $null }
@@ -187,7 +196,7 @@ if ($malcatBin) {
     # Functional license check: activation state lives inside Malcat (GUI
     # activation), NOT in a license.dat file. Query the python API.
     $malcatPy = Join-Path $malcatBin "python313\python.exe"
-    if (-not (Test-Path $malcatPy)) { $malcatPy = "C:\Python313\python.exe" }
+    if (-not (Test-Path $malcatPy)) { $malcatPy = $py }
     $licOut = & $malcatPy -c "import sys; sys.path.insert(0, r'$malcatBin'); import malcat; print(malcat.env.flavor)" 2>$null
     if ($licOut -match "FULL|OEM|PRO") { Ok "Malcat license ACTIVE ($($licOut.Trim()))" }
     elseif ($licOut) { Warn "Malcat flavor: $($licOut.Trim()) (unlicensed/limited - headless analysis degraded)" }
@@ -200,10 +209,22 @@ if ($malcatBin) {
 
 Write-Host ""
 Write-Host "--- IDA ---"
-$idaDir = if ($env:WINRE_IDA_DIR) { $env:WINRE_IDA_DIR } else { "C:\Program Files\IDA Professional 9.3" }
-if (Test-Path (Join-Path $idaDir "ida.exe")) { Ok "IDA Professional -> $idaDir" }
-elseif (Test-Path (Join-Path $idaDir "idat.exe")) { Ok "IDA Professional (idat) -> $idaDir" }
-else { Warn "IDA not found at $idaDir (optional: deep stage degrades to Ghidra+Malcat)" }
+# Discovery MUST match setup-flarevm.ps1: when it does not, an operator who
+# installed IDA Free (or pointed WINRE_IDA_DIR somewhere else) is told IDA
+# is missing, the census calls it "operator-installed absent", and the SQL
+# wiring gates that are OURS get skipped (code audit 2026-09-28).
+$idaCands = @()
+if ($env:WINRE_IDA_DIR) { $idaCands += $env:WINRE_IDA_DIR }
+$idaCands += @("C:\Program Files\IDA Professional 9.3",
+               "C:\Program Files\IDA Professional 9.2",
+               "C:\Program Files\IDA Free 9.3",
+               "C:\Program Files\IDA Professional 8.3",
+               "C:\Tools\IDA Pro 9.3", "C:\Tools\IDA Free 9.3")
+$idaDir = $idaCands | Where-Object {
+    (Test-Path (Join-Path $_ "ida.exe")) -or (Test-Path (Join-Path $_ "idat.exe"))
+} | Select-Object -First 1
+if ($idaDir) { Ok "IDA -> $idaDir" }
+else { Warn "IDA not found in any of: $($idaCands -join ', ') (operator-installed; deep stage degrades to Ghidra+Malcat)" }
 if (Test-Path (Join-Path $idaDir "idasql.exe")) {
     Ok "idasql.exe present -> $(Join-Path $idaDir 'idasql.exe')"
     $idaProbe = @("C:\samples\calc.exe", "C:\samples\notepad.exe") |
@@ -214,18 +235,25 @@ if (Test-Path (Join-Path $idaDir "idasql.exe")) {
         Copy-Item "$env:windir\system32\notepad.exe" "C:\samples\_sqlprobe_ida.exe" -Force -EA SilentlyContinue
         if (Test-Path "C:\samples\_sqlprobe_ida.exe") { $idaProbe = "C:\samples\_sqlprobe_ida.exe" }
     }
-    if ($idaProbe -and (Test-Path "C:\WinRE\tools\ida_sql_client.py")) {
-        $out = & C:\Python313\python.exe "C:\WinRE\tools\ida_sql_client.py" query `
+    if (-not (Test-Path "C:\WinRE\tools\ida_sql_client.py")) {
+        # OUR client, OUR wiring: a missing one is a broken deployment, not a
+        # reason to skip the gate quietly - it used to, with no message at all
+        Fail "IDA SQL client missing (C:\WinRE\tools\ida_sql_client.py) - re-run ops\sync_to_flare.ps1"
+    } elseif (-not $idaProbe) {
+        Fail "no benign probe sample for the IDA SQL live gate - stage one read-only in C:\samples"
+    } else {
+        $out = & $py "C:\WinRE\tools\ida_sql_client.py" query `
             "SELECT name, size FROM funcs WHERE size > 150 ORDER BY size DESC LIMIT 3" `
             --file $idaProbe 2>&1 | Out-String
         try { $j = $out | ConvertFrom-Json } catch { $j = $null }
         if ($j -and $j.ok) { Ok "IDA SQL live query OK (rows=$($j.row_count))" }
         else {
             $msg = if ($j) { $j.error } else { ($out.Trim() -split "`n" | Select-Object -Last 1) }
-            Warn "IDA SQL live query failed: $($msg -replace '\s+',' ')"
+            # present-but-unwired is OUR bug, so it is a FAIL, not a warning
+            Fail "IDA SQL live query failed: $($msg -replace '\s+',' ')"
         }
     }
-} else { Warn "idasql.exe missing next to idat.exe (free release: github.com/allthingsida/idasql - provision_tools.ps1 auto-stages)" }
+} else { Warn "idasql.exe not found beside the IDA install (free release: github.com/allthingsida/idasql - provision_tools.ps1 auto-stages; the census makes this REQUIRED whenever IDA is present)" }
 
 Write-Host ""
 Write-Host "--- x64dbg + MCP plugin ---"
@@ -245,9 +273,10 @@ if (Test-Path $plug64) { Ok "MCP plugin dp64 -> $plug64" }
 else { Fail "x64dbg MCP dp64 plugin missing ($plug64) - :9094 cannot bind" }
 if (Test-Path $plug32) { Ok "MCP plugin dp32 -> $plug32" }
 else { Warn "MCP plugin dp32 missing ($plug32) - x32dbg debug loop unavailable" }
-$fw = Get-NetFirewallRule -DisplayName "WinRE x64dbg MCP (lab subnet)" -ErrorAction SilentlyContinue
+$fwName = "WinRE x64dbg MCP (lab subnet)"
+$fw = Get-NetFirewallRule -DisplayName $fwName -ErrorAction SilentlyContinue
 if ($fw) { Ok "firewall: :9094 scoped to LocalSubnet ($($fw.Enabled))" }
-else { Warn "no firewall rule for :9094 - port reachable on all interfaces (setup creates it)" }
+else { Fail "no firewall rule '$fwName' for :9094 - the port is reachable on ALL interfaces (docs/INSTALL.md promises setup creates this)" }
 
 Write-Host ""
 Write-Host "--- Dynamic prerequisites ---"
@@ -286,7 +315,7 @@ $probeSql = @("C:\samples\calc.exe", "C:\samples\notepad.exe") |
     Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $probeSql -and (Test-Path "C:\samples\_sqlprobe.exe")) { $probeSql = "C:\samples\_sqlprobe.exe" }
 if ($r2Hit -and $probeSql -and (Test-Path "C:\WinRE\tools\kb_gap_tools.py")) {
-    $sinkOut = (& C:\Python313\python.exe "C:\WinRE\tools\kb_gap_tools.py" sink_sites $probeSql --json 2>&1 | Out-String)
+    $sinkOut = (& $py "C:\WinRE\tools\kb_gap_tools.py" sink_sites $probeSql --json 2>&1 | Out-String)
     try { $sj = $sinkOut | ConvertFrom-Json } catch { $sj = $null }
     if ($sj -and $sj.ok) { Ok "sink_sites smoke OK (functions_scanned=$($sj.functions_scanned))" }
     else {
@@ -308,11 +337,44 @@ Write-Host ""
 Write-Host "--- MCP plane ---"
 $ports = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
     Where-Object { $_.LocalPort -in 9009, 9094, 9097 }
-foreach ($p in @(@{n = "Malcat"; port = 9009 }, @{n = "x64dbg"; port = 9094 }, @{n = "WinDbg"; port = 9097 })) {
-    $hit = $ports | Where-Object LocalPort -eq $p.port | Select-Object -First 1
-    if ($hit) { Ok "$($p.n) MCP listening :$($p.port) (pid $($hit.OwningProcess))" }
-    else { Warn "$($p.n) MCP NOT listening :$($p.port) (start via C:\WinRE\winre\mcp\start_servers.ps1 or x64dbg on-demand manager)" }
+# A listening socket is not proof of life: an unrelated or unlicensed
+# listener satisfies a port check, and that is exactly how a deployment
+# initialize request and require bytes back (code audit 2026-09-28).
+function Test-McpHandshake([int]$Port, [int]$TimeoutMs = 4000) {
+    try {
+        $cli = New-Object System.Net.Sockets.TcpClient
+        $iar = $cli.BeginConnect("127.0.0.1", $Port, $null, $null)
+        if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutMs)) { $cli.Close(); return $false }
+        $cli.EndConnect($iar)
+        $st = $cli.GetStream()
+        $st.ReadTimeout = $TimeoutMs
+        $req = '{"jsonrpc":"2.0","id":1,"method":"initialize",' +
+               '"params":{"protocolVersion":"2024-11-05","capabilities":{},' +
+               '"clientInfo":{"name":"winre-verify","version":"1.0"}}}' + [char]10
+        $by = [Text.Encoding]::UTF8.GetBytes($req)
+        $st.Write($by, 0, $by.Length)
+        $buf = New-Object byte[] 4096
+        $n = $st.Read($buf, 0, $buf.Length)
+        $cli.Close()
+        return ($n -gt 0)
+    } catch { return $false }
 }
+foreach ($p in @(@{n = "Malcat"; port = 9009; required = [bool]$malcatBin },
+                 @{n = "x64dbg"; port = 9094; required = $false },
+                 @{n = "WinDbg"; port = 9097; required = $true })) {
+    $hit = $ports | Where-Object LocalPort -eq $p.port | Select-Object -First 1
+    if (-not $hit) {
+        if ($p.required) { Fail "$($p.n) MCP NOT listening :$($p.port) - start via install\install_mcp_autostart.ps1" }
+        else { Warn "$($p.n) MCP NOT listening :$($p.port) (on-demand: the x64dbg manager starts it)" }
+        continue
+    }
+    if (Test-McpHandshake $p.port) { Ok "$($p.n) MCP ANSWERING :$($p.port) (pid $($hit.OwningProcess); initialize got a reply)" }
+    elseif ($p.required) { Fail "$($p.n) MCP socket open but DEAD: no reply to an initialize request on :$($p.port)" }
+    else { Warn "$($p.n) MCP socket open but silent on :$($p.port)" }
+}
+$bootTask = Get-ScheduledTask -TaskName "WinRE-MCP-Boot" -ErrorAction SilentlyContinue
+if ($bootTask) { Ok "scheduled task WinRE-MCP-Boot present (state=$($bootTask.State)) - this is what serves :9009/:9097 after a revert" }
+else { Fail "scheduled task WinRE-MCP-Boot absent - after a revert nothing restarts the MCP plane (re-run install\install_mcp_autostart.ps1)" }
 
 Write-Host ""
 Write-Host "--- Autostart / boot persistence ---"
@@ -425,14 +487,16 @@ Test-Required "Procdump"        @("C:\Tools\sysinternals\Procdump64.exe") @() "F
 Test-Required "tshark"          @("C:\Program Files\Wireshark\tshark.exe") @("tshark") "FlareVM base"
 Test-Required "7-Zip"           @("C:\Program Files\7-Zip\7z.exe") @("7z") "FlareVM base"
 Test-Required "cdb/WinDbg"      @("C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe", "C:\Program Files\Windows Kits\10\Debuggers\x64\cdb.exe") @() "FlareVM base / flarevm-postfix"
-Test-Required "Python 3.13"     @("C:\Python313\python.exe") @() "choco python313 (setup)"
+# $py is the RESOLVED interpreter (default path, or the py -3.13 fallback), so
+# this passes on a box where Python does not live at C:\Python313.
+Test-Required "Python 3.13"     @($py) @() "choco python313 (setup)"
 
 # --- python modules (installed offline from staged wheels by setup) ---------
-if (Test-Path "C:\Python313\python.exe") {
+if (Test-Path $py) {
     foreach ($m in @("frida", "flask", "pefile", "psutil", "oletools", "pypdf",
                      "dnfile", "z3", "speakeasy", "mcp_windbg", "floss")) {
         $script:ReqTotal++
-        & C:\Python313\python.exe -c "import $m" 2>$null
+        & $py -c "import $m" 2>$null
         if ($LASTEXITCODE -eq 0) {
             $script:ReqOk++
             Ok "  [census] py:$m"
@@ -444,8 +508,14 @@ if (Test-Path "C:\Python313\python.exe") {
 }
 
 # --- user-installed licensed binaries (operator installs + activates) -------
-$idaBin = Test-Required "IDA Pro (licensed)" @("C:\Program Files\IDA Professional 9.3\idat.exe", "C:\Program Files\IDA Professional 9.2\idat.exe", "C:\Tools\IDA*\idat.exe") @() "operator installs + activates" -Class user
-$malcatBin = Test-Required "Malcat (licensed)" @("C:\Tools\malcat\bin\malcat.mcp.py", "C:\Program Files\Malcat\bin\malcat.mcp.py") @() "operator installs + activates" -Class user
+# same candidate list as the IDA section above and as setup, so an
+# install that verify can see is never reported as absent
+# keep this on ONE line: a PowerShell command cannot span lines without a
+# continuation, and a split call silently loses its arguments
+$idaBin = Test-Required "IDA Pro (licensed)" @("C:\Program Files\IDA Professional 9.3\idat.exe", "C:\Program Files\IDA Professional 9.2\idat.exe", "C:\Program Files\IDA Free 9.3\ida.exe", "C:\Program Files\IDA Professional 8.3\idat.exe", "C:\Tools\IDA Pro 9.3\idat.exe", "C:\Tools\IDA Free 9.3\ida.exe") @() "operator installs + activates" -Class user
+# the Downloads location setup/start_servers also accept: without it a
+# portable install is reported absent and the :9009 wiring gate is skipped
+$malcatBin = Test-Required "Malcat (licensed)" @("C:\Tools\malcat\bin\malcat.mcp.py", "C:\Program Files\Malcat\bin\malcat.mcp.py", "$env:USERPROFILE\Downloads\malcat\bin\malcat.mcp.py") @() "operator installs + activates" -Class user
 
 # --- OUR wiring around the user's binaries: required whenever they exist ---
 $script:ReqTotal++

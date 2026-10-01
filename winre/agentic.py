@@ -1147,7 +1147,16 @@ def _normalize_verdict(verdict: dict) -> dict:
                "malware": "malicious", "mal": "malicious"}
     mapped = mapping.get(raw, raw)
     if mapped not in ("malicious", "unknown", "benign"):
-        mapped = "unknown"
+        # An off-enum label ("totally fine", "benign!!", true) is NOT a verdict.
+        # It used to be silently rewritten to "unknown" and then recorded as a
+        # judged, evidence-free verdict - indistinguishable from a real call
+        # (code audit 2026-09-28, MEDIUM). Mark it invalid so the stage can
+        # treat the verdict as missing.
+        return {"verdict_invalid": True,
+                "verdict_raw": verdict.get("verdict"),
+                "verdict": None, "confidence": verdict.get("confidence"),
+                "key_evidence": verdict.get("key_evidence") or [],
+                "summary": verdict.get("summary")}
     if mapped != raw:
         out = dict(verdict)
         out["verdict_raw"] = verdict.get("verdict")
@@ -1351,7 +1360,7 @@ dynamic tool errors, fall back to static — do not retry more than once.
     if dry:
         # no LLM — deterministic fallback stub (the unpack prepass, if any,
         # still ran and is recorded in the history)
-        return {"verdict": "unknown", "source": "deterministic_fallback",
+        return {"verdict": None, "source": "deterministic_fallback",
                 "history": history, "llm_analysis": None, "dry": True,
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
                 "windbg_dump": windbg_dump, "llm_roles": _llm_roles()}
@@ -1362,7 +1371,7 @@ dynamic tool errors, fall back to static — do not retry more than once.
     if api_url.endswith("/chat/completions"):
         api_url = api_url[: -len("/chat/completions")]
     if not api_key and "127.0.0.1" not in api_url:
-        return {"verdict": "unknown", "source": "deterministic_fallback",
+        return {"verdict": None, "source": "deterministic_fallback",
                 "history": history,
                 "llm_analysis": "WINRE_LLM_API_KEY not set for remote endpoint",
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
@@ -1492,7 +1501,7 @@ to your final answer immediately.
             config={"recursion_limit": recursion_limit},
         )
     except Exception as e:
-        return {"verdict": "unknown", "source": "deterministic_fallback",
+        return {"verdict": None, "source": "deterministic_fallback",
                 "history": history, "llm_analysis": f"agent error: {e}",
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
                 "windbg_dump": windbg_dump, "llm_roles": _llm_roles()}
@@ -1518,6 +1527,12 @@ to your final answer immediately.
             tool_dump = content.strip()[:120_000]
         if not llm_text and mtype not in ("human", "tool"):
             llm_text = content.strip()[:200_000]
+        # A verdict may only come from the ASSISTANT's own message. Tool output
+        # is evidence, not judgement: a tool payload carrying a nested
+        # {"verdict": ...} object used to be parsed and promoted to this run's
+        # verdict (code audit 2026-09-28, MEDIUM).
+        if mtype == "tool":
+            continue
         # strip code fences, then try each balanced {...} span
         text = _re.sub(r"```(?:json)?", "", content)
         for m in _re.finditer(r"\{[^{}]*\"verdict\"[^{}]*\}", text,
@@ -1581,16 +1596,45 @@ to your final answer immediately.
                 fallback_reason = (f"finalize failed (attempt {_attempt}): "
                                    f"{str(e)[:180]}")
                 _time.sleep(1.5)
+    # The verdict must come from the JUDGMENT role. When a distinct
+    # WINRE_LLM_VERDICT_MODEL is pinned, the object parsed out of the planner's
+    # final message is only a DRAFT: hand it to the judge, which produces the
+    # authoritative verdict. Without this, deep.json / report.json / audit.json
+    # all claimed the pinned judgment model produced a verdict it never saw
+    # (code audit 2026-09-28, HIGH).
+    verdict_judged_by = "planner"
+    if (verdict is not None and llm_roles.get("judgment")
+            and llm_roles.get("judgment") != llm_roles.get("planner")):
+        try:
+            _jv = judge.invoke([_HM(content=(
+                "Convert this DRAFT verdict into the authoritative flat JSON "
+                "verdict object ONLY (keys: verdict (malicious/unknown/benign), "
+                "confidence (high/medium/low), summary, key_evidence (list of "
+                "strings)). Correct any label or citation the evidence does not "
+                "support. No prose, no code fences.\n\n"
+                f"Draft: {json.dumps(verdict)[:4000]}\n\n"
+                f"Evidence: {basis[:120000]}"))])
+            _jtxt = _re.sub(r"```(?:json)?", "", str(getattr(_jv, "content", "") or ""))
+            _jm = _re.search(r"\{.*\}", _jtxt, _re.DOTALL)
+            if _jm:
+                _jd = json.loads(_jm.group(0))
+                if isinstance(_jd, dict) and _jd.get("verdict"):
+                    verdict = _normalize_verdict(_jd)
+                    verdict_judged_by = "judgment"
+        except Exception as e:
+            llm_roles.setdefault("judgment_pass_error", str(e)[:150])
+
     # curated-YARA verdict floor (W2): never let a below-malicious verdict
     # contradict a family-distinctive rule match
     verdict = _apply_verdict_floor(verdict, _curated_yara_hits(quick, findings))
     if verdict is None:
-        return {"verdict": "unknown", "source": "deterministic_fallback",
+        return {"verdict": None, "source": "deterministic_fallback",
                 "history": history, "llm_analysis": llm_text[:200_000],
                 "fallback_reason": fallback_reason,
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
                 "windbg_dump": windbg_dump, "llm_roles": _llm_roles()}
     return {"verdict": verdict, "source": "llm_judge",
+            "verdict_judged_by": verdict_judged_by,
             "history": history, "llm_analysis": llm_text[:200_000],
             "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
             "windbg_dump": windbg_dump, "llm_roles": _llm_roles()}

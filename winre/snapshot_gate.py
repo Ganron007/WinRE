@@ -24,11 +24,13 @@ L3  Global VM-state ledger + HITL attestation (fallback bookkeeping).
     false claim gets a blocked run, never a contaminated VM.
 
 Modes (WINRE_SNAPSHOT_GATE):
-    observe (default) — compute + record everything, never block.
-                        Exists so the gate ships without hampering the
-                        current testing phase; flip to enforce for release.
-    enforce           — block execution when the gate is not satisfied.
+    enforce (DEFAULT) — one execution per clean restore; an over-budget
+                        run is refused BEFORE any stage runs.
+    observe           — compute + record everything, never block. For
+                        iterating on analysis, not for evidence.
     off               — gate fully inert (ledger still written).
+    Anything else     — FAILS CLOSED to enforce: a typo must never be
+                        able to weaken enforcement.
 
 Deterministic spine only — the gate is NEVER an agentic decision.
 """
@@ -51,20 +53,36 @@ DIRTY_ACTIONS = ("detonated", "debugged")
 
 
 def mode() -> str:
+    """Resolve the gate mode. FAIL CLOSED on anything we do not understand.
+
+    A typo must never weaken enforcement: `WINRE_SNAPSHOT_GATE=true` used to
+    fall back to `observe`, which silently disabled the marker, the budget and
+    the audit gate check (code audit 2026-09-28, CRITICAL). Unknown -> enforce.
+    """
     m = os.environ.get("WINRE_SNAPSHOT_GATE", "enforce").strip().lower()
     if m not in ("observe", "enforce", "off"):
-        # fail-open would silently weaken enforcement - pin to observe but
-        # shout, since the operator typed something we don't know
-        print(f"[snapshot_gate] WARN unknown WINRE_SNAPSHOT_GATE={m!r}; "
-              f"using observe", flush=True)
-        return "observe"
+        print(f"[snapshot_gate] ERROR unknown WINRE_SNAPSHOT_GATE={m!r} "
+              f"(expected observe|enforce|off) - FAILING CLOSED to enforce",
+              flush=True)
+        return "enforce"
     return m
 
 
 # Debug-execution session scope: the FIRST debug preflight in this process
-# consumes the marker; later debug calls in the same agent run are allowed
-# against the in-memory flag (the VM is already dirty from call #1).
+# consumes the marker; later debug calls in the SAME run are allowed against
+# the in-memory flag (the VM is already dirty from call #1).
+#
+# This state must never outlive a run: a long-lived host process (the Flask
+# console) that debugged sha X once would otherwise allow a SECOND run of the
+# same sha with no marker probe and no consume - i.e. execution straight off
+# an armed, freshly restored snapshot (code audit 2026-09-28, HIGH). Every
+# driver therefore calls reset_session() before the first execution site.
 _debug_consumed: set = set()
+
+
+def reset_session() -> None:
+    """Forget debug-session scope. Called at the start of every pipeline run."""
+    _debug_consumed.clear()
 
 
 # --- run-level execution plan (RevAI handoff 2026-09-27, item 1) --------------

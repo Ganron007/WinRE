@@ -616,7 +616,7 @@ def _run_pipeline_in_thread(sample_path: str, max_seconds: int,
                 _run_state["sha"] = res["sha"]
                 _run_state["last"] = {"ok": True, "sha": res["sha"],
                                       "started": started,
-                                      "audit": res["results"]["audit"]}
+                                      "audit": res["results"].get("audit")}
             except Exception as e:
                 print("[winre-ui] run failed:", traceback.format_exc(), flush=True)
                 _run_state["last"] = {"ok": False, "error": str(e)}
@@ -627,6 +627,19 @@ def _run_pipeline_in_thread(sample_path: str, max_seconds: int,
     t = threading.Thread(target=_do, daemon=True)
     _run_state["pid"] = t
     t.start()
+
+
+def _llm_default_model() -> str:
+    """The resolved default model name, or "" if the resolver is broken.
+
+    The console used to read WINRE_LLM_MODEL itself, which disagreed with
+    the routing table whenever the variable was blank.
+    """
+    try:
+        from winre import llm_client
+        return str((llm_client.roles() or {}).get("default") or "")
+    except Exception:
+        return ""
 
 
 def _llm_roles_view(probe: bool = True) -> dict:
@@ -1139,8 +1152,12 @@ def create_app() -> "Flask":
             },
             "llm": {
                 "base_url": _os.environ.get("WINRE_LLM_BASE_URL", ""),
-                "model": _os.environ.get("WINRE_LLM_MODEL", ""),
-                "reasoning": _os.environ.get("WINRE_LLM_REASONING", ""),
+                # the RESOLVED default, via the one resolver: reading
+                # WINRE_LLM_MODEL here rendered "-" whenever the shipped
+                # .env left it blank while the routing table twenty lines
+                # below correctly said "local" - the page contradicted
+                # itself and the resolver (code audit 2026-09-28).
+                "model": _llm_default_model(),
                 "roles": _llm_roles_view(),
                 "reasoning": _os.environ.get("WINRE_LLM_REASONING", ""),
                 "context_tokens": _os.environ.get(

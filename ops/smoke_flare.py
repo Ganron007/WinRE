@@ -182,6 +182,16 @@ def run_smoke() -> list[dict]:
 
 
 def main() -> int:
+    # --help used to be ignored, so `python -m ops.smoke_flare --help` ran
+    # the whole live smoke test against the VM (and exited 1 when it was
+    # unreachable). Every entry point must answer --help.
+    if "-h" in sys.argv or "--help" in sys.argv:
+        print("usage: python -m ops.smoke_flare [--json]\n\n"
+              "Live readiness check against the FlareVM over SSH:")
+        print("ssh reachability, py_compile on the VM, pipeline layout,")
+        print("sample dir, MCP ports, snapshot-gate marker, LLM endpoint.")
+        print("\nexit 0 only when every check passed.")
+        return 0
     as_json = "--json" in sys.argv
     results = run_smoke()
     if as_json:
