@@ -65,8 +65,34 @@ def parse_stop_on(spec):
     return kinds, apis
 
 
-def gate_for(api, kinds, apis):
-    """Which gate (if any) this API satisfies. Pure, so it is unit-testable."""
+# A CreateFile is only a DROPPED file if it opens for WRITE. Reading a
+# DLL, a resource or the locale sort table is not a drop: the first live
+# dynamic run (P1 s01, 2026-10-06) tripped the file gate on
+# CreateFileW("...\\Sorting\\sortdefault.nls", GENERIC_READ) at t=2.3s and
+# collapsed a 150s window to 22.4s - reintroducing exactly the
+# short-window truncation RevAI measured (behaviour gate, finding P1-F2).
+CREATE_APIS = frozenset({"createfilew", "createfilea", "ntcreatefile",
+                       "zwcreatefile"})
+# GENERIC_WRITE | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES
+WRITE_ACCESS_BITS = 0x40000000 | 0x00000002 | 0x00000004 | 0x00000100
+
+
+def _arg_int(args, i):
+    """Frida hands pointer args through as hex strings; parse one."""
+    try:
+        v = args[i]
+        return int(v, 16) if isinstance(v, str) else int(v)
+    except Exception:
+        return None
+
+
+def gate_for(api, kinds, apis, args=None):
+    """Which gate (if any) this call satisfies. Pure, so it is testable.
+
+    `args` is the call's argument list; it is REQUIRED to gate a
+    Create*-style API on a write, and absent args degrade to NOT firing
+    rather than firing on a read we cannot prove was a write.
+    """
     if not api:
         return None
     name = str(api)
@@ -76,6 +102,12 @@ def gate_for(api, kinds, apis):
     if "network" in kinds and low in NETWORK_GATES:
         return "network"
     if "file" in kinds and low in FILE_GATES:
+        if low in CREATE_APIS:
+            acc = _arg_int(args, 1) if args and len(args) > 1 else None
+            if acc is None:
+                return None          # cannot prove a write
+            if not (acc & WRITE_ACCESS_BITS):
+                return None          # a READ, not a drop
         return "file"
     return None
 
@@ -366,12 +398,15 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
                 if not gate["fired"] and gate_kinds:
                     payload = msg.get("payload") or {}
                     if isinstance(payload, dict) and payload.get("type") == "call":
-                        hit = gate_for(payload.get("api"), gate_kinds, gate_apis)
+                        hit = gate_for(payload.get("api"), gate_kinds,
+                                       gate_apis, payload.get("args"))
                         if hit:
                             now = time.time()
                             gate.update({
                                 "fired": True, "kind": hit,
                                 "api": payload.get("api"),
+                                "arg0": ((payload.get("decoded") or {})
+                                         .get("arg0")),
                                 "at_s": round(now - t0["t"], 1),
                                 "stop_at": now + gate_settle,
                             })
