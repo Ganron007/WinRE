@@ -154,6 +154,134 @@ def classify_path(path):
     return None
 
 
+# --- loading a DLL: it cannot be spawned, it must be hosted ----------------
+
+DLL_CHARACTERISTICS = 0x2000          # IMAGE_FILE_DLL
+
+
+def _pe_info(path: str | os.PathLike) -> dict:
+    """Is this a DLL, and what does it export? Reads the header only.
+
+    b105 proved this matters: the corpus paths are hashes, so the extension
+    tells you nothing. The FILE HEADER's Characteristics bit and the export
+    directory do.
+    """
+    out: dict = {"is_dll": False, "machine": None, "exports": [],
+                 "entry": None}
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(0x800)
+    except OSError:
+        return out
+    if len(head) < 0x40 or head[:2] != b"MZ":
+        return out
+    try:
+        e_lfanew = int.from_bytes(head[0x3C:0x40], "little")
+        if not 0 < e_lfanew <= len(head) - 0x78:
+            return out
+        if head[e_lfanew:e_lfanew + 4] != b"PE\x00\x00":
+            return out
+        chars = int.from_bytes(head[e_lfanew + 22:e_lfanew + 24], "little")
+        out["is_dll"] = bool(chars & DLL_CHARACTERISTICS)
+        out["machine"] = int.from_bytes(head[e_lfanew + 4:e_lfanew + 6], "little")
+        # DataDirectory[0] (Export) lives at PEhdr+0x78 in the optional header
+        opt = e_lfanew + 24
+        if opt + 0x88 > len(head):
+            return out
+        exp_rva = int.from_bytes(head[opt + 0x70:opt + 0x78], "little")
+        exp_size = int.from_bytes(head[opt + 0x78:opt + 0x80], "little")
+        if not exp_rva:
+            return out
+        out["_exp_rva"] = exp_rva          # section-relative, resolved below
+    except Exception:
+        return out
+    return out
+
+
+def _exports(path: str | os.PathLike) -> list[str]:
+    """Named exports, via pefile when available. Empty list means we cannot
+    prove any - which must NOT be treated as "no exports exist"."""
+    try:
+        import pefile
+    except ImportError:
+        return []
+    try:
+        pe = pefile.PE(str(path))
+    except Exception:
+        return []
+    try:
+        if not hasattr(pe, "DIRECTORY_ENTRY_EXPORT"):
+            return []
+        names = []
+        for sym in pe.DIRECTORY_ENTRY_EXPORT.symbols or []:
+            n = getattr(sym, "name", None)
+            if n:
+                names.append(n.decode("utf-8", "replace")
+                             if isinstance(n, bytes) else str(n))
+        return names
+    finally:
+        try:
+            pe.close()
+        except Exception:
+            pass
+
+
+def _launch_argv(target: str, forced_entry: str | None = None) -> tuple[list[str], str, str | None]:
+    """Build the argv for the sample: direct for an executable, rundll32 for a DLL.
+
+    Returns (argv, loader, entrypoint). A DLL is hosted by rundll32, which is
+    what an analyst does; the DLL's own code runs in the same process and is
+    hooked exactly as a direct spawn would be.
+    """
+    info = _pe_info(target)
+    if not info.get("is_dll"):
+        return [str(target)], "direct", None
+
+    names = _exports(target)
+    entry = forced_entry or _preferred_entry(names)
+    if not entry:
+        # No provable entry point. DllRegisterServer/DllMain are the two that
+        # exist by ABI contract on most DLLs, and rundll32 accepts an ordinal.
+        # Refuse rather than guess silently: a wrong entry point is not the
+        # sample.
+        raise FridaLaunchError(
+            "the target is a DLL with no discernible export to call "
+            "(exports: %s). Pass --dll-entry <Name|#ordinal>" %
+            (", ".join(names[:6]) or "none found"))
+    return ["rundll32.exe", str(target), f",{entry}"], "rundll32", entry
+
+
+# Entry points malware DLLs conventionally expose. Order matters: a
+# registration hook runs before anything else, so it is preferred.
+_PREFERRED_ENTRIES = (
+    "DllRegisterServer", "DllInstall", "ServiceMain", "DllMain",
+    "Go", "Run", "Start", "Main", "Load", "Init", "Install",
+)
+
+
+def _preferred_entry(names: list[str]) -> str | None:
+    """The entry point to call. Exact matches on the preferred list first, then
+    case-insensitive, then the FIRST export we can prove exists.
+
+    Reversing: b105's PDB told us it exports "Go", and rundll32 with no
+    argument at all pops a dialog - a detonation that waits for input is not a
+    detonation.
+    """
+    for want in _PREFERRED_ENTRIES:
+        for n in names:
+            if n == want:
+                return n
+    for want in _PREFERRED_ENTRIES:
+        for n in names:
+            if n.lower() == want.lower():
+                return n
+    return names[0] if names else None
+
+
+class FridaLaunchError(RuntimeError):
+    """The sample cannot be launched with the information we have."""
+
+
 def gate_for(api, kinds, apis, args=None, path=None):
     """Which gate (if any) this call satisfies. Pure, so it is testable.
 
@@ -196,6 +324,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Frida API tracer for Flare-VM (Frida 17+)")
     ap.add_argument("--target", help="path to PE binary to spawn")
     ap.add_argument("--pid", type=int, help="PID to attach to (instead of --target)")
+    ap.add_argument("--dll-entry", default=None,
+                help="entry point to call when --target is a DLL "
+                     "(export name, or #<ordinal>). Defaults to the first of "
+                     "DllRegisterServer/DllMain/Go/... that the file exports; "
+                     "rundll32 hosts it, which is the only way to run a DLL.")
     ap.add_argument(
         "--apis",
         required=True,
@@ -491,6 +624,7 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
 
     device = frida.get_local_device()
     spawned_pid = None
+    launch = {"argv": [], "loader": "direct", "entry": None}
 
     if args.pid:
         print(f"attaching to pid={args.pid}", file=sys.stderr)
@@ -500,7 +634,15 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
         if not Path(args.target).is_file():
             print(f"FATAL: target not found: {args.target}", file=sys.stderr)
             sys.exit(1)
-        spawned_pid = device.spawn([args.target])
+        # A DLL cannot be spawned: Frida's device.spawn only accepts
+        # executables, and it says so verbatim - "unsupported file format".
+        # b105 (2026-10-06) died there and the whole detonation vanished while
+        # the stage still reported green. An analyst loads a DLL through a
+        # host, so that is what we do: rundll32.exe <dll>,<EntryPoint>.
+        argv, loader, entry = _launch_argv(args.target, args.dll_entry)
+        launch = {"argv": argv, "loader": loader, "entry": entry}
+        print(f"loader={loader} entry={entry}", file=sys.stderr)
+        spawned_pid = device.spawn(argv)
         session = device.attach(spawned_pid)
     else:
         print("FATAL: must specify --target or --pid", file=sys.stderr)
@@ -517,7 +659,7 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
     gate_kinds, gate_apis = parse_stop_on(getattr(args, "stop_on", ""))
     gate_settle = max(0, int(getattr(args, "stop_on_settle", 20) or 0))
     gate = {"fired": False, "at_s": None, "kind": None, "api": None,
-            "stop_at": None}
+            "stop_at": None, "path": None}
 
     def on_message(msg, data):
         if closed["done"]:

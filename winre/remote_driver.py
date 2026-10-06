@@ -430,6 +430,7 @@ for _a in sys.argv[4:]:
 idle_stop = 10
 section = "agentic"
 run_id = None
+dll_entry = None
 for _a in sys.argv[4:]:
     if _a.startswith("--section=") and _a.split("=", 1)[1] in ("agentic", "static"):
         section = _a.split("=", 1)[1]
@@ -440,6 +441,8 @@ for _a in sys.argv[4:]:
             idle_stop = 10
     if _a.startswith("--run-id=") and _a.split("=", 1)[1].strip():
         run_id = _a.split("=", 1)[1].strip()
+    if _a.startswith("--dll-entry=") and _a.split("=", 1)[1].strip():
+        dll_entry = _a.split("=", 1)[1].strip()
 
 pipeline = Path(__file__).resolve().parents[1]
 sessions = pipeline / "sessions"
@@ -469,6 +472,10 @@ if adaptive:
     cmd += ["--adaptive", "--idle-stop-seconds", str(idle_stop)]
 if stop_on:
     cmd += ["--stop-on", stop_on, "--stop-on-settle", str(stop_on_settle)]
+if dll_entry:
+    # only takes effect when the target is a DLL; the tracer decides that from
+    # the PE header and ignores it for an executable
+    cmd += ["--dll-entry", dll_entry]
 print(f"run_id={run_id or 'none'}")
 try:
     r = subprocess.run(cmd, capture_output=True, text=True, env=env,

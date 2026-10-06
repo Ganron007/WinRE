@@ -21,6 +21,10 @@ param(
   # sample does something notable, then lets it settle.
   [string]$StopOn = "network,file",
   [int]$StopOnSettle = 20,
+  # A DLL cannot be spawned - Frida refuses it with "unsupported file
+  # format". It is loaded through a host instead (rundll32 -<File>,<Entry>).
+  # Empty means: derive the entry point from the file's own export directory.
+  [string]$DllEntry = "",
   [string]$Apis = "CreateFileW,WriteFile,ReadFile,DeleteFileW,RegOpenKeyExW,RegSetValueExW,VirtualAlloc,VirtualProtect,WriteProcessMemory,CreateRemoteThread,WinHttpOpen,InternetOpenW,connect,send,recv,LoadLibraryW,GetProcAddress,CreateProcessW"
 )
 
@@ -187,6 +191,11 @@ try {
     # off right before it wakes up and beacons.
     $fridaArgs += @("--stop-on", "$StopOn", "--stop-on-settle", "$StopOnSettle")
   }
+    if ($DllEntry) {
+      # only meaningful for a DLL target; the tracer decides that from the
+      # PE header and ignores it for an executable
+      $fridaArgs += @("--dll-entry", "$DllEntry")
+    }
   $fridaStart = Get-Date
   $fridaProc = Start-Process -FilePath $Python -ArgumentList $fridaArgs -PassThru -NoNewWindow `
     -RedirectStandardError (Join-Path $OutDir "frida.stderr.txt") `
@@ -501,6 +510,18 @@ if (Test-Path $trace) {
   Copy-Item $trace (Join-Path $OutDir "frida_trace.json") -Force
 }
 
+  # How the sample was launched. Frida prints "loader=<direct|rundll32>
+  # entry=<x>" to stderr; read it back so the pack is self-describing without
+  # a second probe (b105 was a DLL and nothing in the pack said so).
+  $launchLoader = $null
+  $launchLoaderEntry = $null
+  if (Test-Path (Join-Path $OutDir "frida.stderr.txt")) {
+    $se = (Get-Content (Join-Path $OutDir "frida.stderr.txt") -Raw)
+    if ($se -match "loader=(rundll32|direct)") { $launchLoader = $Matches[1] }
+    if ($se -match "(?m)^loader=(?:rundll32|direct) entry=(.*)$") {
+      $launchLoaderEntry = $Matches[1].Trim()
+    }
+  }
   # A detonation that never spawned the sample is not a green detonation.
   # b105 (2026-10-06) was a DLL masquerading as .exe: Frida's device.spawn
   # raised ExecutableNotSupportedError, exited 0 anyway, Procmon then recorded
@@ -552,6 +573,10 @@ if (Test-Path $trace) {
   memory_dir = if (Test-Path $memDir) { $memDir } else { $null }
   snapshot_restore_required = $true
   detonation_reason = if ($detonation_ran) { $null } else { $detonation_err }
+  # how the sample was launched: "direct" (spawned) or "rundll32" (a DLL
+  # hosted by rundll32.exe <file>,<entry> - Frida prints it to stderr.)
+  loader = $launchLoader
+  loader_entry = $launchLoaderEntry
   finished_at = (Get-Date).ToUniversalTime().ToString("o")
 } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $OutDir "META.job.json") -Encoding UTF8
 

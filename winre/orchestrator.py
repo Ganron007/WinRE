@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 WinRE dynamic detonation orchestrator (Flare-VM).
 
@@ -597,6 +597,14 @@ def _detonation_ran(meta: dict) -> bool:
 
 
 def _apply_detonation_verdict(meta: dict, *, trace, dyn_dir) -> None:
+    # How the sample was launched is part of the evidence, not a log detail:
+    # "rundll32" means the target was a DLL hosted by rundll32 with a chosen
+    # entry point, and a reader needs to know that before reading the trace.
+    # The job prints it to frida.stderr.txt and records it in META.
+    loader = meta.get("loader")
+    if loader and meta.get("loader_entry"):
+        meta["loader_entry"] = meta.get("loader_entry")
+    meta["loader"] = loader or "direct"
     """Set ok/error/frida_events from whether the detonation actually ran.
 
     A Frida trace with zero events means one of two very different things:
@@ -851,7 +859,8 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
                        adaptive: bool = False,
                        idle_stop_seconds: int = 0,
                        stop_on: str = "network,file",
-                       stop_on_settle: int = 20) -> dict:
+                       stop_on_settle: int = 20,
+                       dll_entry: str | None = None) -> dict:
     """Run flare_dynamic_job.ps1 on the local host (no SSH)."""
     if not LOCAL_JOB_PS1.is_file():
         meta["error"] = f"job ps1 missing: {LOCAL_JOB_PS1}"
@@ -876,6 +885,10 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
     if stop_on is not None:
         job_args += ["-StopOn", str(stop_on),
                       "-StopOnSettle", str(int(stop_on_settle))]
+    if dll_entry:
+        # a DLL cannot be spawned; it is hosted by rundll32 with this entry
+        # point. Only the tracer acts on it, and only for a DLL target.
+        job_args += ["-DllEntry", str(dll_entry)]
     print(f"[dynamic_run_v2] LOCAL powershell job -> {LOCAL_JOB_PS1}", flush=True)
     timed_out = False
     try:
@@ -1012,6 +1025,7 @@ def run_dynamic(
     idle_stop_seconds: int = 0,
     stop_on: str = "network,file",
     stop_on_settle: int = 20,
+    dll_entry: str | None = None,
     run_id: str | None = None,
 ) -> dict:
     cfg = _flare_cfg()
@@ -1200,7 +1214,8 @@ def run_dynamic(
                                           adaptive=adaptive,
                                           idle_stop_seconds=idle_stop_seconds,
                                           stop_on=stop_on,
-                                          stop_on_settle=stop_on_settle)
+                                          stop_on_settle=stop_on_settle,
+                                          dll_entry=dll_entry)
             except Exception as e:
                 meta["error"] = str(e)
                 meta["ok"] = False
@@ -1343,6 +1358,7 @@ def run_dynamic(
         gate_flag = ("" if not stop_on else
                      f' -StopOn "{stop_on}" -StopOnSettle '
                      f'"{int(stop_on_settle)}"')
+        dll_flag = "" if not dll_entry else f' -DllEntry "{dll_entry}"'
         ps = (
             f'powershell -NoProfile -ExecutionPolicy Bypass -File "{job_win}" '
             f'-Sha256 "{sha}" -SamplePath "{remote_dir_win}\\sample.exe" '
@@ -1350,6 +1366,7 @@ def run_dynamic(
             f'-Apis "{api_list}"'
             f"{pesieve_flag}"
             f"{gate_flag}"
+            f"{dll_flag}"
         )
         print(f"[dynamic_run_v2] job max_seconds={max_seconds}", flush=True)
         ssh_budget = int(max_seconds) + 300  # FakeNet/Procmon/CSV export overhead
@@ -1495,8 +1512,11 @@ def main() -> int:
                          "settles. network,file or api:<ExportName>; empty "
                          "disables. The verdict is recorded in dynamic META.")
     ap.add_argument("--stop-on-settle", type=int, default=20,
-                    help="keep tracing this long after the gate fires so the "
-                         "follow-on traffic is captured too")
+                     help="keep tracing this long after the gate fires so the "
+                          "follow-on traffic is captured too")
+    ap.add_argument("--dll-entry", default=None,
+                    help="entry point to call when the sample is a DLL "
+                         "(export name or #ordinal); rundll32 hosts it")
     ap.add_argument("--adaptive", action="store_true",
                     help="legacy idle-stop window (cap = --max-seconds). "
                          "The behaviour gate is the default mechanism.")
@@ -1559,6 +1579,7 @@ def main() -> int:
         adaptive=args.adaptive,
         idle_stop_seconds=args.idle_stop_seconds,
         stop_on=args.stop_on, stop_on_settle=args.stop_on_settle,
+                 dll_entry=args.dll_entry,
         run_id=args.run_id,
     )
     if meta.get("skipped") or meta.get("ok"):
