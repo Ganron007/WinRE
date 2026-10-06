@@ -676,7 +676,8 @@ class ToolRegistry:
             if remote_driver.mcp_autostart_enabled():
                 try:
                     from winre.mcp.x64dbg_manager import ensure_mcp
-                    ok, info = ensure_mcp(wait_s=45)
+                    ok, info = ensure_mcp(wait_s=45,
+                                          sample=self._dbg_sample())
                     if not ok:
                         self._dbg_ensure_error = info
                 except Exception as e:

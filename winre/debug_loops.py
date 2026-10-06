@@ -1203,18 +1203,23 @@ def _resolve_oep(sample: str, xc: X64DbgClient) -> dict:
             "evidence": ((r1.get("evidence") or []) + (r2.get("evidence") or []))}
 
 
-def _restart_debugger(xc: X64DbgClient) -> dict:
+def _restart_debugger(xc: X64DbgClient,
+                      sample: str | None = None) -> dict:
     """Fresh x64dbg session (only for a stable session end).
 
     Remote (control plane): x64dbg_manager.restart_mcp() via SSH.
     Local (on the VM): taskkill + ensure_mcp_local().
     Diagnostics are captured BEFORE teardown — once the GUI is killed,
     GetDebugState can only ever show NO_TARGET.
+
+    `sample` keeps the relaunch on the correct flavour: only x64dbg.exe used
+    to be killed and only x64dbg.exe used to be launched, so a 32-bit retry
+    restarted into the wrong debugger and failed the same way again (P1-F1).
     """
     info: dict = {"pre_restart_diagnostics": _debugger_diagnostics(xc)}
     try:
         from winre.mcp.x64dbg_manager import restart_mcp
-        ok, meta = restart_mcp()
+        ok, meta = restart_mcp(sample=sample)
         info.update({"ok": bool(ok), "method": "remote", **(meta or {})})
         return info
     except Exception as e:
@@ -1222,9 +1227,10 @@ def _restart_debugger(xc: X64DbgClient) -> dict:
     try:
         import subprocess
         from winre.mcp import x64dbg_manager as mgr
-        subprocess.run(["taskkill", "/F", "/IM", "x64dbg.exe", "/T"],
-                       capture_output=True, timeout=30)
-        ok, meta = mgr.ensure_mcp_local(wait_s=60)
+        for proc in ("x32dbg.exe", "x64dbg.exe"):   # both flavours (P1-F1)
+            subprocess.run(["taskkill", "/F", "/IM", proc, "/T"],
+                           capture_output=True, timeout=30)
+        ok, meta = mgr.ensure_mcp_local(wait_s=60, sample=sample)
         info.update({"ok": bool(ok), "method": "local", **(meta or {})})
     except Exception as e:
         info["local_error"] = str(e)[:150]
@@ -1395,7 +1401,7 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
     oep_res = _resolve_oep(sample, xc)
     evidence.extend(oep_res.get("evidence") or [])
     if not oep_res.get("ok") and _pause_failure(oep_res):
-        restart = _restart_debugger(xc)
+        restart = _restart_debugger(xc, sample=sample)
         evidence.append({"label": "debugger_restart", **restart})
         if restart.get("ok"):
             oep_res = _resolve_oep(sample, xc)

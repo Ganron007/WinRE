@@ -29,6 +29,8 @@ param(
     [int]$MalcatPort = 9009,
     [int]$WinDbgPort = 9097,
     [int]$X64dbgPort = 9094,
+    [ValidateSet(32, 64)]
+    [int]$X64dbgArch = 64,
     [switch]$NoX64dbg,
     [switch]$Foreground,
     [switch]$Detach
@@ -143,10 +145,19 @@ Start-Hidden $pyExe @("-u", "-m", "mcp_windbg",
 # --- x64dbg-MCP (plugin auto-starts :9094 when x64dbg opens) ---
 if (-not $NoX64dbg) {
     if (-not (Test-Port $X64dbgPort)) {
-        $x64 = "C:\tools\x64dbg\release\x64\x64dbg.exe"
+        # x64dbg is TWO programs: x64dbg.exe debugs 64-bit images, x32dbg.exe
+        # 32-bit ones. Preheating the wrong flavour makes a PE32 sample fail
+        # every OEP method with "debug session ended before EP pause" (P1-F1).
+        # The dynamic/agentic launcher still verifies and replaces a wrong
+        # flavour; this only avoids the wasted cycle on a known sample.
+        $x64 = if ($X64dbgArch -eq 32) {
+            "C:\tools\x64dbg\release\x32\x32dbg.exe"
+        } else {
+            "C:\tools\x64dbg\release\x64\x64dbg.exe"
+        }
         if (Test-Path $x64) {
             Start-Process $x64 -WindowStyle Minimized | Out-Null
-            Write-Host "[winre-mcp] x64dbg launching (plugin -> :$X64dbgPort)" -ForegroundColor Green
+            Write-Host "[winre-mcp] x64dbg($X64dbgArch-bit) launching (plugin -> :$X64dbgPort)" -ForegroundColor Green
         } else {
             Write-Host "[winre-mcp] WARN: x64dbg not found at $x64 — :$X64dbgPort unavailable" -ForegroundColor Yellow
         }

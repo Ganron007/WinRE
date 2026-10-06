@@ -640,7 +640,7 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
             return
         try:
             from winre.mcp.x64dbg_manager import ensure_mcp_local
-            ok, info = ensure_mcp_local(wait_s=45)
+            ok, info = ensure_mcp_local(wait_s=45, sample=str(sample))
             if not ok:
                 meta["x64dbg_mcp_ensure_failed"] = info
                 meta["x64dbg_mcp_unreachable"] = True
