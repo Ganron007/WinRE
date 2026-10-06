@@ -989,6 +989,13 @@ _PACKER_WORDS = (
     "crypter",
 )
 
+# Packing threshold in BITS PER BYTE, on the 0-8 Shannon scale that pefile,
+# DIE and X-ray all use. Malcat reports entropy x 32 in a 0-255 integer, so
+# this is compared AFTER conversion (see _packer_signal). ~7.2 b/B and above is
+# where unpacking stops being optional: below it there are enough runs of
+# plaintext that static tooling still returns signal.
+_PACKED_ENTROPY_BPB = 7.2
+
 
 def _is_managed_quick(quick: dict | None) -> bool:
     """True when quick evidence says the sample is a .NET/managed assembly.
@@ -1014,6 +1021,15 @@ def _packer_signal(quick: dict | None) -> dict | None:
 
     Returns None when nothing fires, else a compact dict that (a) routes the
     agent to the debugger unpack primitive and (b) is recorded in deep.json.
+
+    UNIT. Malcat reports entropy as bits-per-byte scaled by 32, as a 0-255
+    integer: .text=132 is 4.125 b/B, .rsrc=226 is 7.06 b/B, 0 is 0. Comparing
+    that raw integer against a bits-per-byte threshold is a unit bug: it makes
+    essentially every file look packed (any integer >= 7 passes) while never
+    actually measuring packing. Convert, then emit a thresholded verdict rather
+    than a raw field - a route decision the agent has to re-derive from a
+    number is how three samples in a row carried {"entropy": 71|107|224} with
+    no unpacking work behind them.
     """
     ev = (quick or {}).get("evidence") or {}
     if not isinstance(ev, dict):
@@ -1028,8 +1044,10 @@ def _packer_signal(quick: dict | None) -> dict | None:
     mc = ev.get("malcat") or {}
     f = mc.get("file") or {}
     ent = f.get("entropy")
-    if isinstance(ent, (int, float)) and ent >= 7.0:
-        sig["entropy"] = ent
+    # Malcat's entropy field is bits-per-byte x 32 (see docstring)
+    bpb = ent / 32.0 if isinstance(ent, (int, float)) else None
+    if bpb is not None and bpb >= _PACKED_ENTROPY_BPB:
+        sig["entropy"] = round(bpb, 3)
     an = mc.get("anomalies") or []
     if isinstance(an, list):
         ahits = [str(a.get("name")) for a in an if isinstance(a, dict)
@@ -1044,7 +1062,10 @@ def _packer_note(sig: dict | None, prepass: dict | None,
                  dynamic: bool) -> str:
     if not sig:
         return ""
-    txt = ", ".join(f"{k}={v}" for k, v in sig.items())
+    # entropy is now bits-per-byte, so name the unit for the reader
+    txt = ", ".join(
+        f"{k}={v} bits/byte" if k == "entropy" else f"{k}={v}"
+        for k, v in sig.items())
     if not dynamic:
         return (f"\nPACKER SIGNAL: {txt}. Static evidence on packed bytes is "
                 "UNRELIABLE (see decrypt_gate) — do not lean malicious on "
