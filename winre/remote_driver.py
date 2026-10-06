@@ -1000,6 +1000,8 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
             "packed_signal": agent_result.get("packed_signal"),
             "unpack_prepass": agent_result.get("unpack_prepass"),
             "windbg_dump": agent_result.get("windbg_dump"),
+            # which debugger served the unpack (x32dbg vs x64dbg, P1-F1)
+            "dbg_ensure": agent_result.get("dbg_ensure"),
             # per-role models actually used (RevAI handoff item 7)
             "llm_roles": agent_result.get("llm_roles"),
         }

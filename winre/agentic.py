@@ -189,6 +189,7 @@ class ToolRegistry:
         self.remote_sample = rf"C:\samples\{sample_name}"
         self._dbg_ensured = False
         self._dbg_ensure_error: dict | None = None
+        self._dbg_ensure_info: dict | None = None
         self._dbg_sample_path: str | None = None
 
     def call(self, name: str, args: dict) -> dict:
@@ -678,6 +679,12 @@ class ToolRegistry:
                     from winre.mcp.x64dbg_manager import ensure_mcp
                     ok, info = ensure_mcp(wait_s=45,
                                           sample=self._dbg_sample())
+                    # recorded on SUCCESS too: the pack must show WHICH
+                    # debugger produced the unpack evidence (x32dbg for a PE32
+                    # image, x64dbg otherwise - P1-F1), otherwise a
+                    # silently-wrong-flavour run is indistinguishable from a
+                    # correct one
+                    self._dbg_ensure_info = info
                     if not ok:
                         self._dbg_ensure_error = info
                 except Exception as e:
@@ -1313,6 +1320,21 @@ dynamic tool errors, fall back to static — do not retry more than once.
                            "imp_modes_tried", "artifact", "fallback_trace",
                            "fallback_summary")
                           if k in r}
+    # Which debugger actually served the unpack? x32dbg for a PE32 image,
+    # x64dbg otherwise (P1-F1). Recorded so a pack is self-describing: if the
+    # flavour were wrong the OEP failure would be otherwise indistinguishable
+    # from a genuine "sample refused to unpack".
+    dbg_ensure: dict | None = None
+    try:
+        _i = getattr(registry, "_dbg_ensure_info", None)
+        if isinstance(_i, dict):
+            dbg_ensure = {k: _i.get(k) for k in
+                          ("arch", "debugger", "exe", "already_up",
+                           "launched", "replaced_wrong_arch", "error")
+                          if _i.get(k) is not None}
+    except Exception:
+        dbg_ensure = None
+
     packer_note = _packer_note(packed_sig, unpack_prepass, dynamic)
     if managed:
         packer_note = ("\nPACKER SIGNAL (managed): packer/compression signals on a "
@@ -1364,7 +1386,7 @@ dynamic tool errors, fall back to static — do not retry more than once.
         return {"verdict": None, "source": "deterministic_fallback",
                 "history": history, "llm_analysis": None, "dry": True,
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
-                "windbg_dump": windbg_dump, "llm_roles": _llm_roles()}
+                "windbg_dump": windbg_dump, "dbg_ensure": dbg_ensure, "llm_roles": _llm_roles()}
 
     api_key = os.environ.get("WINRE_LLM_API_KEY", "")
     api_url = (os.environ.get("WINRE_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
@@ -1376,7 +1398,7 @@ dynamic tool errors, fall back to static — do not retry more than once.
                 "history": history,
                 "llm_analysis": "WINRE_LLM_API_KEY not set for remote endpoint",
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
-                "windbg_dump": windbg_dump, "llm_roles": _llm_roles()}
+                "windbg_dump": windbg_dump, "dbg_ensure": dbg_ensure, "llm_roles": _llm_roles()}
 
     try:
         _max_out = int(os.environ.get("WINRE_LLM_MAX_OUTPUT_TOKENS", "32768"))
@@ -1505,7 +1527,7 @@ to your final answer immediately.
         return {"verdict": None, "source": "deterministic_fallback",
                 "history": history, "llm_analysis": f"agent error: {e}",
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
-                "windbg_dump": windbg_dump, "llm_roles": _llm_roles()}
+                "windbg_dump": windbg_dump, "dbg_ensure": dbg_ensure, "llm_roles": _llm_roles()}
 
     # parse final flat JSON from AI messages (newest first). Models wrap
     # verdicts in prose/fences, so try every {...} candidate, not just the
@@ -1633,12 +1655,12 @@ to your final answer immediately.
                 "history": history, "llm_analysis": llm_text[:200_000],
                 "fallback_reason": fallback_reason,
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
-                "windbg_dump": windbg_dump, "llm_roles": _llm_roles()}
+                "windbg_dump": windbg_dump, "dbg_ensure": dbg_ensure, "llm_roles": _llm_roles()}
     return {"verdict": verdict, "source": "llm_judge",
             "verdict_judged_by": verdict_judged_by,
             "history": history, "llm_analysis": llm_text[:200_000],
             "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
-            "windbg_dump": windbg_dump, "llm_roles": _llm_roles()}
+            "windbg_dump": windbg_dump, "dbg_ensure": dbg_ensure, "llm_roles": _llm_roles()}
 
 
 if __name__ == "__main__":
