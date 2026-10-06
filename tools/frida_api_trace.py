@@ -166,8 +166,8 @@ def _pe_info(path: str | os.PathLike) -> dict:
     tells you nothing. The FILE HEADER's Characteristics bit and the export
     directory do.
     """
-    out: dict = {"is_dll": False, "machine": None, "exports": [],
-                 "entry": None}
+    out: dict = {"is_dll": False, "machine": None, "bits": None,
+                 "exports": [], "entry": None}
     try:
         with open(path, "rb") as fh:
             head = fh.read(0x800)
@@ -183,7 +183,9 @@ def _pe_info(path: str | os.PathLike) -> dict:
             return out
         chars = int.from_bytes(head[e_lfanew + 22:e_lfanew + 24], "little")
         out["is_dll"] = bool(chars & DLL_CHARACTERISTICS)
-        out["machine"] = int.from_bytes(head[e_lfanew + 4:e_lfanew + 6], "little")
+        machine = int.from_bytes(head[e_lfanew + 4:e_lfanew + 6], "little")
+        out["machine"] = machine
+        out["bits"] = {0x014C: 32, 0x8664: 64, 0xAA64: 64}.get(machine)
         # DataDirectory[0] (Export) lives at PEhdr+0x78 in the optional header
         opt = e_lfanew + 24
         if opt + 0x88 > len(head):
@@ -226,6 +228,21 @@ def _exports(path: str | os.PathLike) -> list[str]:
             pass
 
 
+def _rundll32_path(bits: int | None) -> str:
+    """The rundll32 that can actually load this DLL.
+
+    A 64-bit rundll32 cannot load a 32-bit DLL and vice versa - the load fails
+    with "%%1 is not a valid Win32 application" if you get it backwards. So the
+    host is chosen by the TARGET's machine type, which is the same rule the
+    x64dbg launcher already follows (P1-F1: 32-bit samples get the 32-bit
+    debugger).
+    """
+    windir = os.environ.get("WINDIR", r"C:\Windows")
+    if bits == 32:
+        return rf"{windir}\SysWOW64\rundll32.exe"
+    return rf"{windir}\System32\rundll32.exe"
+
+
 def _launch_argv(target: str, forced_entry: str | None = None) -> tuple[list[str], str, str | None]:
     """Build the argv for the sample: direct for an executable, rundll32 for a DLL.
 
@@ -237,18 +254,25 @@ def _launch_argv(target: str, forced_entry: str | None = None) -> tuple[list[str
     if not info.get("is_dll"):
         return [str(target)], "direct", None
 
+    # Frida's device.spawn needs a resolvable path, not a bare image name -
+    # "rundll32.exe" is looked up on the PATH it inherits, which an SSH-spawned
+    # process does not have.
+    host = _rundll32_path(info.get("bits"))
+    if not Path(host).is_file():
+        raise FridaLaunchError(
+            f"no rundll32 host for a {info.get('bits')}-bit DLL "
+            f"(looked for {host})")
     names = _exports(target)
     entry = forced_entry or _preferred_entry(names)
     if not entry:
-        # No provable entry point. DllRegisterServer/DllMain are the two that
-        # exist by ABI contract on most DLLs, and rundll32 accepts an ordinal.
-        # Refuse rather than guess silently: a wrong entry point is not the
-        # sample.
+        # No provable entry point. Refuse rather than guess silently: a wrong
+        # entry point is not the sample.
         raise FridaLaunchError(
             "the target is a DLL with no discernible export to call "
             "(exports: %s). Pass --dll-entry <Name|#ordinal>" %
             (", ".join(names[:6]) or "none found"))
-    return ["rundll32.exe", str(target), f",{entry}"], "rundll32", entry
+    # rundll32 takes "<file>,<entry>" as ONE argument, and the file first.
+    return [host, f"{target},{entry}"], "rundll32", entry
 
 
 # Entry points malware DLLs conventionally expose. Order matters: a

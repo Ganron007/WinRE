@@ -35,12 +35,13 @@ def test_an_executable_is_launched_directly(tmp_path):
 
 def test_a_dll_is_hosted_by_rundll32(tmp_path, monkeypatch):
     p = tmp_path / "b.dll"
-    p.write_bytes(_MZ(characteristics=0x2002))       # DLL + executable
+    p.write_bytes(_MZ(characteristics=0x2002))
     monkeypatch.setattr(fat, "_exports", lambda _: ["Go"])
+    monkeypatch.setenv("WINDIR", r"C:\Windows")
     argv, loader, entry = fat._launch_argv(str(p))
-    assert argv[0].lower() == "rundll32.exe"
-    assert argv[1] == str(p)
-    assert argv[2] == ",Go"
+    assert argv[0].lower().endswith("rundll32.exe")
+    # the file and the entry travel as ONE argument, file first
+    assert argv[1] == f"{p},Go"
     assert loader == "rundll32" and entry == "Go"
 
 
@@ -48,8 +49,9 @@ def test_a_forced_entry_wins(tmp_path, monkeypatch):
     p = tmp_path / "c.dll"
     p.write_bytes(_MZ(characteristics=0x2002))
     monkeypatch.setattr(fat, "_exports", lambda _: ["Go", "Other"])
+    monkeypatch.setenv("WINDIR", r"C:\Windows")
     argv, _, entry = fat._launch_argv(str(p), forced_entry="Other")
-    assert entry == "Other" and argv[2] == ",Other"
+    assert entry == "Other" and argv[1] == f"{p},Other"
 
 
 def test_no_provable_entry_point_refuses(tmp_path, monkeypatch):
