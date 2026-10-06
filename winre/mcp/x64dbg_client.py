@@ -86,19 +86,21 @@ class X64DbgClient:
     # --- port discovery ----------------------------------------------------
 
     @classmethod
-    def _answers(cls, base: str, timeout: int = 3) -> bool:
-        """True only on positive MCP evidence (a real JSON-RPC response)."""
+    def _answers(cls, base: str, timeout: int = 4) -> bool:
+        """True only on positive MCP evidence.
+
+        Uses is_up() - the same GetDebugState probe the rest of the product
+        already trusts - rather than an invented tool name. An earlier
+        version called a fake `__winre_port_probe__` tool and demanded
+        ok=True; the server correctly replied "unknown tool", which is proof
+        of life, so every port was reported dead and 32-bit debugging stayed
+        unreachable. A bare open socket is likewise not evidence - that
+        mistake made dead servers report healthy once already.
+        """
         try:
-            cli = cls.__new__(cls)
-            cli.base = base.rstrip("/")
-            cli.default_timeout = timeout
-            cli._id = 0
-            r = cli.call("__winre_port_probe__", {})
+            return bool(cls(base=base, default_timeout=timeout).is_up())
         except Exception:
             return False
-        # a structured answer (even "unknown tool") proves the MCP server is
-        # there; a bare False/None means the transport failed
-        return bool(isinstance(r, dict) and r.get("ok"))
 
     @classmethod
     def resolve_port(cls, host: str = "127.0.0.1",

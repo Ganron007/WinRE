@@ -88,10 +88,35 @@ def test_forget_port_clears_every_host_when_unscoped():
 
 def test_a_candidate_counts_only_on_positive_mcp_evidence():
     """A bare open socket is NOT evidence - that mistake previously made dead
-    servers report healthy. `call()` must have produced a structured answer."""
+    servers report healthy.
+
+    The probe must be the product's own is_up() (GetDebugState). An earlier
+    version invented a fake tool name and demanded ok=True; the server
+    correctly answered "unknown tool", which is proof of life, so every port
+    was reported dead and 32-bit debugging stayed unreachable."""
     src = inspect.getsource(cl.X64DbgClient._answers)
-    assert "call(" in src
-    assert "isinstance(r, dict)" in src and 'r.get("ok")' in src
+    assert ".is_up()" in src, "must reuse the validated liveness probe"
+    # is_up() itself must still be a real MCP call, not a socket check
+    assert 'call("GetDebugState")' in inspect.getsource(cl.X64DbgClient.is_up)
+    # no invented tool names in the CODE (the docstring names the old bug on
+    # purpose, so the docstring is stripped before this check)
+    import ast as _ast
+    tree = _ast.parse(inspect.cleandoc(src).replace("@classmethod", "", 1))
+    body_src = _ast.unparse(tree)
+    body_src = body_src.split('"""', 2)[-1]      # drop the module/func docstring
+    assert "__winre" not in body_src, "no invented tool names"
+    assert "port_probe" not in body_src, "no invented tool names"
+
+
+def test_discovery_uses_a_real_client_not_a_hand_built_one(monkeypatch):
+    """A __new__ hack would skip __init__ and can silently lose attributes."""
+    src = inspect.getsource(cl.X64DbgClient._answers)
+    assert "__new__" not in src
+    # end to end: a server that answers on 9095 must be selected
+    monkeypatch.setattr(cl.X64DbgClient, "is_up",
+                        lambda self: self.base.endswith(":9095"))
+    cl.X64DbgClient.forget_port()
+    assert cl.X64DbgClient.resolve_port("real.host") == 9095
 
 
 def test_client_accepts_a_host_and_discovers_the_port(monkeypatch):
