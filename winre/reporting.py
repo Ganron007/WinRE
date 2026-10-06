@@ -21,6 +21,8 @@ import re
 import time
 from pathlib import Path
 
+from .evidence import sha_of
+
 URL_RE = re.compile(
     r"(?:(?:https?|ftp)://|www\.)[^\s\"'<>`]{4,200}", re.IGNORECASE)
 IP_RE = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b"
@@ -175,7 +177,7 @@ def _cite(raw_path: str, note: str) -> str:
 
 def build_report_v3(pack_root: Path) -> dict:
     """REPORT-TECHNICAL-v3.md — RevAI v3 layout, deterministic sections."""
-    sha = pack_root.name
+    sha = sha_of(pack_root)
     intake = _load(pack_root / "intake" / "intake.json") or {}
     quick = _load(pack_root / "quick" / "quick.json") or {}
     ev = quick.get("evidence") or {}
@@ -498,7 +500,7 @@ def _behavior_context(ev: dict) -> dict:
 
 def build_audit_report(pack_root: Path) -> dict:
     audit = _load(pack_root / "audit.json") or {}
-    L = [f"# WinRE Audit Report — {pack_root.name[:16]}…", "",
+    L = [f"# WinRE Audit Report — {sha_of(pack_root)[:16]}…", "",
          f"Generated: {_utc()}", "",
          f"- truly_green: **{audit.get('truly_green')}**",
          f"- all_green: {audit.get('all_green')} | quality_green: "
@@ -523,7 +525,7 @@ def build_audit_report(pack_root: Path) -> dict:
 
 
 def build_evidence_bundle(pack_root: Path) -> dict:
-    L = [f"# Evidence Bundle — {pack_root.name[:16]}…", "",
+    L = [f"# Evidence Bundle — {sha_of(pack_root)[:16]}…", "",
          "Every evidence item with its provenance (raw file + producer stage).", ""]
     index = []
     for stage, files in (
@@ -608,7 +610,7 @@ def publish_case(pack_root: Path, dest_root: Path | None = None,
     Only report-level artifacts (no binaries, no raw pcaps/dumps).
     """
     pack_root = Path(pack_root)
-    sha = pack_root.name
+    sha = sha_of(pack_root)
     mode = mode or _mode_of_pack(pack_root)
     if mode not in ("static", "agentic"):
         mode = "agentic"

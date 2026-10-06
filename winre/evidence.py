@@ -135,6 +135,27 @@ def verdict_fields(verdict) -> tuple[dict | None, str | None, bool]:
     return None, None, True
 
 
+MODES = ("static", "agentic")
+
+
+def sha_of(pack_root) -> str:
+    """The sample sha for a pack root, derived SAFELY.
+
+    A pack root is `<logs>/<sha>` or `<logs>/<sha>/<mode>`, so `pack_root.name`
+    is the MODE ("static"/"agentic") in the second case - not the hash. Code
+    that assumed otherwise wrote "static" into `intake.json -> sha256` and into
+    every report header (code audit 2026-10-06), which silently poisons any
+    third-party ingestion keyed on SHA256.
+
+    Prefer `EvidencePack.sha` when you hold the pack; use this when all you have
+    is a path.
+    """
+    root = Path(pack_root)
+    if root.name in MODES and root.parent != root:
+        return root.parent.name
+    return root.name
+
+
 def pack_verdict(section_root: Path) -> dict:
     """Read a section's verdict from deep.json (top level, then agent block).
 

@@ -65,7 +65,10 @@ SESSIONS_DIR = LOGS_DIR.parent / "sessions"
 def _intake(sample: Path, pack: EvidencePack) -> dict:
     t0 = time.time()
     import hashlib
-    sha = pack.root.name
+    # pack.sha, NOT pack.root.name: a mode-scoped pack root ends in the
+    # MODE, so intake.json was recording "sha256": "static" (code audit
+    # 2026-10-06).
+    sha = pack.sha
     meta = {
         "sha256": sha,
         "file": str(sample),
@@ -418,12 +421,12 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
         if mode == "static":
             from .static_deep import run_static_deep_dive
             agent_result = run_static_deep_dive(
-                sample.name, pack.root.name,
+                sample.name, pack.sha,
                 mode="local", quick=quick)
         else:
             from .agentic import run_langgraph_deep_dive, TOOL_NAMES
             agent_result = run_langgraph_deep_dive(
-                sample.name, pack.root.name,
+                sample.name, pack.sha,
                 max_steps=14, dry=dry_llm,
                 dynamic=enable_agentic_dbg,
                 mode="local", quick=quick)

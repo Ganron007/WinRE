@@ -360,11 +360,10 @@ def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict) -> dict:
     # the failure/active accounting so VT errors can't fail the quick gate.
     try:
         from . import vt as _vt
-        _sha = pack.root.name
-        if not (len(_sha) == 64
-                and all(c in "0123456789abcdef" for c in _sha.lower())):
-            _sha = pack.root.parent.name   # section pack: logs/<sha>/<mode>
-        vres = _vt.lookup(_sha)
+        # shared helper instead of the local hex-check workaround that
+        # only this one call site had (code audit 2026-10-06)
+        from .evidence import sha_of
+        vres = _vt.lookup(sha_of(pack.root))
         evidence["vt"] = vres
         ti = evidence.get("threat_intel")
         if isinstance(ti, dict):
