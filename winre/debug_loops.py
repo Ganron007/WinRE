@@ -1448,8 +1448,15 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
     dump_source: str | None = None
     heap_info: dict | None = None
     dr: dict = {}
+    # Hoisted: the IAT-rebuild escalation below appends to it on the in-module
+    # path, and both branches report it. It used to be initialised inside the
+    # `if not oep_in_module:` branch only, so the ORDINARY module-dump path
+    # - the one that actually succeeds - raised
+    #   UnboundLocalError: imp_modes_tried
+    # the moment x32dbg really loaded a PE32 sample (2026-10-06, P1-F1
+    # verification). Latent until then: every 32-bit run died at the OEP.
+    imp_modes_tried: list[int] = []
     if not oep_in_module:
-        imp_modes_tried: list[int] = []
         # heap-OEP: dump the committed region containing the OEP
         heap_info = _dump_heap_region(xc, oep, dump_path)
         evidence.append({"label": "heap_dump",
