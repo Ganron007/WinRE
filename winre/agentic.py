@@ -991,10 +991,29 @@ _PACKER_WORDS = (
 
 # Packing threshold in BITS PER BYTE, on the 0-8 Shannon scale that pefile,
 # DIE and X-ray all use. Malcat reports entropy x 32 in a 0-255 integer, so
-# this is compared AFTER conversion (see _packer_signal). ~7.2 b/B and above is
-# where unpacking stops being optional: below it there are enough runs of
-# plaintext that static tooling still returns signal.
+# this is compared AFTER conversion (see _packer_signal).
+#
+# Two thresholds, because they measure different things:
+#   _PACKED_ENTROPY_BPB      - the FILE average. A file that is uniformly
+#                              high-entropy (solid shellcode, whole-file
+#                              encryption) trips this.
+#   _PACKED_SECTION_BPB      - a single SECTION. A 3 MB packed .rsrc inside an
+#                              otherwise ordinary file drags the average down
+#                              to look unpacked, which is exactly how b108
+#                              (real WannaCry, .rsrc = 226 = 7.06 b/B, file
+#                              average 224 = 7.00) slipped past a 7.2
+#                              file-level threshold and lost the only signal
+#                              that static evidence on it is unreliable.
+#
+# Both are set against the batch's measured unpacked maxima, not guessed:
+#   b102 (benign) max section 2.31 b/B
+#   b107 (benign) max section 4.13 b/B
+#   b108 (packed) max section 7.06 b/B
 _PACKED_ENTROPY_BPB = 7.2
+_PACKED_SECTION_BPB = 6.5
+
+# Malcat's entropy field is bits-per-byte x 32
+_MALCAT_ENTROPY_SCALE = 32.0
 
 
 def _is_managed_quick(quick: dict | None) -> bool:
@@ -1014,6 +1033,25 @@ def _is_managed_quick(quick: dict | None) -> bool:
     dc = ev.get("diec") or {}
     det = " ".join(str(d) for d in (dc.get("detects") or [])).lower()
     return ".net" in det or "dotnet" in det or "msil" in det
+
+
+def _max_section_bpb(f: dict) -> tuple[str, float] | None:
+    """The highest-entropy PE section, converted to bits-per-byte.
+
+    Malcat reports it as bits-per-byte x 32 in a 0-255 integer, so the raw
+    value cannot be compared to a Shannon-scale threshold.
+    """
+    best: tuple[str, float] | None = None
+    for s in (f.get("layout") or []):
+        if not isinstance(s, dict):
+            continue
+        e = s.get("entropy")
+        if not isinstance(e, (int, float)):
+            continue
+        b = e / _MALCAT_ENTROPY_SCALE
+        if best is None or b > best[1]:
+            best = (str(s.get("name") or "?"), b)
+    return best
 
 
 def _packer_signal(quick: dict | None) -> dict | None:
@@ -1044,10 +1082,17 @@ def _packer_signal(quick: dict | None) -> dict | None:
     mc = ev.get("malcat") or {}
     f = mc.get("file") or {}
     ent = f.get("entropy")
-    # Malcat's entropy field is bits-per-byte x 32 (see docstring)
-    bpb = ent / 32.0 if isinstance(ent, (int, float)) else None
+    # Malcat's entropy field is bits-per-byte x 32 (see module constants)
+    bpb = ent / _MALCAT_ENTROPY_SCALE if isinstance(ent, (int, float)) else None
     if bpb is not None and bpb >= _PACKED_ENTROPY_BPB:
         sig["entropy"] = round(bpb, 3)
+    # a single packed section outranks a diluted file average: it is the
+    # section, not the file, whose bytes we should not trust
+    sec = _max_section_bpb(f)
+    if sec is not None:
+        name, sb = sec
+        if sb >= _PACKED_SECTION_BPB:
+            sig["packed_section"] = {"name": name, "bits_per_byte": round(sb, 3)}
     an = mc.get("anomalies") or []
     if isinstance(an, list):
         ahits = [str(a.get("name")) for a in an if isinstance(a, dict)
