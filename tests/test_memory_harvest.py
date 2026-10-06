@@ -112,15 +112,19 @@ def test_two_dump_passes_are_scheduled():
 
 
 def test_the_early_pass_is_short_enough_to_survive_a_gate_stop():
-    """The behaviour gate stopped b108's window at 20.8s and b104's at 2.8s."""
+    """The behaviour gate stopped b108's window at 20.8s and b104's at 2.8s.
+    b103 exits 1.8s after spawn, so the early pass must also come in under
+    that - a 3s early dump missed it completely."""
     j = _job()
-    assert "$delayEarly = [Math]::Max(2, [Math]::Floor($MaxSeconds * 0.02))" in j
+    assert "$delayEarly = 1" in j
+    assert "* 0.02" not in j
 
 
 def test_the_late_pass_is_still_the_70_percent_of_cap():
     j = _job()
     assert "$delayLate = [Math]::Max($delayEarly + 5, " \
            "[Math]::Floor($MaxSeconds * 0.7))" in j
+    assert "0.7" in j
 
 
 def test_each_pass_logs_its_own_outcome():

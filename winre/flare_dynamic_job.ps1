@@ -268,7 +268,12 @@ try {
   $pdProcs = @()
   if ($samplePid -and (Test-Path $ProcdumpExe)) {
     New-Item -ItemType Directory -Force -Path $memDir | Out-Null
-    $delayEarly = [Math]::Max(2, [Math]::Floor($MaxSeconds * 0.02))
+# 1s, not "2% of the cap". b103 exited 1.8s after spawn and a 3s early
+    # dump missed it completely (0 dumps for a sample that had just run 878
+    # API calls). The pid is observed within ~500ms of spawn, so a 1s delay
+    # still catches a process that lives over a second, and the late pass
+    # remains for everything that does.
+    $delayEarly = 1
     $delayLate = [Math]::Max($delayEarly + 5, [Math]::Floor($MaxSeconds * 0.7))
     foreach ($tag in @("early", "late")) {
       $delay = if ($tag -eq "early") { $delayEarly } else { $delayLate }
