@@ -40,6 +40,7 @@ from .evidence import (EvidencePack, stage_result, verdict_fields
                        as _verdict_fields, write_execution_plan)
 from . import run_nonce
 from .run_nonce import new_run_id
+from .mcp.x64dbg_client import X64DbgClient
 
 REPO = Path(__file__).resolve().parents[1]
 LOCAL_LOGS = Path(os.environ.get("WINRE_PIPELINE_LOGS", str(REPO / "logs")))
