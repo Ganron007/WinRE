@@ -273,7 +273,11 @@ try {
     # API calls). The pid is observed within ~500ms of spawn, so a 1s delay
     # still catches a process that lives over a second, and the late pass
     # remains for everything that does.
-    $delayEarly = 1
+# 0: as soon as the pid is observed. b103's lifetime VARIED between runs
+    # (1.8s then 1.3s) and it beat a 1s dump both times. A fixed delay cannot
+    # win that race; the only move that can is to fire the moment we have a
+    # pid, which the wait loop gives us within ~500ms of spawn.
+    $delayEarly = 0
     $delayLate = [Math]::Max($delayEarly + 5, [Math]::Floor($MaxSeconds * 0.7))
     foreach ($tag in @("early", "late")) {
       $delay = if ($tag -eq "early") { $delayEarly } else { $delayLate }

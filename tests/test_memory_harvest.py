@@ -116,7 +116,7 @@ def test_the_early_pass_is_short_enough_to_survive_a_gate_stop():
     b103 exits 1.8s after spawn, so the early pass must also come in under
     that - a 3s early dump missed it completely."""
     j = _job()
-    assert "$delayEarly = 1" in j
+    assert "$delayEarly = 0" in j
     assert "* 0.02" not in j
 
 
