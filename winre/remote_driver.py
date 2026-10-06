@@ -418,6 +418,15 @@ sample = sys.argv[2]
 max_seconds = int(sys.argv[3])
 pesieve = "--pesieve" in sys.argv[4:]
 adaptive = "--adaptive" in sys.argv[4:]
+# behaviour gate passthrough (RevAI handoff item 9): the window ends
+# early once the sample does something notable and settles
+stop_on = "network,file"
+stop_on_settle = 20
+for _a in sys.argv[4:]:
+    if _a.startswith("--stop-on-settle="):
+        stop_on_settle = int(_a.split("=", 1)[1])
+    elif _a.startswith("--stop-on="):
+        stop_on = _a.split("=", 1)[1]
 idle_stop = 10
 section = "agentic"
 run_id = None
@@ -458,6 +467,8 @@ if pesieve:
     cmd.append("--pesieve")
 if adaptive:
     cmd += ["--adaptive", "--idle-stop-seconds", str(idle_stop)]
+if stop_on:
+    cmd += ["--stop-on", stop_on, "--stop-on-settle", str(stop_on_settle)]
 print(f"run_id={run_id or 'none'}")
 try:
     r = subprocess.run(cmd, capture_output=True, text=True, env=env,
@@ -510,7 +521,9 @@ def clock_skew_s(cfg: dict | None = None, *, cached: dict | None = None,
 def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                    max_seconds: int, enable_pesieve: bool,
                    adaptive: bool = False,
-                   idle_stop_seconds: int = 10,
+                   idle_stop_seconds: int = 0,
+                   stop_on: str = "network,file",
+                   stop_on_settle: int = 20,
                    clock: dict | None = None) -> dict:
     """SSH: run orchestrator --mode local on the VM via helper, scp pack back."""
     t0 = time.time()
@@ -590,6 +603,8 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
            f'{" --pesieve" if enable_pesieve else ""}'
            f'{" --adaptive" if adaptive else ""}'
            f' --idle-stop={int(idle_stop_seconds)}'
+           f'{"" if not stop_on else " --stop-on=" + str(stop_on)}'
+           f'{"" if not stop_on else " --stop-on-settle=" + str(int(stop_on_settle))}'
            f' --section={pack.mode or "agentic"}'
            f' --run-id={run_id} 2>&1"')
     r = ssh_run(cfg, cmd, timeout=int(max_seconds) + 700)
@@ -1085,13 +1100,15 @@ def _pull_unpack_artifact(cfg: dict, pack, prepass: dict | None) -> dict | None:
         return {"vm": vm_path, "error": f"pull: {str(e)[:150]}"}
 
 
-def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
+def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
                         enable_pesieve: bool = False, enable_dynamic: bool = False,
                         dry_llm: bool = False,
                         enable_agentic_dbg: bool = False,
                         mode: str = "agentic",
                         adaptive: bool = False,
-                        idle_stop_seconds: int = 10) -> dict:
+                        idle_stop_seconds: int = 0,
+                        stop_on: str = "network,file",
+                        stop_on_settle: int = 20) -> dict:
     """Control-plane pipeline driver: SSH/HTTP to the VM + local LLM + local audit.
 
     DEFAULT = static-only (quick + deep + yara + report + audit). Dynamic is
@@ -1188,6 +1205,8 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 45,
                                             max_seconds, enable_pesieve,
                                             adaptive=adaptive,
                                             idle_stop_seconds=idle_stop_seconds,
+                                            stop_on=stop_on,
+                                            stop_on_settle=stop_on_settle,
                                             clock=clock)
         # DFIR-Nexus ingest pack: dynamic logs + static context in one 7z
         try:
@@ -1312,7 +1331,9 @@ def main() -> int:
     import argparse
     ap = argparse.ArgumentParser(description="WinRE control-plane driver")
     ap.add_argument("sample", type=Path)
-    ap.add_argument("--max-seconds", type=int, default=45)
+# RevAI handoff item 9: 45s missed the DGA that 150s caught, so the
+# cap is 150s and the window ends early via the behaviour gate.
+    ap.add_argument("--max-seconds", type=int, default=150)
     ap.add_argument("--pesieve", action="store_true")
     ap.add_argument("--dynamic", action="store_true",
                     help="enable segregated dynamic phase (opt-in)")
@@ -1320,9 +1341,20 @@ def main() -> int:
                     help="give the deep-dive agent bounded x64dbg tools "
                          "(engine langgraph+dbg; no detonation)")
     ap.add_argument("--dry-llm", action="store_true")
+    ap.add_argument("--stop-on", default="network,file",
+                    help="behaviour gate (RevAI handoff item 9): end the "
+                         "window once the sample does something notable "
+                         "and settles. Empty disables.")
+    ap.add_argument("--stop-on-settle", type=int, default=20,
+                    help="seconds to keep tracing after the gate fires")
     ap.add_argument("--adaptive", action="store_true",
-                    help="adaptive detonation window (cap = --max-seconds)")
-    ap.add_argument("--idle-stop-seconds", type=int, default=10)
+                    help="legacy idle-stop window (cap = --max-seconds). "
+                         "The behaviour gate is the default mechanism.")
+    ap.add_argument("--idle-stop-seconds", type=int, default=0,
+                    help="OFF by default: a sleeping sample looks idle, so this "
+                         "truncates the window before it wakes up. The "
+                         "behaviour gate (--stop-on) is the mechanism that "
+                         "solves the fixed-window problem (RevAI item 9).")
     ap.add_argument("--mode", choices=["agentic", "static"], default="agentic",
                     help="deep-dive engine: agentic = LangGraph ReAct (RevAI "
                          "agentic); static = deterministic fixed-checklist, "
@@ -1344,7 +1376,9 @@ def main() -> int:
                               enable_agentic_dbg=enable_agentic_dbg,
                               mode=args.mode,
                               adaptive=getattr(args, "adaptive", False),
-                              idle_stop_seconds=getattr(args, "idle_stop_seconds", 10))
+                              idle_stop_seconds=getattr(args, "idle_stop_seconds", 0),
+                               stop_on=getattr(args, "stop_on", "network,file"),
+                               stop_on_settle=getattr(args, "stop_on_settle", 20))
     if res.get("aborted"):
         # fail fast BEFORE anything executed (execution plan over budget)
         return 2

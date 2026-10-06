@@ -13,7 +13,14 @@ param(
   [string]$ProcdumpExe = "C:\Tools\sysinternals\Procdump64.exe",
   [switch]$EnablePeSieve,
   [switch]$Adaptive,
-  [int]$IdleStopSeconds = 10,
+  [int]$IdleStopSeconds = 0,
+  # Behaviour-gated window (RevAI handoff item 9). The 2026-09-11 measurement:
+  # a 45 s window gave 497 Frida events and no DGA, a 150 s window gave 694,692
+  # events and live HTTP POST C2 - so the window followed a fixed guess and the
+  # interesting part of a run was a coin flip. The gate keeps tracing until the
+  # sample does something notable, then lets it settle.
+  [string]$StopOn = "network,file",
+  [int]$StopOnSettle = 20,
   [string]$Apis = "CreateFileW,WriteFile,ReadFile,DeleteFileW,RegOpenKeyExW,RegSetValueExW,VirtualAlloc,VirtualProtect,WriteProcessMemory,CreateRemoteThread,WinHttpOpen,InternetOpenW,connect,send,recv,LoadLibraryW,GetProcAddress,CreateProcessW"
 )
 
@@ -35,6 +42,16 @@ function Log {
   $line = "[{0}] {1}" -f (Get-Date -Format "o"), $Message
   Add-Content -Path $LogFile -Value $line -Encoding UTF8
   Write-Host $line
+}
+
+# -Adaptive used to mean "stop after IdleStopSeconds of quiet" and defaulted
+# that to 10s. Keep that meaning for anyone who passes it, but do NOT make it
+# the default: a sleeping sample looks idle, so idle-stop cuts the window right
+# before the sample wakes up and beacons (RevAI handoff item 9). The default
+# path uses the behaviour gate instead.
+if ($Adaptive -and $IdleStopSeconds -le 0) {
+  $IdleStopSeconds = 10
+  Log "note: -Adaptive without -IdleStopSeconds -> using the historical 10s idle cutoff"
 }
 
 function Kill-Image {
@@ -162,6 +179,13 @@ try {
   if ($Adaptive) {
     # adaptive window: max-seconds is the CAP, idle-stop ends a quiet run
     $fridaArgs += @("--idle-stop", "$IdleStopSeconds")
+  }
+  if ($StopOn) {
+    # behaviour gate (RevAI item 9). Independent of -Adaptive: the gate is the
+    # mechanism that actually solves "the window is a guess". Idle-stop is NOT
+    # enabled by default because a sleeping sample looks idle and would be cut
+    # off right before it wakes up and beacons.
+    $fridaArgs += @("--stop-on", "$StopOn", "--stop-on-settle", "$StopOnSettle")
   }
   $fridaStart = Get-Date
   $fridaProc = Start-Process -FilePath $Python -ArgumentList $fridaArgs -PassThru -NoNewWindow `
@@ -338,6 +362,7 @@ Log ("Frida exit={0}" -f $fridaExit)
 # writes frida_trace.jsonl.run.json; wall time is the fallback)
 $windowEffective = $null
 $windowReason = "unknown"
+$windowGate = @{ }
 if ($fridaStart) {
   $windowEffective = [Math]::Round(((Get-Date) - $fridaStart).TotalSeconds, 1)
 }
@@ -347,9 +372,21 @@ if (Test-Path $frRun) {
     $rj = Get-Content $frRun -Raw | ConvertFrom-Json
     if ($rj.stop_reason) { $windowReason = [string]$rj.stop_reason }
     if ($rj.elapsed_s) { $windowEffective = [double]$rj.elapsed_s }
+    # the gate verdict travels with the pack: a reader can tell "the sample
+    # never did anything interesting" from "we stopped right after it did"
+    if ($null -ne $rj.gate_fired) {
+      $windowGate = @{
+        fired       = [bool]$rj.gate_fired
+        kind        = [string]$rj.gate_kind
+        api         = [string]$rj.gate_api
+        at_s        = $rj.gate_at_s
+        settle_s    = $rj.gate_settle_s
+        spec        = [string]$StopOn
+      }
+    }
   } catch { $windowReason = "unparsable" }
 }
-Log ("window effective={0}s reason={1} adaptive={2}" -f $windowEffective, $windowReason, [bool]$Adaptive)
+Log ("window effective={0}s reason={1} adaptive={2} gate={3}/{4}" -f $windowEffective, $windowReason, [bool]$Adaptive, [string]$StopOn, $(if ($windowGate.fired) { [string]$windowGate.kind } else { "not-fired" }))
 
 # The delayed in-run procdump (scheduled at capture time) should be done or
 # nearly done - bounded wait, then report how many dumps landed.
@@ -453,8 +490,12 @@ if (Test-Path $trace) {
     requested_s = $MaxSeconds
     effective_s = $windowEffective
     adaptive = [bool]$Adaptive
-    idle_stop_s = if ($Adaptive) { $IdleStopSeconds } else { $null }
+    idle_stop_s = if ($Adaptive -and $IdleStopSeconds -gt 0) { $IdleStopSeconds } else { $null }
     stop_reason = $windowReason
+    # RevAI handoff item 9: why this window and not a shorter one
+    gate_spec = if ($StopOn) { [string]$StopOn } else { $null }
+    gate_settle_s = if ($StopOn) { $StopOnSettle } else { $null }
+    gate = $windowGate
   }
   frida_exit = $fridaExit
   fakenet_started = [bool]$fnProc

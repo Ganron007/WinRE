@@ -252,11 +252,52 @@ Three WinRE outputs are part of the contract:
   tooling). `deep.json → agent.unpack_prepass.artifact` records
   `source` (`pesieve_imp` | `dumpex_savedata` | `dumpmemory_heap`),
   `imports`, `dump_parses`, `rebuild_hint`, `comparison_conclusive`.
-- **Detonation window:** `dynamic/META.json → window
-  {requested_s, effective_s, adaptive, idle_stop_s, stop_reason}` (also in
-  `META.job.json`; the raw trace-side record is
-  `frida_trace.jsonl.run.json`). Cite it when reporting dynamic evidence so
-  a short effective window is not over-read (delayed C2 may fall outside it).
+- **Detonation window (behaviour-gated since 2026-10-06):**
+  `dynamic/META.json → window {requested_s, effective_s, adaptive,
+  idle_stop_s, stop_reason, gate_spec, gate_settle_s, gate {fired, kind, api,
+  at_s}}` (also in `META.job.json`; the raw trace-side record is
+  `frida_trace.jsonl.run.json`, and the verdict is mirrored at
+  `META.json → window_gate` / `window_stop_reason`).
+
+  **The window is no longer a fixed guess.** RevAI's 2026-09-11 measurement
+  found a 45 s window produced 497 Frida events and no DGA, while 150 s produced
+  694,692 events and live HTTP POST C2 — so the interesting part of a run was a
+  coin flip on the sample's sleep schedule. Now:
+
+  - `--max-seconds` is the **cap** and defaults to **150**.
+  - `--stop-on` is the **mechanism** (default `network,file`): the run keeps
+    tracing until the sample does something notable — first outbound
+    connection, first file write, or any `api:<ExportName>` you name — then
+    keeps tracing `--stop-on-settle` seconds (default 20) so the follow-on
+    traffic is captured too, and stops. `stop_reason` is then `gate:network`,
+    `gate:file` or `gate:api:<Name>`, which is how you tell "the sample did
+    nothing interesting" from "we stopped right after it did".
+  - `--idle-stop-seconds` (idle cutoff) is **off by default** and is *not* the
+    mechanism: a sleeping sample looks idle, so idle-stop truncates the window
+    right before it wakes up and beacons.
+
+  Cite `window` / `window_gate` when reporting dynamic evidence.
+- **Dump schema (`x64dbg_dump`), for static re-analysis of a dump:**
+  both dump paths now emit the same block — `dump_path`, `dump_kind`
+  (`module` | `heap`), `is_pe` / `pe_valid` / `pe_valid_known`,
+  `importable_by_pefile`, `imports_count`, `machine`, `dump_parse`,
+  `oep`, `oep_target`, `ran_to_oep`, `payload_unpacked`, `imports_rebuilt`,
+  `imports_rebuild_applicable`, `imports_rebuild_reason`, `rebuild_hint`, and
+  sometimes `consumer_note`. Two rules a consumer must honour:
+
+  1. **`pe_valid: null` means unknown, not bad.** The PE probe could not run
+     (no `pefile` on the control plane and no reachable VM); `pe_valid_known`
+     is `false` and `pe_valid_unknown_reason` says why. Do not read `null` as
+     `false`.
+  2. **`dump_kind: "heap"` is not a PE.** It is a raw committed region (the OEP
+     was outside the module range), it has no `.idata`, and no import rebuild
+     can turn it into one — do not hand it to `pefile`. `dump_kind: "module"`
+     with `ran_to_oep: false` is the image **as loaded**: the `--dynamic` path
+     never runs the sample, so that is the *packed stub*, not the unpacked
+     payload, and a small import count there is the packer rather than damage.
+     The rebuilt, unpacked image comes from the `--agentic-dbg` path, which
+     escalates `pe-sieve /imp` (modes 1/3/4/5) until the dump parses with
+     imports — measured 291 imports vs 0 for the plain `savedata` dump.
 - **Case pack (DFIR-Nexus ingest):** `case-<sha16>-<mode>.7z` at the **pack
   root** (`logs/<sha>/<mode>/`), *not* inside a stage directory — it is a
   derived bundle, not a stage artifact, so do not read it as one. It contains

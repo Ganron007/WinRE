@@ -22,6 +22,64 @@ import time
 from pathlib import Path
 
 
+# --- behaviour gate (RevAI handoff item 9) ---------------------------------
+# The 2026-09-11 measurement: a 45 s window produced 497 Frida events and no
+# DGA; a 150 s window produced 694,692 events and live HTTP POST C2. A fixed
+# guess therefore decides, by coin flip, whether a run sees the behaviour that
+# made the sample interesting. The gate makes the window follow the sample:
+# keep tracing until it does something notable, then let it settle.
+NETWORK_GATES = frozenset({
+    "connect", "connectex", "wsaconnect", "wsasend", "wsasendto",
+    "send", "sendto", "recv", "recvfrom",
+    "internetopena", "internetopenaurl", "internetopenw", "internetopenurla",
+    "internetconnecta", "internetconnectw", "internetreadfile",
+    "winhttpopen", "winhttpconnect", "winhttpsendrequest",
+    "winhttpreceiveresponse", "winhttpquerydataavailable",
+    "httpopenrequesta", "httpopenrequestw", "httpsendrequesta",
+    "httpsendrequestw", "httpqueryinfoa",
+    "urldownloadtofilea", "urldownloadtofilew",
+    "getaddrinfo", "gethostbynamea", "gethostbynamew",
+})
+FILE_GATES = frozenset({
+    "createfilew", "createfilea", "ntcreatefile", "zwcreatefile",
+    "writefile", "writefileex", "ntwritefile", "zwwritefile",
+    "movefilew", "movefilea", "movefileexw", "copyfilew", "copyfilea",
+    "deletefilew", "deletefilea", "ntdeletefile", "setfileattributesw",
+    "regcreatekeyw", "regsetvaluew", "regcreatekeyexw",
+})
+
+
+def parse_stop_on(spec):
+    """'network,file,api:WinHttpOpen' -> ({'network','file'}, {'WINHTTPOPEN'})."""
+    kinds, apis = set(), set()
+    for raw in (spec or "").split(","):
+        t = raw.strip().lower()
+        if not t:
+            continue
+        if t in ("network", "net", "socket"):
+            kinds.add("network")
+        elif t in ("file", "files", "drop", "dropper"):
+            kinds.add("file")
+        elif t.startswith("api:"):
+            apis.add(t[4:].strip().upper())
+    return kinds, apis
+
+
+def gate_for(api, kinds, apis):
+    """Which gate (if any) this API satisfies. Pure, so it is unit-testable."""
+    if not api:
+        return None
+    name = str(api)
+    if name.upper() in apis:
+        return "api:" + name
+    low = name.lower()
+    if "network" in kinds and low in NETWORK_GATES:
+        return "network"
+    if "file" in kinds and low in FILE_GATES:
+        return "file"
+    return None
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Frida API tracer for Flare-VM (Frida 17+)")
     ap.add_argument("--target", help="path to PE binary to spawn")
@@ -40,7 +98,24 @@ def main() -> None:
         type=int,
         default=0,
         help="adaptive window: stop early after N seconds without new events "
-             "(0 = off; max-seconds stays the hard cap)",
+             "(0 = off; max-seconds stays the hard cap). OFF by default - see "
+             "--stop-on: idle counts a sleeping sample as idle, so it cuts a "
+             "sample off right before it wakes up and beacons.",
+    )
+    ap.add_argument(
+        "--stop-on",
+        default="network,file",
+        help="behaviour gate: stop the window once the sample does something "
+             "interesting and then goes quiet again. Comma-separated: "
+             "network, file, or api:<ExportName>. Empty string disables.",
+    )
+    ap.add_argument(
+        "--stop-on-settle",
+        type=int,
+        default=20,
+        help="after the gate fires, keep tracing this many seconds so the "
+             "follow-on activity is captured (the first outbound connect is "
+             "rarely the interesting packet on its own), then stop.",
     )
     args = ap.parse_args()
 
@@ -265,7 +340,14 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
     out_fh = open(out_path, "w", encoding="utf-8")
     write_lock = threading.Lock()
     closed = {"done": False}
-    last = {"t": time.time()}
+    # shared, mutable time origin: the message handler can fire as soon as the
+    # script loads, before the run loop assigns its own t_start
+    t0 = {"t": time.time()}
+    last = {"t": t0["t"]}
+    gate_kinds, gate_apis = parse_stop_on(getattr(args, "stop_on", ""))
+    gate_settle = max(0, int(getattr(args, "stop_on_settle", 20) or 0))
+    gate = {"fired": False, "at_s": None, "kind": None, "api": None,
+            "stop_at": None}
 
     def on_message(msg, data):
         if closed["done"]:
@@ -278,6 +360,25 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
                     out_fh.write(json.dumps(msg["payload"]) + "\n")
                     out_fh.flush()
                 last["t"] = time.time()
+                # behaviour gate: first notable call arms a settle window, so
+                # the follow-on traffic (the actual C2 POST, the dropped file's
+                # contents) is still captured before we stop
+                if not gate["fired"] and gate_kinds:
+                    payload = msg.get("payload") or {}
+                    if isinstance(payload, dict) and payload.get("type") == "call":
+                        hit = gate_for(payload.get("api"), gate_kinds, gate_apis)
+                        if hit:
+                            now = time.time()
+                            gate.update({
+                                "fired": True, "kind": hit,
+                                "api": payload.get("api"),
+                                "at_s": round(now - t0["t"], 1),
+                                "stop_at": now + gate_settle,
+                            })
+                            print(f"gate fired: {hit} "
+                                  f"({payload.get('api')}) at "
+                                  f"{gate['at_s']}s; settling {gate_settle}s",
+                                  file=sys.stderr)
             elif msg["type"] == "error":
                 sys.stderr.write(f"[frida error] {msg.get('stack', msg)}\n")
         except Exception:
@@ -315,7 +416,7 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
         device.resume(spawned_pid)
 
     print(f"tracing for up to {args.max_seconds}s (max {args.max_calls} calls)", file=sys.stderr)
-    t_start = time.time()
+    t_start = t0["t"]
     deadline = t_start + args.max_seconds
     idle_stop = int(getattr(args, "idle_stop", 0) or 0)
     stop_reason = "cap"
@@ -330,6 +431,13 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
             except Exception:
                 stop_reason = "detached"
                 break
+            # gate + settle wins over the cap being reached: the sample did
+            # something notable and then went quiet
+            if gate["fired"] and gate["stop_at"] and time.time() >= gate["stop_at"]:
+                stop_reason = "gate:" + str(gate["kind"])
+                print(f"stopping after gate {gate['kind']} settled "
+                      f"{gate_settle}s", file=sys.stderr)
+                break
             if idle_stop and (time.time() - last["t"]) > idle_stop:
                 stop_reason = "idle"
                 print(f"idle-stop: no events for {idle_stop}s", file=sys.stderr)
@@ -342,7 +450,14 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
             json.dump({"stop_reason": stop_reason,
                        "elapsed_s": round(time.time() - t_start, 1),
                        "max_seconds": args.max_seconds,
-                       "idle_stop_s": idle_stop}, fh)
+                       "idle_stop_s": idle_stop,
+                       "gate": sorted(gate_kinds),
+                       "gate_apis": sorted(gate_apis),
+                       "gate_settle_s": gate_settle,
+                       "gate_fired": gate["fired"],
+                       "gate_kind": gate["kind"],
+                       "gate_api": gate["api"],
+                       "gate_at_s": gate["at_s"]}, fh)
     except Exception:
         pass
 

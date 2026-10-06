@@ -37,6 +37,83 @@ from typing import Any
 from winre.mcp import X64DbgClient
 
 
+def dump_schema_block(dump_path: str, *, dump_kind: str = "module",
+                      oep: Any = None, ran_to_oep: bool = False,
+                      rebuild_applicable: bool = False,
+                      rebuild_reason: str = "") -> dict:
+    """The import-facing dump schema a third-party loader needs (item 10).
+
+    Every dump record WinRE writes goes through here so `dump_kind`,
+    `pe_valid` and the rebuild verdict mean the SAME thing on both paths. The
+    fields are deliberately explicit about what the artifact IS, because the
+    two failure modes RevAI hit are both "the loader guessed wrong":
+
+    - a **module** dump of a still-packed image is a real PE whose import
+      table is simply whatever the packer declared. Few imports there is not
+      corruption.
+    - a **heap** dump (OEP outside the module range) is a raw committed
+      region. It is not a PE, has no `.idata`, and cannot be rebuilt into one;
+      handing it to pefile produces a confusing failure rather than an honest
+      "this is not a PE".
+
+    `rebuild_applicable` says whether an in-memory IAT rebuild could even mean
+    anything for this artifact - it needs a live, unpacked process, which only
+    the `--agentic-dbg` path has.
+    """
+    parse = _dump_parse_check(dump_path)
+    checked = bool(parse.get("checked"))
+    is_pe = bool(parse.get("parses")) if checked else None
+    block: dict = {
+        "dump_path": str(dump_path),
+        "dump_kind": dump_kind,
+        "is_pe": is_pe,
+        # None means "we could not check" (no pefile on the control plane and
+        # no reachable VM). Reporting that as False would tell a consumer the
+        # dump is corrupt when it may be perfect - the exact misread this
+        # schema exists to prevent.
+        "pe_valid": is_pe,
+        "pe_valid_known": checked,
+        "importable_by_pefile": is_pe,
+        "imports_count": parse.get("imports") if checked else None,
+        "machine": parse.get("machine") if checked else None,
+        "dump_parse": parse,
+        "oep": oep,
+        "oep_target": oep,
+        "ran_to_oep": bool(ran_to_oep),
+        "payload_unpacked": bool(ran_to_oep),
+        "imports_rebuilt": False,
+        "imports_rebuild_applicable": bool(rebuild_applicable),
+        "imports_rebuild_reason": rebuild_reason,
+    }
+    if not checked:
+        block["rebuild_hint"] = None
+        _why = parse.get("error") or "probe unavailable"
+        block["pe_valid_unknown_reason"] = (
+            "PE validity was NOT established (" + str(_why)[:200] +
+            "); treat pe_valid as unknown, not as a bad dump")
+    elif is_pe is False:
+        block["rebuild_hint"] = (
+            "dump does not parse as a PE"
+            + (" (a heap region is not a PE and has no import table to "
+               "rebuild - do not hand this file to pefile)"
+               if dump_kind == "heap" else
+               " - the module image could not be dumped cleanly; re-run with "
+               "--agentic-dbg for the pe-sieve /imp rebuild"))
+    elif dump_kind == "heap":
+        block["rebuild_hint"] = None
+    elif not ran_to_oep:
+        block["rebuild_hint"] = None
+        block["consumer_note"] = (
+            "module dump of the image as loaded - the sample was NOT run to its "
+            "OEP on this path, so this is the packed stub, not the unpacked "
+            "payload. A low import count here is the packer, not damage. For "
+            "the rebuilt unpacked image use the --agentic-dbg path, which "
+            "escalates pe-sieve /imp until the dump parses with imports.")
+    else:
+        block["rebuild_hint"] = None
+    return block
+
+
 def _win_basename(p: str) -> str:
     """basename for WINDOWS paths, on any driver OS.
 
@@ -429,19 +506,20 @@ def _dump_parse_check(dump_path: str) -> dict:
             p = pefile.PE(dump_path, fast_load=True)
             p.parse_data_directories(directories=[
                 pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
-            return {"parses": True,
+            return {"parses": True, "checked": True,
                     "imports": len(getattr(p, "DIRECTORY_ENTRY_IMPORT", []) or []),
                     "machine": hex(p.FILE_HEADER.Machine),
                     "where": "local"}
         except Exception as e:
-            return {"parses": False, "where": "local",
+            # we DID run pefile and it refused the file: a real negative
+            return {"parses": False, "checked": True, "where": "local",
                     "error": f"{type(e).__name__}: {e}"[:300]}
     # driver side (dump lives on the VM): same probe, compact error contract
     try:
         from winre.remote_driver import flare_cfg, ssh_ps
         cfg = flare_cfg()
         if not cfg.get("host"):
-            return {"parses": False, "where": "driver",
+            return {"parses": False, "checked": False, "where": "driver",
                     "error": "pefile not importable locally and no VM host "
                              "configured"}
         code = (
@@ -462,15 +540,16 @@ def _dump_parse_check(dump_path: str) -> dict:
         r = ssh_ps(cfg, ps, timeout=60)
         d = _last_json_line(r.stdout or "")
         if d is None:
-            return {"parses": False, "where": "vm",
+            return {"parses": False, "checked": False, "where": "vm",
                     "error": _short_err(r.stderr or r.stdout)}
         if d.get("ok"):
-            return {"parses": True, "imports": d.get("imports"),
+            return {"parses": True, "checked": True, "imports": d.get("imports"),
                     "machine": d.get("machine"), "where": "vm"}
-        return {"parses": False, "where": "vm",
+        # the VM probe ran pefile and it refused the file: a real negative
+        return {"parses": False, "checked": True, "where": "vm",
                 "error": str(d.get("error"))[:300]}
     except Exception as e:
-        return {"parses": False, "where": "driver",
+        return {"parses": False, "checked": False, "where": "driver",
                 "error": f"{type(e).__name__}: {e}"[:300]}
 
 
@@ -1467,10 +1546,17 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
         _wait_for_file(str(dump_path), 15)
     dump_parse = _dump_parse_check(dump_path)
     rebuild_hint = None
-    if not dump_parse.get("parses") or not dump_parse.get("imports"):
+    # ONLY claim "imports missing" when pefile actually ran and said so. When
+    # the probe could not run (no pefile on the control plane, no reachable VM)
+    # the old code reported parses=False and told the consumer to go and rebuild
+    # a perfectly good dump (code audit 2026-10-06).
+    if dump_parse.get("checked") and (not dump_parse.get("parses")
+                                      or not dump_parse.get("imports")):
         rebuild_hint = ("imports missing/unparsable — Scylla-style rebuild "
                         "required (OllyDumpEx plugin on the VM console); "
                         "static re-analysis of this dump is degraded")
+    elif not dump_parse.get("checked"):
+        rebuild_hint = None
     evidence.append({"label": "dump_parse", **dump_parse,
                      "rebuild_hint": rebuild_hint})
 

@@ -26,6 +26,21 @@ logs/<sha256>/<static|agentic>/         ← one self-contained case per engine
 │                                     mode, fallback flag, MCP health
 ├── dynamic/                          (opt-in, segregated, runs LAST)
 │   ├── META.json / STAGE.json        run status + sample_pid + window + snapshot-gate evidence
+│   │                                 window = {requested_s, effective_s,
+│   │                                 stop_reason, gate_spec, gate_settle_s,
+│   │                                 gate{fired,kind,api,at_s}} — the
+│   │                                 behaviour-gated window (RevAI item 9):
+│   │                                 max-seconds is the cap (150s default) and
+│   │                                 the run ends EARLY once the sample does
+│   │                                 something notable and settles. stop_reason
+│   │                                 'gate:network' means it stopped on
+│   │                                 behaviour, not on the clock.
+│   │                                 x64dbg_dump carries the import-facing dump
+│   │                                 schema: dump_kind (module|heap),
+│   │                                 pe_valid (+pe_valid_known: null = NOT
+│   │                                 checked, never read as false), oep_target,
+│   │                                 ran_to_oep/payload_unpacked,
+│   │                                 imports_rebuild_applicable, rebuild_hint.
 │   │                                 + run_id (the per-run nonce the control plane
 │   │                                 issued: freshness is decided by this VALUE,
 │   │                                 never by comparing clocks; clock_skew_s

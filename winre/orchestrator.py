@@ -603,6 +603,19 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
         _terminal(False, f"client import: {e}", status="unavailable")
         return
     cli = X64DbgClient()
+    # the import-facing dump schema (RevAI handoff item 10). Imported here and
+    # defaulted, so a broken/partial debug_loops can never raise NameError in
+    # the middle of a detonation: the record degrades to "schema unavailable"
+    # instead of losing the dump evidence entirely.
+    try:
+        from winre.debug_loops import dump_schema_block as _dump_schema
+    except Exception as _schema_err:                      # pragma: no cover
+        def _dump_schema(path, *, dump_kind="module", oep=None,
+                         ran_to_oep=False, rebuild_applicable=False,
+                         rebuild_reason=""):
+            return {"dump_kind": dump_kind, "is_pe": None, "pe_valid": None,
+                    "dump_schema_error": f"{type(_schema_err).__name__}: "
+                                         f"{str(_schema_err)[:120]}"}
     if not cli.is_up():
         # on-demand heal: the boot launcher starts with -NoX64dbg, so a
         # dynamic run must launch the GUI/plugin itself instead of silently
@@ -702,10 +715,24 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
         meta["x64dbg_mcp"].update({"status": status})
         if status == "ok":
             meta["artifacts"]["x64dbg/dump/"] = str(dump_dir)
+            # RevAI handoff item 10: emit the schema a third-party loader
+            # reads (dump_kind / oep_target / PE validity). This path never
+            # runs the sample to its OEP, so the dump is the PACKED module -
+            # the shared block says exactly that, which stops a consumer from
+            # reading a small import table as a corrupt dump (or from
+            # concluding the payload was analysed when it was not).
+            schema = _dump_schema(
+                str(dump_path), dump_kind="module", oep=oep, ran_to_oep=False,
+                rebuild_applicable=False,
+                rebuild_reason="the --dynamic path loads the module but never "
+                               "runs it to its OEP, so there is no unpacked "
+                               "in-memory IAT to rebuild; use --agentic-dbg for "
+                               "the pe-sieve /imp rebuild")
             _terminal(True, None, dump_path=str(dump_path),
                       oep=oep, module=module, status="ok",
                       detect_ok=bool(detect.get("ok")),
-                      analyze_ok=bool(analyze.get("ok")))
+                      analyze_ok=bool(analyze.get("ok")),
+                      **schema)
         elif status == "not_applicable":
             # No OEP signal and nothing dumpable: the module is not packed /
             # not paused at an OEP. That is an APPLICABILITY answer, not a
@@ -759,7 +786,9 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
                        max_seconds: int, apis: str,
                        enable_pesieve: bool, meta: dict,
                        adaptive: bool = False,
-                       idle_stop_seconds: int = 10) -> dict:
+                       idle_stop_seconds: int = 0,
+                       stop_on: str = "network,file",
+                       stop_on_settle: int = 20) -> dict:
     """Run flare_dynamic_job.ps1 on the local host (no SSH)."""
     if not LOCAL_JOB_PS1.is_file():
         meta["error"] = f"job ps1 missing: {LOCAL_JOB_PS1}"
@@ -781,6 +810,9 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
         job_args.append("-EnablePeSieve")
     if adaptive:
         job_args += ["-Adaptive", "-IdleStopSeconds", str(int(idle_stop_seconds))]
+    if stop_on is not None:
+        job_args += ["-StopOn", str(stop_on),
+                      "-StopOnSettle", str(int(stop_on_settle))]
     print(f"[dynamic_run_v2] LOCAL powershell job -> {LOCAL_JOB_PS1}", flush=True)
     timed_out = False
     try:
@@ -870,10 +902,18 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
             # sample pid (captured while alive) -> post-mortem harvest +
             # ntdll integrity + DFIR-Nexus memory correlation
             meta["sample_pid"] = jm.get("sample_pid")
-            # detonation-window telemetry (adaptive mechanism; RevAI cites it)
+            # detonation-window telemetry (behaviour gate; RevAI item 9)
             meta["max_seconds"] = jm.get("max_seconds")
             if isinstance(jm.get("window"), dict):
-                meta["window"] = jm.get("window")
+                w = dict(jm["window"])
+                # surface the gate verdict at the top level too: a reader can
+                # then answer "did the sample do anything, or did we just run
+                # out the clock?" without digging into window.*
+                g = w.get("gate") if isinstance(w.get("gate"), dict) else {}
+                if g:
+                    meta["window_gate"] = g
+                meta["window_stop_reason"] = w.get("stop_reason")
+                meta["window"] = w
         except Exception:
             pass
 
@@ -901,7 +941,7 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
 def run_dynamic(
     sha: str,
     *,
-    max_seconds: int = 60,
+    max_seconds: int = 150,
     dry_run: bool = False,
     apis: str | None = None,
     deploy_tools: bool = True,
@@ -910,7 +950,9 @@ def run_dynamic(
     force: bool = False,
     sample_override: str | None = None,
     adaptive: bool = False,
-    idle_stop_seconds: int = 10,
+    idle_stop_seconds: int = 0,
+    stop_on: str = "network,file",
+    stop_on_settle: int = 20,
     run_id: str | None = None,
 ) -> dict:
     cfg = _flare_cfg()
@@ -1097,7 +1139,9 @@ def run_dynamic(
                                           max_seconds, api_list,
                                           enable_pesieve, meta,
                                           adaptive=adaptive,
-                                          idle_stop_seconds=idle_stop_seconds)
+                                          idle_stop_seconds=idle_stop_seconds,
+                                          stop_on=stop_on,
+                                          stop_on_settle=stop_on_settle)
             except Exception as e:
                 meta["error"] = str(e)
                 meta["ok"] = False
@@ -1219,12 +1263,18 @@ def run_dynamic(
         # Prefer deployed tools copy
         job_win = f"{tools_win}\\flare_dynamic_job.ps1"
         pesieve_flag = " -EnablePeSieve" if enable_pesieve else ""
+        # behaviour gate (RevAI handoff item 9). Quoted: the spec is a comma
+        # list; an empty value disables the gate.
+        gate_flag = ("" if not stop_on else
+                     f' -StopOn "{stop_on}" -StopOnSettle '
+                     f'"{int(stop_on_settle)}"')
         ps = (
             f'powershell -NoProfile -ExecutionPolicy Bypass -File "{job_win}" '
             f'-Sha256 "{sha}" -SamplePath "{remote_dir_win}\\sample.exe" '
             f'-MaxSeconds {int(max_seconds)} '
             f'-Apis "{api_list}"'
             f"{pesieve_flag}"
+            f"{gate_flag}"
         )
         print(f"[dynamic_run_v2] job max_seconds={max_seconds}", flush=True)
         ssh_budget = int(max_seconds) + 300  # FakeNet/Procmon/CSV export overhead
@@ -1360,11 +1410,22 @@ def main() -> int:
                     help="64-hex sha256 (session lookup) OR a path to the sample")
     ap.add_argument("--sample", default=None,
                     help="explicit sample path (repairs a missing session)")
-    ap.add_argument("--max-seconds", type=int, default=60)
+# RevAI handoff item 9: the 2026-09-11 measurement showed a 45s window
+    # gives 497 Frida events and no DGA while 150s gives 694,692 and live
+    # HTTP POST C2. Cap at 150s; the window ends early via the gate.
+    ap.add_argument("--max-seconds", type=int, default=150)
+    ap.add_argument("--stop-on", default="network,file",
+                    help="behaviour gate (RevAI handoff item 9): end the "
+                         "window once the sample does something notable and "
+                         "settles. network,file or api:<ExportName>; empty "
+                         "disables. The verdict is recorded in dynamic META.")
+    ap.add_argument("--stop-on-settle", type=int, default=20,
+                    help="keep tracing this long after the gate fires so the "
+                         "follow-on traffic is captured too")
     ap.add_argument("--adaptive", action="store_true",
-                    help="adaptive window: max-seconds is the cap, stop the "
-                         "trace early after --idle-stop-seconds without events")
-    ap.add_argument("--idle-stop-seconds", type=int, default=10)
+                    help="legacy idle-stop window (cap = --max-seconds). "
+                         "The behaviour gate is the default mechanism.")
+    ap.add_argument("--idle-stop-seconds", type=int, default=0)
     ap.add_argument("--apis", default=None, help="comma-separated API list override")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-deploy", action="store_true", help="skip SCP of job scripts (SSH mode only)")
@@ -1422,6 +1483,7 @@ def main() -> int:
         sample_override=sample_override,
         adaptive=args.adaptive,
         idle_stop_seconds=args.idle_stop_seconds,
+        stop_on=args.stop_on, stop_on_settle=args.stop_on_settle,
         run_id=args.run_id,
     )
     if meta.get("skipped") or meta.get("ok"):

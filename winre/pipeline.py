@@ -274,7 +274,9 @@ def _first_cell(result: dict):
 def _dynamic(sample: Path, pack: EvidencePack, sha: str,
              max_seconds: int, enable_pesieve: bool,
              adaptive: bool = False,
-             idle_stop_seconds: int = 10) -> dict:
+             idle_stop_seconds: int = 0,
+             stop_on: str = "network,file",
+             stop_on_settle: int = 20) -> dict:
     """Run orchestrator --mode local, copy its dynamic pack into evidence."""
     t0 = time.time()
     orch = Path(__file__).resolve().parent / "orchestrator.py"
@@ -313,6 +315,9 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
         cmd.append("--pesieve")
     if adaptive:
         cmd += ["--adaptive", "--idle-stop-seconds", str(int(idle_stop_seconds))]
+    if stop_on is not None:
+        cmd += ["--stop-on", str(stop_on),
+                "--stop-on-settle", str(int(stop_on_settle))]
     try:
         cp = subprocess.run(cmd, capture_output=True, text=True, env=env,
                             timeout=int(max_seconds) + 600,
@@ -597,7 +602,7 @@ def _report(pack: EvidencePack, sha: str, quick: dict, dynamic: dict | None,
     return report
 
 
-def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = False,
+def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool = False,
                  enable_dynamic: bool = False, dry_llm: bool = False,
                  mode: str = "agentic", enable_agentic_dbg: bool = False,
                  adaptive: bool = False, idle_stop_seconds: int = 10) -> dict:
@@ -696,7 +701,8 @@ def run_pipeline(sample: Path, *, max_seconds: int = 45, enable_pesieve: bool = 
         # dynamic is corroboration — do not let it fail static artifacts.
         dynamic = _dynamic(sample, pack, sha, max_seconds, enable_pesieve,
                            adaptive=adaptive,
-                           idle_stop_seconds=idle_stop_seconds)
+                           idle_stop_seconds=idle_stop_seconds,
+                           stop_on=stop_on, stop_on_settle=stop_on_settle)
         results["dynamic"] = dynamic
 
     # DFIR-Nexus ingest pack: dynamic logs + static context in one 7z
@@ -768,7 +774,11 @@ def main() -> int:
         description="WinRE RE pipeline. DEFAULT=static-only (RevEng/RevAI-"
                     "mirror). Dynamic detonation is opt-in & segregated.")
     ap.add_argument("sample", type=Path, help="path to sample PE")
-    ap.add_argument("--max-seconds", type=int, default=45,
+    # RevAI handoff item 9: the 2026-09-11 measurement showed a 45s window
+# gives 497 Frida events and no DGA, while 150s gives 694,692 events and
+# live HTTP POST C2. The cap is therefore 150s by default and the window
+# ends EARLY via the behaviour gate (--stop-on), not by guessing short.
+    ap.add_argument("--max-seconds", type=int, default=150,
                     help="dynamic detonation length (when --dynamic)")
     ap.add_argument("--pesieve", action="store_true",
                     help="dynamic: run pe-sieve mid-detonation")
@@ -780,8 +790,16 @@ def main() -> int:
                          "stop the Frida trace early after "
                          "--idle-stop-seconds without new events "
                          "(effective window recorded in dynamic META)")
-    ap.add_argument("--idle-stop-seconds", type=int, default=10,
-                    help="adaptive window idle cutoff (default 10s)")
+    ap.add_argument("--stop-on", default="network,file",
+                    help="behaviour gate: end the window once the sample "
+                         "does something notable and settles again "
+                         "(network,file, or api:<ExportName>). Empty "
+                         "disables. RevAI handoff item 9.")
+    ap.add_argument("--stop-on-settle", type=int, default=20,
+                    help="seconds to keep tracing after the gate fires")
+    ap.add_argument("--idle-stop-seconds", type=int, default=0,
+                    help="OFF by default: a sleeping sample looks idle, so "
+                         "this truncates the window before it wakes up"),
     ap.add_argument("--dry-llm", action="store_true",
                     help="never call the LLM (deterministic fallback only)")
     ap.add_argument("--agentic-dbg", action="store_true",
