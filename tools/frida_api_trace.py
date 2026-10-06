@@ -76,6 +76,48 @@ CREATE_APIS = frozenset({"createfilew", "createfilea", "ntcreatefile",
 # GENERIC_WRITE | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES
 WRITE_ACCESS_BITS = 0x40000000 | 0x00000002 | 0x00000004 | 0x00000100
 
+# --- P1-F6: a payload drop is not "any write" (finding of 2026-10-06) -------
+#
+# b104 (WinX.OperationDianxun, a .NET loader) fired the file gate at t=1.1s
+# on WriteFile and cut a 150s window to 2.8s, losing the memory dump - the
+# single most valuable artefact for a reflective-loading sample. Resolving the
+# handle offline from the same trace (pairing CreateFile onEnter with its
+# onLeave retval) showed 0 of 9 WriteFile calls could be attributed to any
+# file: all used handle 0xafc, never opened by a CreateFile we hook. That is a
+# console/stdout handle - the program printing to the console.
+#
+# So the gate was firing on an UNPROVEN write. That is the same rule P1-F2
+# fixed for CreateFile: never claim a drop you cannot prove. The gate now
+# requires an attributable path, and that path must look like a payload drop
+# or a destructive target.
+#
+# This still catches CWipeNew (b107), which opened \\.\PhysicalDrive0 through
+# CreateFileW: a device path is always a destructive write.
+
+# Executable / loadable / scriptable content: a drop by definition.
+DROP_EXTS = frozenset({
+    ".exe", ".dll", ".sys", ".ocx", ".cpl", ".scr", ".drv", ".efi",
+    ".ps1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta", ".bat",
+    ".cmd", ".msi", ".msp", ".jar", ".lnk", ".pif", ".com", ".reg", ".inf",
+})
+
+# Build/runtime scratch a loader legitimately writes at startup. These only
+# count when they land in a staging location (see DROP_DIRS).
+SCRATCH_EXTS = frozenset({
+    ".pdb", ".config", ".cache", ".ini", ".log", ".xml", ".json", ".dat",
+    ".tmp", ".etl", ".evtx", ".txt", ".map", ".ilk", ".exp", ".lib", ".res",
+    ".nls", ".mui", ".dll.aux",
+})
+
+# Classic drop / persistence / staging roots.
+DROP_DIRS = (
+    "\\appdata\\", "\\local\\", "\\roaming\\", "\\temp\\", "\\tmp\\",
+    "\\programdata\\", "\\start menu\\", "\\startup\\", "\\system32\\",
+    "\\syswow64\\", "\\sysnative\\", "\\program files\\",
+    "\\program files (x86)\\", "\\public\\", "\\downloads\\",
+    "\\users\\public\\", "\\windows\\temp\\", "\\$recycle.bin\\",
+)
+
 
 def _arg_int(args, i):
     """Frida hands pointer args through as hex strings; parse one."""
@@ -86,12 +128,42 @@ def _arg_int(args, i):
         return None
 
 
-def gate_for(api, kinds, apis, args=None):
+def classify_path(path):
+    r"""Is this write a payload drop or a destructive act? -> gate kind or None.
+
+    Returns "device" for raw device writes (\\.\PhysicalDriveN), "drop" for
+    executable content or a write into a staging/persistence location, and
+    None for runtime scratch or anything unrecognised. None means "do not
+    claim a drop": an unproven gate hit truncates the observation window,
+    which costs more than a late one.
+    """
+    if not path or not isinstance(path, str):
+        return None
+    low = path.replace("/", "\\").lower()
+    if low.startswith("\\\\.\\") or low.startswith("\\device\\"):
+        return "device"
+    ext = low[low.rfind("."):] if "." in low.rsplit("\\", 1)[-1] else ""
+    in_drop_dir = any(d in low for d in DROP_DIRS)
+    if ext in DROP_EXTS:
+        return "drop"
+    if ext in SCRATCH_EXTS:
+        # a scratch file only matters if it is being planted somewhere
+        return "drop" if in_drop_dir else None
+    if in_drop_dir:
+        return "drop"
+    return None
+
+
+def gate_for(api, kinds, apis, args=None, path=None):
     """Which gate (if any) this call satisfies. Pure, so it is testable.
 
-    `args` is the call's argument list; it is REQUIRED to gate a
-    Create*-style API on a write, and absent args degrade to NOT firing
-    rather than firing on a read we cannot prove was a write.
+    `args` is the call's argument list and `path` is the target's path when
+    the tracer could attribute the call to a file (see classify_path).
+
+    Both are load-bearing, and absence degrades to NOT firing:
+      * a Create*-style call without an access mask may be a read;
+      * a Write*-style call without an attributable path may be a console
+        write - that mistake cost b104 its memory dump (P1-F6).
     """
     if not api:
         return None
@@ -108,7 +180,15 @@ def gate_for(api, kinds, apis, args=None):
                 return None          # cannot prove a write
             if not (acc & WRITE_ACCESS_BITS):
                 return None          # a READ, not a drop
-        return "file"
+            kind = classify_path(path)
+            return kind              # may be None: an opened-for-write file
+                                     # that is not a drop target
+        # WriteFile and friends carry only a HANDLE. Without the tracer's
+        # handle->path map there is no proof of what is being written.
+        kind = classify_path(path)
+        if kind is None:
+            return None
+        return kind
     return None
 
 
@@ -221,6 +301,24 @@ const ansiArgs = {{
   InternetConnectA: [1],
   GetProcAddress: [1],
 }};
+// P1-F6: which argument is a FILE HANDLE we can resolve to a path.
+// WriteFile/NtWriteFile take the handle in arg0; the path only exists in the
+// handle->path map built when CreateFile* returned it.
+const handleArgs = {{
+  WriteFile: 0,
+  WriteFileEx: 0,
+  WriteFileGather: 0,
+  NtWriteFile: 0,
+  FlushFileBuffers: 0,
+  SetFilePointer: 0,
+  SetFilePointerEx: 0,
+  LockFile: 0,
+  UnlockFile: 0,
+}};
+const createApiSet = new Set(['CreateFileW', 'CreateFileA',
+  'CreateFileTransactedW', 'CreateFileTransactedA', 'NtCreateFile',
+  'ZwCreateFile']);
+const closeApiSet = new Set(['CloseHandle']);
 // sockaddr* argument index by API name
 const sockaddrArgs = {{
   connect: [1],
@@ -304,7 +402,36 @@ function enrichArgs(name, args) {{
         const sa = decodeSockAddr(args[i]);
         if (sa) decoded['sockaddr' + i] = sa;
     }}
+    // P1-F6: resolve a handle-taking API (WriteFile & co) back to the path
+    // that handle was opened with. Without this a file write cannot be
+    // attributed to any file, which is how the b104 gate fired on a console
+    // write and cut its window to 2.8s, losing the memory dump.
+    const hIdx = handleArgs[name];
+    if (hIdx !== undefined && args[hIdx]) {{
+        const known = handlePaths[args[hIdx].toString()];
+        if (known) decoded['path'] = known;
+    }}
     return {{ args: out, decoded: decoded }};
+}}
+
+// handle -> path, filled when a CreateFile* returns and cleared on
+// CloseHandle so the map cannot grow unbounded across a long window.
+const handlePaths = {{}};
+const pendingPathByTid = {{}};
+
+function rememberOpenedHandle(name, retval, tid) {{
+    if (!createApiSet.has(name)) return;
+    if (retval === null || retval === undefined) return;
+    const rv = retval.toString();
+    if (rv === '0x0' || rv === '0xffffffff' || rv === '-1') return;
+    const p = pendingPathByTid[tid];
+    if (p) handlePaths[rv] = p;
+    pendingPathByTid[tid] = null;
+}}
+
+function forgetHandle(name, args) {{
+    if (!closeApiSet.has(name) || !args || !args[0]) return;
+    delete handlePaths[args[0].toString()];
 }}
 
 function attachApi(name) {{
@@ -318,17 +445,28 @@ function attachApi(name) {{
             onEnter: function (args) {{
                 if (callCount >= maxCalls) return;
                 callCount++;
+                const tid = Process.getCurrentThreadId();
                 const enriched = enrichArgs(name, args);
+                // P1-F6: stash the path a CreateFile* is opening, so the
+                // handle it returns can be resolved back to that path.
+                if (createApiSet.has(name)) {{
+                    pendingPathByTid[tid] = enriched.decoded['arg0']
+                        || enriched.decoded['arg5'] || null;
+                }}
+                if (closeApiSet.has(name)) {{
+                    forgetHandle(name, args);
+                }}
                 send({{
                     type: 'call',
                     ts: Date.now(),
                     api: name,
-                    tid: Process.getCurrentThreadId(),
+                    tid: tid,
                     args: enriched.args,
                     decoded: enriched.decoded
                 }});
             }},
             onLeave: function (retval) {{
+                rememberOpenedHandle(name, retval, Process.getCurrentThreadId());
                 send({{
                     type: 'ret',
                     ts: Date.now(),
@@ -399,19 +537,28 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
                     payload = msg.get("payload") or {}
                     if isinstance(payload, dict) and payload.get("type") == "call":
                         hit = gate_for(payload.get("api"), gate_kinds,
-                                       gate_apis, payload.get("args"))
+                                       gate_apis, payload.get("args"),
+                                       path=(payload.get("decoded") or {}).get("path")
+                                            or (payload.get("decoded") or {}).get("arg0"))
                         if hit:
                             now = time.time()
+                            _dec = payload.get("decoded") or {}
                             gate.update({
                                 "fired": True, "kind": hit,
                                 "api": payload.get("api"),
-                                "arg0": ((payload.get("decoded") or {})
-                                         .get("arg0")),
+                                # P1-F6: record the TARGET, not the handle.
+                                # For a WriteFile arg0 is a HANDLE and the
+                                # resolved path is what makes the hit
+                                # auditable - an unattributable hit is what
+                                # cost b104 its memory dump.
+                                "path": _dec.get("path") or _dec.get("arg0"),
+                                "arg0": _dec.get("arg0"),
                                 "at_s": round(now - t0["t"], 1),
                                 "stop_at": now + gate_settle,
                             })
                             print(f"gate fired: {hit} "
-                                  f"({payload.get('api')}) at "
+                                  f"({payload.get('api')} -> "
+                                  f"{gate.get('path')}) at "
                                   f"{gate['at_s']}s; settling {gate_settle}s",
                                   file=sys.stderr)
             elif msg["type"] == "error":

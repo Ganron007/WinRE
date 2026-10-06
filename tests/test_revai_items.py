@@ -147,14 +147,25 @@ def test_gate_classification_is_correct():
     fat = _load_frida()
     kinds, apis = fat.parse_stop_on("network,file")
     assert kinds == {"network", "file"} and apis == set()
+    drop = "C:\\Users\\x\\AppData\\Roaming\\x.exe"
     for api, want in (("WSAConnect", "network"), ("connect", "network"),
                       ("WinHttpSendRequest", "network"),
-                      ("WriteFile", "file"), ("MoveFileW", "file"),
-                      ("DeleteFileW", "file")):
-        assert fat.gate_for(api, kinds, apis) == want, api
+                      ("WriteFile", "drop"), ("MoveFileW", "drop"),
+                      ("DeleteFileW", "drop")):
+        assert fat.gate_for(api, kinds, apis, ["0x1", "0x2"], drop) == want, api
     # not interesting on their own
     for api in ("VirtualAlloc", "CreateThread", "GetTickCount", "LoadLibraryW"):
-        assert fat.gate_for(api, kinds, apis) is None, api
+        assert fat.gate_for(api, kinds, apis, ["0x1"], drop) is None, api
+
+
+def test_a_file_api_without_a_target_never_fires():
+    """P1-F6: WriteFile carries only a HANDLE. Firing on an unattributable
+    write truncated b104's 150s window to 2.8s and lost its memory dump."""
+    fat = _load_frida()
+    kinds, apis = fat.parse_stop_on("network,file")
+    for api in ("WriteFile", "MoveFileW", "DeleteFileW", "CreateFileW"):
+        assert fat.gate_for(api, kinds, apis, ["0x1", "0x40000000"], None) is None
+        assert fat.gate_for(api, kinds, apis, ["0x1", "0x40000000"], "") is None
 
 
 def test_a_file_drop_is_a_write_not_a_read():
@@ -166,24 +177,30 @@ def test_a_file_drop_is_a_write_not_a_read():
     window to 22.4s. That reintroduces the short-window truncation the gate
     exists to fix. A *dropped* file means the call opened for WRITE, so a
     Create*-style call must be inspected, not assumed.
+
+    It must ALSO be attributable: P1-F6 (b104) showed that firing on a write
+    with no known target truncates the window just as badly. So the gate
+    returns "drop"/"device" for a proven payload write and None otherwise.
     """
     fat = _load_frida()
     kinds, apis = fat.parse_stop_on("network,file")
+    path = "C:\\Users\\x\\AppData\\Roaming\\dropped.exe"
 
     # the exact arguments captured from the real run
     nls_read = ["0x19af46c", "0x80000000", "0x1", "0x0"]      # GENERIC_READ
-    assert fat.gate_for("CreateFileW", kinds, apis, nls_read) is None
+    assert fat.gate_for("CreateFileW", kinds, apis, nls_read,
+                        "C:\\Windows\\Globalization\\Sorting\\sortdefault.nls") is None
 
     for name in ("CreateFileW", "CreateFileA", "NtCreateFile"):
         for acc in ("0x40000000",            # GENERIC_WRITE
                     "0xc0000000",            # GENERIC_READ|GENERIC_WRITE
                     "0x2",                   # FILE_WRITE_DATA
                     "0x4"):                  # FILE_APPEND_DATA
-            assert fat.gate_for(name, kinds, apis, ["0x1", acc]) == "file", (name, acc)
+            assert fat.gate_for(name, kinds, apis, ["0x1", acc], path) == "drop", (name, acc)
         # a pure read, and an unknown mask: no fire (we cannot prove a write)
-        assert fat.gate_for(name, kinds, apis, ["0x1", "0x80000000"]) is None, name
-        assert fat.gate_for(name, kinds, apis, None) is None, name
-        assert fat.gate_for(name, kinds, apis, []) is None, name
+        assert fat.gate_for(name, kinds, apis, ["0x1", "0x80000000"], path) is None, name
+        assert fat.gate_for(name, kinds, apis, None, path) is None, name
+        assert fat.gate_for(name, kinds, apis, [], path) is None, name
 
 
 def test_gate_can_be_disabled_or_narrowed():
