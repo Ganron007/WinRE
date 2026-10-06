@@ -501,9 +501,32 @@ if (Test-Path $trace) {
   Copy-Item $trace (Join-Path $OutDir "frida_trace.json") -Force
 }
 
-@{
-  ok = $true
-  sha256 = $Sha256
+  # A detonation that never spawned the sample is not a green detonation.
+  # b105 (2026-10-06) was a DLL masquerading as .exe: Frida's device.spawn
+  # raised ExecutableNotSupportedError, exited 0 anyway, Procmon then recorded
+  # a perfectly healthy 217k rows, and the stage reported ok=true with
+  # events=None. Procmon being alive is not evidence the sample ran.
+  $detonation_ran = [bool]$samplePid
+  $detonation_err = $null
+  if (-not $detonation_ran) {
+    $spawnErr = $null
+    if (Test-Path (Join-Path $OutDir "frida.stderr.txt")) {
+      $spawnErr = (Get-Content (Join-Path $OutDir "frida.stderr.txt") -Raw)
+    }
+    $reason = "sample process was never observed (no pid)"
+    if ($spawnErr -and $spawnErr -match "ExecutableNotSupportedError|unsupported file format") {
+      $reason = ("Frida could not spawn the sample: unsupported file format. The file " +
+                 "is a DLL, not an executable - it must be loaded through a host " +
+                 "(rundll32/regsvr32), not spawned directly.")
+    } elseif ($spawnErr -and $spawnErr.Trim()) {
+      $reason = "Frida failed to spawn the sample: " + $spawnErr.Trim().Split("`n")[-1].Trim()
+    }
+    $detonation_err = $reason
+  }
+  @{
+    ok = (-not $detonation_err)
+    error = $detonation_err
+    sha256 = $Sha256
   max_seconds = $MaxSeconds
   window = @{
     requested_s = $MaxSeconds
@@ -528,6 +551,7 @@ if (Test-Path $trace) {
   sample_pid = if ($samplePid) { $samplePid } elseif ($peSievePid) { $peSievePid } else { $null }
   memory_dir = if (Test-Path $memDir) { $memDir } else { $null }
   snapshot_restore_required = $true
+  detonation_reason = if ($detonation_ran) { $null } else { $detonation_err }
   finished_at = (Get-Date).ToUniversalTime().ToString("o")
 } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $OutDir "META.job.json") -Encoding UTF8
 

@@ -591,6 +591,57 @@ def _dump_outcome(oep, dump_ok: bool, dump_error=None,
     return "failed", "DumpModule reported ok but no file after 15s"
 
 
+def _detonation_ran(meta: dict) -> bool:
+    """Did a sample process ever exist? This, not instrument liveness, decides."""
+    return bool(meta.get("sample_pid"))
+
+
+def _apply_detonation_verdict(meta: dict, *, trace, dyn_dir) -> None:
+    """Set ok/error/frida_events from whether the detonation actually ran.
+
+    A Frida trace with zero events means one of two very different things:
+    the sample ran and did nothing (a real, reportable silence), or the tracer
+    never got it running (a failure). Presenting them alike is a lie:
+    b105's Procmon recorded 217k healthy rows while Frida had died on
+    "unsupported file format" - the file was a DLL masquerading as .exe - and
+    the stage still read ok=true with events=None.
+
+    So the deciding question is whether a sample process was ever observed,
+    and NOT whether the other instruments were busy.
+    """
+    spawned = _detonation_ran(meta)
+    meta["detonation_ran"] = spawned
+    n = 0
+    if trace.is_file():
+        try:
+            n = sum(1 for ln in trace.open("r", encoding="utf-8",
+                                          errors="replace") if ln.strip())
+        except Exception:
+            n = 0
+    meta["frida_events"] = n
+
+    if not spawned:
+        meta["ok"] = False
+        if not meta.get("error"):
+            meta["error"] = (
+                "sample process was never observed (no pid): the detonation "
+                "never started. See frida.stderr.txt for the spawn failure.")
+        return
+    meta["ok"] = bool(n) or bool(meta.get("job_ok"))
+    if not n:
+        meta["note"] = (
+            "Frida attached and observed 0 API calls: either the sample "
+            "touched no hooked API or the tracer lost it. Procmon and network "
+            "evidence are unaffected - the silence is real, not a failure.")
+
+
+def _finalize_ok(meta: dict) -> bool:
+    """The stage's ok flag. False unless a sample process was observed."""
+    if not _detonation_ran(meta):
+        return False
+    return bool(meta.get("frida_events")) or bool(meta.get("job_ok"))
+
+
 def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
     """Best-effort x64dbg OEP detect + dump. MCP-down is non-fatal.
 
@@ -932,18 +983,14 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
     trace = dyn_dir / "frida_trace.json"
     if not trace.is_file():
         trace = dyn_dir / "frida_trace.jsonl"
-    if trace.is_file():
-        try:
-            meta["frida_events"] = sum(
-                1 for ln in trace.open("r", encoding="utf-8", errors="replace") if ln.strip()
-            )
-        except Exception:
-            meta["frida_events"] = 0
-
-    has_core = bool(meta.get("frida_events")) or (dyn_dir / "procmon.csv").is_file()
-    meta["ok"] = has_core
-    if not meta["ok"] and not meta.get("error"):
-        meta["error"] = f"incomplete local pack job_rc={meta.get('job_rc')}"
+    # A Frida trace with zero events means one of two very different things:
+    # the sample ran and did nothing (a real, reportable silence), or the
+    # tracer never got it running (a failure). Presenting them alike is a lie:
+    # b105's Procmon recorded 217k healthy rows while Frida had died on
+    # "unsupported file format" - the file was a DLL - and the stage still
+    # read ok=true. So the deciding question is whether a sample process was
+    # ever observed, not whether the other instruments were busy.
+    _apply_detonation_verdict(meta, trace=trace, dyn_dir=dyn_dir)
     # final local sweep: the job cleaned its own children; this catches any
     # survivor (hung helper, resumed sample) — nothing outlives the pipeline
     _kill_stale_local()

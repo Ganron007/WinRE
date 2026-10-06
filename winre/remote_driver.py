@@ -663,7 +663,16 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     fresh = bool(nonce["fresh"])
     gate_mode = snapshot_gate.mode()
     gate_pass = (gate_mode != "enforce") or bool(meta.get("gate_marker_consumed"))
+    # ok=sample-ran without the tracer surviving is not a green detonation.
     ok = bool(fresh and meta.get("ok"))
+    # A stage can be "not green" for two different reasons, and only one of
+    # them is a product failure. Say which, so the pack is auditable:
+    #   no detonation      -> the sample never ran (DLL, spawn refused)
+    #   tracer failure     -> it ran but Frida lost it
+    detonation_ran = meta.get("detonation_ran")
+    if detonation_ran is not None and not detonation_ran:
+        err = (meta.get("error")
+               or "sample process was never observed: the detonation never started")
     if not ok and err is None:
         err = ("no fresh META from this run"
                if not fresh else f"orchestrator error: {meta.get('error')}")
@@ -679,6 +688,7 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                               restore_required=restore_required,
                               vm_dirty=bool(meta.get("vm_dirty")),
                               frida_events=meta.get("frida_events"),
+                              detonation_ran=meta.get("detonation_ran"),
                               verdict=meta.get("verdict"),
                               elapsed_s=round(time.time() - t0, 1),
                               gate_pass=gate_pass, gate=gate.get("gate"),
