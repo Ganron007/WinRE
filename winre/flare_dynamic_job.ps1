@@ -36,6 +36,34 @@ if (-not $SamplePath) { $SamplePath = Join-Path $WorkRoot "sample.exe" }
 # name (e.g. invoice.exe). Derive the process name so pe-sieve wait and
 # target cleanup work in both modes.
 $SampleProcName = [IO.Path]::GetFileNameWithoutExtension($SamplePath)
+# A DLL is hosted by rundll32, so the process on the box is NOT named after
+# the sample - it is named rundll32. Deriving the tracking name from the file
+# name only works for an executable. Detect the DLL from its own FILE header
+# (the Characteristics bit, not the extension - the corpus paths are hashes)
+# and track the host instead. Without this, everything downstream of the pid
+# sweep silently finds nothing: no sample_pid, no memory dump, and a stage
+# that reports "not observed" for a detonation that actually ran.
+$IsDllSample = $false
+try {
+  $fs = [IO.File]::OpenRead($SamplePath)
+  try {
+    $hdr = New-Object byte[] 512
+    $null = $fs.Read($hdr, 0, 512)
+    if ($hdr[0] -eq 0x4d -and $hdr[1] -eq 0x5a) {
+      $pe = [BitConverter]::ToInt32($hdr, 0x3c)
+      if ($pe -gt 0 -and ($pe + 24) -le 512 -and $hdr[$pe] -eq 0x50 -and $hdr[$pe+1] -eq 0x45) {
+        $chars = [BitConverter]::ToUInt16($hdr, $pe + 22)
+        $machine = [BitConverter]::ToUInt16($hdr, $pe + 4)
+        if ($chars -band 0x2000) { $IsDllSample = $true }
+        $DllIs64 = ($machine -eq 0x8664 -or $machine -eq 0xAA64)
+      }
+    }
+  } finally { $fs.Close() }
+} catch { }
+if ($IsDllSample) {
+  $SampleProcName = if ($DllIs64) { "rundll32" } else { "rundll32" }
+  Log ("sample is a DLL ({0}-bit) - will be hosted by rundll32" -f $(if ($DllIs64) { "64" } else { "32" }))
+}
 
 $OutDir = Join-Path $WorkRoot "out"
 $LogFile = Join-Path $WorkRoot "job.log"
@@ -206,9 +234,20 @@ try {
   # null, which disabled the post-mortem memory harvest + ntdll integrity.)
   $deadline = (Get-Date).AddSeconds([Math]::Min(20, [Math]::Max(5, $MaxSeconds / 2)))
   while ((Get-Date) -lt $deadline) {
-    $sp = Get-Process -Name $SampleProcName -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($sp) {
-      $samplePid = $sp.Id
+    # The tracer reports the pid it spawned. Authoritative when a DLL is hosted
+    # by rundll32, whose name is shared with every other rundll32 on the box.
+    if (-not $samplePid) {
+      $spErr = Join-Path $OutDir "frida.stderr.txt"
+      if (Test-Path $spErr) {
+        $se = (Get-Content $spErr -Raw)
+        if ($se -match "(?m)^spawned_pid=(\d+)") { $samplePid = [int]$Matches[1] }
+      }
+    }
+    if (-not $samplePid) {
+      $sp = Get-Process -Name $SampleProcName -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($sp) { $samplePid = $sp.Id }
+    }
+    if ($samplePid) {
       Log ("sample pid={0}" -f $samplePid)
       break
     }

@@ -667,6 +667,10 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
         launch = {"argv": argv, "loader": loader, "entry": entry}
         print(f"loader={loader} entry={entry}", file=sys.stderr)
         spawned_pid = device.spawn(argv)
+        # The job tracks this run by PROCESS NAME, which is rundll32 when we
+        # host a DLL - and a name match finds nothing when several rundll32s
+        # are alive. Report the real pid so the job can use it verbatim.
+        print(f"spawned_pid={spawned_pid}", file=sys.stderr)
         session = device.attach(spawned_pid)
     else:
         print("FATAL: must specify --target or --pid", file=sys.stderr)
