@@ -464,12 +464,18 @@ def test_freshness_never_compares_timestamps():
 def test_orchestrator_and_helper_pass_the_nonce():
     orch = (REPO / "winre" / "orchestrator.py").read_text(encoding="utf-8")
     assert "--run-id" in orch
-    helper = (REPO / "winre" / "_remote_dynamic_helper.py").read_text(
-        encoding="utf-8")
-    assert "--run-id=" in helper and "WINRE_RUN_ID" in helper
+    helper = REPO / "winre" / "_remote_dynamic_helper.py"
+    if not helper.is_file():
+        # the helper is a GENERATED file (remote_driver writes it before it can
+        # be used). A fresh clone has none, so asserting against it would fail
+        # for the wrong reason - generate it, then assert the invariant.
+        from winre import remote_driver
+        helper.write_text(remote_driver.REMOTE_DYNAMIC_HELPER, encoding="utf-8")
+    src = helper.read_text(encoding="utf-8")
+    assert "--run-id=" in src and "WINRE_RUN_ID" in src
     # the embedded copy the driver ships must not drift from the tracked file
     from winre import remote_driver
-    assert remote_driver.REMOTE_DYNAMIC_HELPER.strip() == helper.strip()
+    assert remote_driver.REMOTE_DYNAMIC_HELPER.strip() == src.strip()
 
 
 # --- item 6: applicability, not a fake failure -----------------------------
