@@ -229,6 +229,25 @@ def _launch_local(arch: int = DEFAULT_ARCH) -> bool:
         return False
 
 
+def _port_of(xc: X64DbgClient) -> int | None:
+    """The port a resolved client is actually talking to."""
+    try:
+        return int(str(xc.base).rsplit(":", 1)[-1])
+    except (ValueError, AttributeError):
+        return None
+
+
+def _not_up(wait_s: int, arch: int) -> str:
+    """Error text that says WHICH port was tried and WHICH debugger was launched.
+
+    The old message hardcoded ":9094 not up", which is why the dp32-on-9095
+    case read as a dead server rather than a wrong-port client.
+    """
+    ports = "/".join(str(p) for p in X64DbgClient.MCP_PORTS)
+    return (f"x64dbg MCP not answering on :{ports} after {wait_s}s "
+            f"(launched {XDBG_PROCS.get(arch, 'x64dbg.exe')})")
+
+
 def _running_arch_vm(cfg: dict) -> int | None:
     """Which x64dbg flavour, if any, is running on the VM. None if neither.
 
@@ -282,11 +301,12 @@ def ensure_mcp_local(base: str | None = None, wait_s: int = 90,
     """
     arch = xdbg_arch(sample)
     with _lock:
-        xc = X64DbgClient(base=base or "http://127.0.0.1:9094",
-                          default_timeout=10)
+        # port is discovered, not assumed: dp32 serves :9095, dp64 :9094
+        X64DbgClient.forget_port()
+        xc = X64DbgClient(base=base, default_timeout=10)
         info: dict = {"local": True, "already_up": False, "launched": False,
                       "arch": arch, "debugger": XDBG_PROCS[arch],
-                      "exe": XDBG_BIN[arch]}
+                      "exe": XDBG_BIN[arch], "port": _port_of(xc)}
         if xc.is_up():
             info["already_up"] = True
             return True, info
@@ -295,10 +315,13 @@ def ensure_mcp_local(base: str | None = None, wait_s: int = 90,
         deadline = time.time() + wait_s
         while time.time() < deadline:
             time.sleep(3)
+            X64DbgClient.forget_port()
+            xc = X64DbgClient(base=base, default_timeout=10)
             if xc.is_up():
                 info["launched"] = True
+                info["port"] = _port_of(xc)
                 return True, info
-        return False, {**info, "error": f":9094 not up after {wait_s}s"}
+        return False, {**info, "error": _not_up(wait_s, arch)}
 
 
 def ensure_mcp(base: str | None = None, wait_s: int = 90,
@@ -315,10 +338,11 @@ def ensure_mcp(base: str | None = None, wait_s: int = 90,
         cfg = cfg or remote_driver.flare_cfg()
         host = cfg["host"]
         arch = xdbg_arch(sample, cfg)
-        xc = X64DbgClient(base=base or f"http://{host}:9094", default_timeout=10)
+        X64DbgClient.forget_port()
+        xc = X64DbgClient(base=base, host=host, default_timeout=10)
         info: dict = {"host": host, "already_up": False, "launched": False,
                       "arch": arch, "debugger": XDBG_PROCS[arch],
-                      "exe": XDBG_BIN[arch]}
+                      "exe": XDBG_BIN[arch], "port": _port_of(xc)}
 
         if xc.is_up():
             running = _running_arch_vm(cfg)
@@ -326,6 +350,7 @@ def ensure_mcp(base: str | None = None, wait_s: int = 90,
                 # wrong flavour: a 32-bit sample must not be handed to x64dbg
                 info["replaced_wrong_arch"] = running
                 _kill_all_vm(cfg)
+                X64DbgClient.forget_port()
                 deadline = time.time() + min(wait_s, 20)
                 while time.time() < deadline and xc.is_up():
                     time.sleep(1.5)
@@ -337,14 +362,18 @@ def ensure_mcp(base: str | None = None, wait_s: int = 90,
         if not _launch_on_vm(cfg, arch):
             return False, {**info, "error": "scheduled-task launch failed"}
 
-        # wait for MCP to come up
+        # wait for MCP to come up (port re-resolved each poll: a freshly
+        # launched x32dbg answers on 9095, a killed x64dbg leaves nothing)
         deadline = time.time() + wait_s
         while time.time() < deadline:
             time.sleep(3)
+            X64DbgClient.forget_port()
+            xc = X64DbgClient(base=base, host=host, default_timeout=10)
             if xc.is_up():
                 info["launched"] = True
+                info["port"] = _port_of(xc)
                 return True, info
-        return False, {**info, "error": f":9094 not up after {wait_s}s"}
+        return False, {**info, "error": _not_up(wait_s, arch)}
 
 
 def restart_mcp(wait_s: int = 90,
@@ -369,12 +398,14 @@ def restart_mcp(wait_s: int = 90,
 def health(base: str | None = None) -> dict:
     cfg = remote_driver.flare_cfg()
     host = cfg["host"]
-    xc = X64DbgClient(base=base or f"http://{host}:9094", default_timeout=10)
+    X64DbgClient.forget_port()
+    xc = X64DbgClient(base=base, host=host, default_timeout=10)
     if not xc.is_up():
-        return {"up": False}
+        return {"up": False, "port": _port_of(xc),
+                "ports_tried": list(X64DbgClient.MCP_PORTS)}
     st = xc.get_state()
     arch = _running_arch_vm(cfg)
-    return {"up": True, "state": st.get("result"),
+    return {"up": True, "state": st.get("result"), "port": _port_of(xc),
             "arch": arch, "debugger": XDBG_PROCS.get(arch) if arch else None}
 
 
@@ -390,8 +421,10 @@ def teardown(base: str | None = None, *, kill_vm: bool = True,
     with _lock:
         cfg = remote_driver.flare_cfg()
         host = cfg["host"]
-        xc = X64DbgClient(base=base or f"http://{host}:9094", default_timeout=10)
-        out: dict = {"stopped": False, "exited": False, "killed": False}
+        X64DbgClient.forget_port()
+        xc = X64DbgClient(base=base, host=host, default_timeout=10)
+        out: dict = {"stopped": False, "exited": False, "killed": False,
+                     "port": _port_of(xc)}
 
         if xc.is_up():
             try:

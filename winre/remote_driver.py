@@ -889,19 +889,27 @@ def ensure_mcp_servers(cfg: dict | None = None, *,
 def remote_mcp_health(cfg: dict) -> dict:
     """Probe the VM's MCP servers.
 
-    x64dbg :9094 binds 0.0.0.0 — direct HTTP from this host. Malcat :9009
-    and WinDbg :9097 bind 127.0.0.1 on the VM — those go via SSH-exec.
+    x64dbg binds 0.0.0.0 - direct HTTP from this host, but its port depends
+    on which plugin build is loaded (dp64 -> 9094, dp32 -> 9095, measured
+    2026-10-06), so every candidate is probed rather than assuming 9094.
+    Malcat :9009 and WinDbg :9097 bind 127.0.0.1 on the VM - those go via
+    SSH-exec.
     """
     out = {}
-    for name, url in (("x64dbg", "http://{}:9094/"),):
-        import urllib.request
+    # per-port results are kept (they diagnose a wrong-port client), and
+    # out["x64dbg"] is the OR - the server is up if ANY candidate answers
+    xdbg_ports = {}
+    import urllib.request
+    for port in X64DbgClient.MCP_PORTS:
+        url = "http://{}:{}/".format(cfg["host"], port)
         try:
-            req = urllib.request.Request(url.format(cfg["host"]), data=b"{}",
-                                         method="POST")
+            req = urllib.request.Request(url, data=b"{}", method="POST")
             with urllib.request.urlopen(req, timeout=8) as resp:
-                out[name] = resp.status == 200
+                xdbg_ports[str(port)] = resp.status == 200
         except Exception:
-            out[name] = False
+            xdbg_ports[str(port)] = False
+    out["x64dbg_ports"] = xdbg_ports
+    out["x64dbg"] = any(xdbg_ports.values())
     try:
         out["malcat"] = malcat_remote_is_up()
     except Exception:
@@ -948,7 +956,7 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
         try:
             from winre.mcp import X64DbgClient
             from winre.mcp.x64dbg_manager import stage_safe_sample
-            xc = X64DbgClient(base=f"http://{cfg['host']}:9094")
+            xc = X64DbgClient(host=cfg["host"])
             staged = stage_safe_sample(cfg, rf"C:\samples\{sample_name}",
                                        tag=(sha or "")[:12])
             lb = xc.load_binary(staged)

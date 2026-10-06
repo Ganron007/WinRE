@@ -54,15 +54,82 @@ class X64DbgError(RuntimeError):
 
 
 class X64DbgClient:
-    """HTTP client for x64dbg-MCP (Zig plugin in x64dbg)."""
+    """HTTP client for x64dbg-MCP (Zig plugin in x64dbg).
+
+    The port is DISCOVERED, not assumed. The 32-bit and 64-bit builds of the
+    MCP server plugin do not use the same one - measured on the FlareVM
+    2026-10-06: dp64 -> 9094, dp32 -> 9095. Hardcoding 9094 everywhere made
+    every x32dbg session look like "MCP unreachable" while the server was
+    actually up and answering on 9095.
+
+    Pass `host` (control plane -> VM) or leave both unset (running on the VM).
+    Pass `base` only to pin a URL explicitly.
+    """
 
     DEFAULT_BASE = "http://127.0.0.1:9094"
 
-    def __init__(self, base: str | None = None, default_timeout: int = 60):
-        self.base = (base or self.DEFAULT_BASE).rstrip("/")
+    # candidate MCP ports, most likely first. A port only counts as found when
+    # the server answers an actual MCP request - a bare open socket is not
+    # evidence (that mistake made dead servers report healthy).
+    MCP_PORTS: tuple[int, ...] = (9094, 9095)
+
+    _port_cache: dict[str, int | None] = {}
+
+    def __init__(self, base: str | None = None, default_timeout: int = 60,
+                 *, host: str | None = None):
+        h = host or "127.0.0.1"
+        self.base = (base or self.resolve_base(h)).rstrip("/")
         self.default_timeout = default_timeout
         # monotonic id; x64dbg-MCP doesn't validate, but JSON-RPC wants one
         self._id = 0
+
+    # --- port discovery ----------------------------------------------------
+
+    @classmethod
+    def _answers(cls, base: str, timeout: int = 3) -> bool:
+        """True only on positive MCP evidence (a real JSON-RPC response)."""
+        try:
+            cli = cls.__new__(cls)
+            cli.base = base.rstrip("/")
+            cli.default_timeout = timeout
+            cli._id = 0
+            r = cli.call("__winre_port_probe__", {})
+        except Exception:
+            return False
+        # a structured answer (even "unknown tool") proves the MCP server is
+        # there; a bare False/None means the transport failed
+        return bool(isinstance(r, dict) and r.get("ok"))
+
+    @classmethod
+    def resolve_port(cls, host: str = "127.0.0.1",
+                     *, refresh: bool = False) -> int | None:
+        """The port the x64dbg MCP server is actually answering on."""
+        key = host.strip().lower()
+        if not refresh and key in cls._port_cache:
+            return cls._port_cache[key]
+        found: int | None = None
+        for port in cls.MCP_PORTS:
+            if cls._answers(f"http://{host}:{port}"):
+                found = port
+                break
+        cls._port_cache[key] = found
+        return found
+
+    @classmethod
+    def resolve_base(cls, host: str = "127.0.0.1") -> str:
+        """Base URL for the MCP server; falls back to the preferred port when
+        nothing answers yet (the caller is about to launch the debugger)."""
+        port = cls.resolve_port(host) or cls.MCP_PORTS[0]
+        return f"http://{host}:{port}"
+
+    @classmethod
+    def forget_port(cls, host: str | None = None) -> None:
+        """Drop a cached port - call after launching/tearing down a debugger,
+        since the answer can change with the plugin build in use."""
+        if host is None:
+            cls._port_cache.clear()
+        else:
+            cls._port_cache.pop(host.strip().lower(), None)
 
     # --- low-level wire ----------------------------------------------------
 

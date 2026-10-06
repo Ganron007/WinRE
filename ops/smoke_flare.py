@@ -130,7 +130,7 @@ def run_smoke() -> list[dict]:
     #    advisory, never fails the battery
     try:
         from winre.mcp import X64DbgClient
-        up = X64DbgClient(base=f"http://{cfg['host']}:9094").is_up()
+        up = X64DbgClient(host=cfg["host"]).is_up()
         # ok=None (down) renders WARN for advisory checks — on-demand by design
         results.append(_check("MCP x64dbg :9094 (on-demand)",
                               True if up else None,

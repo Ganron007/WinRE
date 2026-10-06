@@ -1674,7 +1674,7 @@ if __name__ == "__main__":
         print("x64dbg MCP not available:", info)
         raise SystemExit(1)
     host = flare_cfg()["host"]
-    xc = X64DbgClient(base=f"http://{host}:9094")
+    xc = X64DbgClient(host=host)
     fn = {"ep_break": ep_break, "oep_by_section": oep_by_section,
           "oep_by_esp": oep_by_esp,
           "wpm_dump": wpm_dump, "crypt_dump": crypt_dump,

@@ -640,7 +640,7 @@ class ToolRegistry:
 
     def _dbg_client(self):
         from winre.mcp import X64DbgClient
-        return X64DbgClient(base=f"http://{self.cfg['host']}:9094")
+        return X64DbgClient(host=self.cfg["host"])
 
     def _dbg_sample(self) -> str:
         """Expression-safe VM sample path for x64dbg tools (staged once).
