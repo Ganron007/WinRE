@@ -72,6 +72,18 @@ SCHEMA_VERSION = "v6.2.4"
 _REPO_SCRIPTS = Path(__file__).resolve().parent
 
 
+
+# Emitted after every detonation. WinRE does NOT revert the VM for
+# you: restoring re-arms the one-shot clean marker, so the decision
+# that the VM is clean again has to stay with a person (operator
+# directive 2026-10-06). The run gathers everything locally FIRST,
+# and only then is a restore safe.
+RESTORE_NOTICE = ("RESTORE REQUIRED: this run detonated the sample, so "
+                  "the VM is dirty. Everything has been pulled and "
+                  "written locally. Restore your clean snapshot "
+                  "BEFORE the next run - WinRE will not revert it for "
+                  "you, and nothing may execute until you do.")
+
 def _utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -1145,13 +1157,29 @@ def run_dynamic(
             except Exception as e:
                 meta["error"] = str(e)
                 meta["ok"] = False
-            # x64dbg OEP dump (best-effort, after Frida cleaned up)
-            try:
-                _x64dbg_oep_dump(Path(sample), dyn_dir, meta)
-            except Exception as e:
-                meta["x64dbg_post_error"] = str(e)
+            # ---- the VM is dirty from here on ------------------------------
+            # The x64dbg OEP/dump pass that used to run here executed the
+            # SAME sample a second time on an already-contaminated VM
+            # (LoadBinary -> analyze -> detect -> DumpModule) - exactly what
+            # the one-shot clean marker exists to prevent. That artifact
+            # belongs to --agentic-dbg, which the runbook already defines
+            # as a SEPARATE run on a SEPARATE restore.
+            meta["x64dbg_dump"] = {
+                "attempted": False, "ok": False, "status": "skipped",
+                "reason": ("not attempted: the VM is dirty after "
+                           "detonation and this pass would execute the "
+                           "sample again. Use --agentic-dbg on its own "
+                           "restore."),
+            }
+            meta["vm_dirty"] = True
+            meta["restore_required"] = True
+            meta["next_action"] = RESTORE_NOTICE
             meta["elapsed_s"] = round(time.time() - t0, 1)
+            # local-artifact enrichment ONLY: it reads the pulled dyn_dir
+            # and never touches the VM, so the evidence is still processed
             meta["post_pull"] = _post_pull_enrich(dyn_dir, sha, meta.get("sample_pid"))
+            print("\n" + "!" * 72 + "\n" + RESTORE_NOTICE + "\n" + "!" * 72,
+                  flush=True)
             meta["verdict_policy"] = {
                 "static_yara_wins": True,
                 "high_signal_yara": yara_lock.get("high_signal") or [],

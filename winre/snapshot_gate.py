@@ -10,9 +10,12 @@ L1  In-VM clean marker (the real enforcement primitive).
     executions without a real restore in between are physically
     impossible, regardless of what any ledger or operator claims.
 
-L2  Hypervisor auto-restore (convenience that re-arms L1).
+L2  Hypervisor auto-restore: REMOVED, deliberately not a feature.
     If WINRE_HYPERVISOR / WINRE_VM_PATH / WINRE_SNAPSHOT are configured,
-    preflight reverts the snapshot (vmrun / VBoxManage), waits for SSH,
+    Reverting a snapshot re-arms the one-shot marker, which would let one
+    run execute the sample repeatedly with no operator deciding the VM was
+    clean again. Restoring is an OPERATOR action and stays outside the
+    product (operator directive 2026-10-06):
     and verifies the marker before allowing execution.
 
 L3  Global VM-state ledger + HITL attestation (fallback bookkeeping).
@@ -86,7 +89,7 @@ def reset_session() -> None:
 
 
 # --- run-level execution plan (RevAI handoff 2026-09-27, item 1) --------------
-# Under `enforce` WITHOUT hypervisor auto-restore the clean marker is a
+# Under `enforce` the clean marker is a
 # one-shot: the first execution consumes it, so ONE clean restore buys
 # exactly ONE execution. A run that asks for two (`--dynamic` +
 # `--agentic-dbg`) used to half-execute — debug consumed the marker, then
@@ -112,16 +115,22 @@ def execution_plan(*, dynamic: bool = False, debug: bool = False) -> dict:
     requested = len(sites)
     if m != "enforce":
         budget, why = requested, f"gate={m} (advisory — no execution budget)"
-    elif hc:
-        budget, why = requested, (f"gate=enforce + {hc['hypervisor']} auto-restore "
-                                  f"re-arms the marker per execution")
     else:
+        # Unconditional. It USED to be `budget = requested` whenever a
+        # hypervisor was configured, on the theory that auto-restore
+        # re-armed the marker per execution. That re-arming is not a
+        # product feature (operator directive 2026-10-06): it moves the
+        # "this VM is clean again" decision out of the operator's hands.
         budget, why = (1 if requested else 0), (
-            "gate=enforce, no hypervisor auto-restore: the clean marker is "
-            "one-shot, so 1 execution per clean restore")
+            "gate=enforce: the clean marker is one-shot, so exactly 1 "
+            "execution per clean restore. Restoring the snapshot is an "
+            "OPERATOR action - WinRE never reverts the VM for you.")
     plan = {
         "gate_mode": m,
-        "auto_restore": bool(hc),
+        "auto_restore": False,
+        "auto_restore_note": "not a product capability: WinRE never "
+                             "reverts the VM; restore the snapshot "
+                             "yourself between executions",
         "hypervisor": (hc or {}).get("hypervisor"),
         "execution_sites": sites,
         "executions_requested": requested,
@@ -247,48 +256,34 @@ def attest(action: str, *, sha: str = "", verify_marker: bool = True) -> dict:
     return {"ok": True, "state": st, "marker": marker}
 
 
-# --- L2: hypervisor auto-restore ---------------------------------------------
+# --- L2 (REMOVED): hypervisor auto-restore -------------------------------
+# Deliberately not a product capability. Reverting the VM re-arms the
+# one-shot clean marker, which would let one run execute the sample many
+# times with no operator deciding the VM was clean again. Restoring a
+# snapshot is an operator action (operator directive 2026-10-06).
+# hypervisor_cfg() below is report-only and exists purely so `gate status`
+# can say so out loud.
+# -------------------------------------------------------------------------
 
 def hypervisor_cfg() -> dict | None:
+    """Report-only. WinRE does NOT revert snapshots (operator directive).
+
+    Kept so `gate status` can tell an operator who left these variables in
+    their .env that they buy no automatic restore and no extra execution
+    budget - silence would let them believe enforcement is weaker than it
+    is. Nothing in this module acts on it.
+    """
     hv = os.environ.get("WINRE_HYPERVISOR", "").strip().lower()
     vmp = os.environ.get("WINRE_VM_PATH", "").strip()
     snap = os.environ.get("WINRE_SNAPSHOT", "").strip()
     if hv in ("vmware", "vbox") and vmp and snap:
-        return {"hypervisor": hv, "vm_path": vmp, "snapshot": snap}
+        return {"hypervisor": hv, "vm_path": vmp, "snapshot": snap,
+                "product_capability": False,
+                "note": "reported for visibility only - WinRE never "
+                        "reverts the VM. Restoring the snapshot is an "
+                        "OPERATOR action, and it buys no extra execution "
+                        "budget."}
     return None
-
-
-def hypervisor_restore(hc: dict, timeout: int = 420) -> dict:
-    """Revert to the clean snapshot, wait for SSH, verify the marker."""
-    if hc["hypervisor"] == "vmware":
-        cmd = ["vmrun", "revertToSnapshot", hc["vm_path"], hc["snapshot"]]
-    else:
-        cmd = ["VBoxManage", "snapshot", hc["vm_path"], "restore", hc["snapshot"]]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                           encoding="utf-8", errors="replace")
-        if r.returncode != 0:
-            return {"ok": False,
-                    "error": f"{hc['hypervisor']} revert failed: "
-                             f"{(r.stderr or r.stdout or '')[:200]}"}
-    except FileNotFoundError:
-        return {"ok": False, "error": f"{hc['hypervisor']} CLI not found"}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"{hc['hypervisor']} revert timed out"}
-
-    deadline = time.time() + timeout
-    marker = None
-    while time.time() < deadline:
-        marker = marker_exists(timeout=20)
-        if marker is True:
-            break
-        time.sleep(10)
-    if marker is not True:
-        return {"ok": False,
-                "error": "VM did not come back with clean marker after revert",
-                "marker": marker}
-    st = record("restored", detail=f"auto ({hc['hypervisor']}): {hc['snapshot']}")
-    return {"ok": True, "state": st, "marker": True}
 
 
 # --- preflight (the one call sites use) ---------------------------------------
@@ -297,7 +292,7 @@ def gate_status(cfg: dict | None = None, *, probe: bool = True) -> dict:
     """Full gate picture for UI/CLI/audit.
 
     Enforce semantics: the MARKER is the arbiter (L1 fact, not a claim).
-    allowed = auto-restored now (L2) OR marker present right now.
+    allowed = the marker is present right now; nothing re-arms it.
     The ledger (L3) is an audit trail + UX; it can never substitute for the
     marker in enforce mode. Observe mode: everything allowed, all recorded.
     """
@@ -312,7 +307,7 @@ def gate_status(cfg: dict | None = None, *, probe: bool = True) -> dict:
         # status-only call (no probe): report ledger posture, never claim armed
         blocked, reason = (m == "enforce"), (
             "armed per ledger" if clean_ledger
-            else "no ledger yet — attest or configure auto-restore")
+            else "no ledger yet - attest, or restore the snapshot yourself")
     elif marker is True:
         blocked, reason = False, "armed (clean marker on VM)"
     elif marker is None and not hc:
@@ -331,7 +326,7 @@ def preflight(kind: str, *, sha: str = "", cfg: dict | None = None,
 
     Enforce-mode contract: `allowed=True` is returned ONLY when the marker
     was atomically consumed this call (consumed=True), a hypervisor
-    auto-restore just re-created and consumed it, or (debug) the marker was
+    (debug) the marker was
     already consumed earlier in THIS process run. A consume that reports
     absent/unknown fails closed — two executions off one restore are
     impossible, which is the entire point of L1.
@@ -341,19 +336,14 @@ def preflight(kind: str, *, sha: str = "", cfg: dict | None = None,
     hc = hypervisor_cfg()
     action_taken = None
     consumed = None
-    if m == "enforce" and hc:
-        r = hypervisor_restore(hc)
-        if not r.get("ok"):
-            return {"allowed": False, "gate": gate_status(cfg, probe=False),
-                    "action": None, "consumed": None, "error": r.get("error")}
-        action_taken = "auto_restored"
-        consumed = consume_marker(cfg) if consume else None
-        if consume and consumed is not True:
-            return {"allowed": False, "gate": gate_status(cfg, probe=False),
-                    "action": action_taken, "consumed": consumed,
-                    "error": "snapshot gate: marker consume not confirmed "
-                             f"({consumed}) after restore"}
-    else:
+    # NOTE: there is deliberately NO auto-restore branch here. An earlier
+    # version reverted the snapshot from inside preflight() whenever
+    # WINRE_HYPERVISOR/VM_PATH/SNAPSHOT were set. That made the product
+    # re-arm its own one-shot clean marker, so a single run could execute
+    # the sample repeatedly with nobody deciding the VM was clean again.
+    # Snapshot restore is an OPERATOR action and stays outside the product
+    # (operator directive 2026-10-06).
+    if True:
         # debug calls in this same process already consumed the marker for
         # this sha: the VM is dirty from call #1, but this agent run's
         # trajectory continues against the SAME dirty session — allow it.
@@ -383,7 +373,7 @@ def preflight(kind: str, *, sha: str = "", cfg: dict | None = None,
     # coherent post-decision status: blocked=False is the truth here
     gate = gate_status(cfg, probe=False)
     gate["blocked"] = False
-    gate["reason"] = ("executing (auto-restored)" if action_taken
+    gate["reason"] = ("executing" if not action_taken
                       else f"executing (marker {consumed})")
     return {"allowed": True, "gate": gate, "action": action_taken,
             "consumed": consumed, "error": None}

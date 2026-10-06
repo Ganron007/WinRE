@@ -130,14 +130,60 @@ def test_observe_mode_is_advisory_and_needs_no_restore(monkeypatch):
     assert p["executions_available"] == 2
 
 
-def test_hypervisor_auto_restore_unlimited_executions(monkeypatch):
+def test_snapshot_restore_is_not_a_product_capability(monkeypatch):
+    """WinRE must NEVER revert the VM, and configuring it must buy nothing.
+
+    This test used to assert the OPPOSITE: that configuring
+    WINRE_HYPERVISOR/VM_PATH/SNAPSHOT made `auto_restore` true and granted an
+    execution budget of 2. Reverting re-arms the one-shot clean marker, so a
+    single run could execute the sample repeatedly with nobody deciding the VM
+    was clean again - the marker exists precisely so a person makes that
+    decision. Restoring is an operator action (operator directive 2026-10-06).
+    """
     monkeypatch.setenv("WINRE_HYPERVISOR", "vmware")
     monkeypatch.setenv("WINRE_VM_PATH", r"C:\vm\flare.vmx")
-    monkeypatch.setenv("WINRE_SNAPSHOT", "clean")
+    monkeypatch.setenv("WINRE_SNAPSHOT", "GOLD")
     p = gate.execution_plan(dynamic=True, debug=True)
-    assert p["ok"] is True
-    assert p["auto_restore"] is True
-    assert p["executions_available"] == 2
+    assert p["auto_restore"] is False
+    assert p["executions_available"] == 1, (
+        "a configured hypervisor must never widen the execution budget")
+    assert p["ok"] is False, "2 sites against a 1-execution budget must refuse"
+    cfg = gate.hypervisor_cfg()
+    assert cfg is not None and cfg["product_capability"] is False
+    assert "operator" in (cfg.get("note") or "").lower()
+
+
+def test_no_product_code_can_revert_a_vm():
+    """Belt and braces: no shipped module may invoke a hypervisor CLI."""
+    import pathlib as _p
+    repo = _p.Path(__file__).resolve().parents[1]
+    for rel in ("winre/snapshot_gate.py", "winre/orchestrator.py",
+                "winre/remote_driver.py", "winre/pipeline.py",
+                "winre/ui/app.py", "ops/reapply_after_revert.ps1"):
+        src = (repo / rel).read_text(encoding="utf-8")
+        for banned in ("vmrun", "VBoxManage", "revertToSnapshot"):
+            assert banned not in src, (
+                f"{rel} references {banned}: WinRE must not revert the VM")
+
+
+def test_a_detonation_asks_for_a_manual_restore(monkeypatch):
+    """After a detonation the run must say the VM is dirty, and say it in the
+    pack - not just on a console nobody scrolls."""
+    src = (REPO / "winre" / "orchestrator.py").read_text(encoding="utf-8")
+    assert "restore_required" in src and "vm_dirty" in src, (
+        "a detonation must record that the VM is dirty and needs a restore")
+    assert "RESTORE REQUIRED" in src, "the operator must be told in plain words"
+    # and the x64dbg pass must NOT run after detonation: it executes the same
+    # sample a second time on an already-contaminated VM
+    det = src.split('meta["vm_dirty"] = True')
+    assert "status\": \"skipped\"" in src, (
+        "the post-detonation x64dbg pass must be recorded as skipped, not run")
+    assert '_x64dbg_oep_dump(Path(sample), dyn_dir, meta)' not in det[-1] if len(det) > 1 else True
+    # the notice must reach the pack too, not only the VM console
+    assert "restore_required" in (REPO / "winre" / "remote_driver.py").read_text(
+        encoding="utf-8"), (
+        "restore_required must ride in STAGE.json; a console line nobody "
+        "scrolls is not a notification")
 
 
 def test_static_only_run_requests_no_executions():

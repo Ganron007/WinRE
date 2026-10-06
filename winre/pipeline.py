@@ -46,7 +46,19 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from winre import llm_client  # type: ignore
 
-LOGS_DIR = Path(os.environ.get("WINRE_PIPELINE_LOGS", r"C:\WinRE\logs"))
+# THE evidence root, and the single answer to "where do my packs go?".
+#
+# It used to default to the literal C:\\WinRE\\logs, which is right ONLY
+# when this file is running from the FlareVM deploy. Run the same command
+# from the operator host - which is what `--driver local` and
+# `--publish` do - and packs landed somewhere the console never looks.
+# Deriving it from the repo root makes it correct on BOTH machines with
+# no configuration: <repo> is C:\\WinRE on the VM and the checkout on the
+# host, so this yields C:\\WinRE\\logs there and <checkout>\\logs here.
+# WINRE_PIPELINE_LOGS overrides both. Always gitignored.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+LOGS_DIR = Path(os.environ.get("WINRE_PIPELINE_LOGS")
+                 or (REPO_ROOT / "logs")).resolve()
 SESSIONS_DIR = LOGS_DIR.parent / "sessions"
 
 

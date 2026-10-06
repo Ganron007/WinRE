@@ -669,8 +669,15 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                if not fresh else f"orchestrator error: {meta.get('error')}")
     # clock skew is a DIAGNOSTIC only (never part of the freshness decision)
     skew = clock_skew_s(cfg, cached=clock)
+    restore_required = bool(meta.get("restore_required"))
     stage_meta = stage_result("dynamic", ok, error=err,
-                              summary=f"events={meta.get('frida_events')} ok={ok}",
+                              summary=(f"events={meta.get('frida_events')} "
+                                       f"ok={ok}"
+                                       + (" | VM DIRTY - restore the "
+                                          "snapshot before the next run"
+                                          if restore_required else "")),
+                              restore_required=restore_required,
+                              vm_dirty=bool(meta.get("vm_dirty")),
                               frida_events=meta.get("frida_events"),
                               verdict=meta.get("verdict"),
                               elapsed_s=round(time.time() - t0, 1),
@@ -1385,9 +1392,12 @@ def main() -> int:
     if args.publish:
         from .evidence import EvidencePack
         from .reporting import publish_case
-        from .pipeline import LOGS_DIR
+        # LOCAL_LOGS, NOT pipeline.LOGS_DIR: this run just created its pack
+        # under LOCAL_LOGS, so publishing looked in a different root and
+        # either failed or published somebody else's pack (code audit
+        # 2026-10-06).
         pub = publish_case(
-            EvidencePack(LOGS_DIR, res["sha"], mode=args.mode).root,
+            EvidencePack(LOCAL_LOGS, res["sha"], mode=args.mode).root,
             mode=args.mode)
         print(f"[winre-remote] published {pub['dest']}", flush=True)
     return 0 if res["results"]["audit"]["truly_green"] else 1
