@@ -155,7 +155,7 @@ $memDir = Join-Path $OutDir "memory"
 if (Test-Path $memDir) {
   Get-ChildItem $memDir -Directory -Filter "process_*" -ErrorAction SilentlyContinue |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-  Get-ChildItem $memDir -File -Filter "sample_full*.dmp" -ErrorAction SilentlyContinue |
+  Get-ChildItem $memDir -File -Filter "sample_*.dmp" -ErrorAction SilentlyContinue |
     Remove-Item -Force -ErrorAction SilentlyContinue
 }
 $peSieveRan = $false
@@ -207,18 +207,31 @@ try {
   }
   if (-not $samplePid) { Log "WARN: sample process not observed (fast exit?)" }
 
-  # Full process dump while ALIVE: schedule it near the end of the window.
-  # A dump started after Frida exits is useless - the spawned sample is gone
-  # by then (observed: procdump ran on a dead pid -> 0 dumps).
-  $pdProc = $null
+  # Full process dumps while ALIVE. Two passes, because the behaviour gate
+  # stops the window wherever the sample acts instead of where the cap said:
+  # 20.8s on b108, 2.8s on b104, against a 150s cap. A single dump scheduled
+  # at 70% of the cap therefore always lands after the sample has left -
+  # b108's own log is "procdump scheduled in 105s" -> "procdump done (0 dmp)",
+  # and it had dropped b.wnry/c.wnry and exited inside the first second.
+  #   early ~2s : up, first payload already dropped. This is the pass that
+  #               survives an early gate stop, now the common case.
+  #   late  70% : unchanged, for samples that stay up for the whole window and
+  #               unpack in memory later.
+  $pdProcs = @()
   if ($samplePid -and (Test-Path $ProcdumpExe)) {
     New-Item -ItemType Directory -Force -Path $memDir | Out-Null
-    $dumpDelay = [Math]::Max(5, [Math]::Floor($MaxSeconds * 0.7))
-    $dumpCmd = "Start-Sleep -Seconds $dumpDelay; & '$ProcdumpExe' -accepteula -ma $samplePid '$memDir\sample_full'; exit"
-    $pdProc = Start-Process powershell -ArgumentList @(
-      "-NoProfile", "-Command", $dumpCmd
-    ) -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
-    Log ("procdump scheduled in {0}s pid={1}" -f $dumpDelay, $samplePid)
+    $delayEarly = [Math]::Max(2, [Math]::Floor($MaxSeconds * 0.02))
+    $delayLate = [Math]::Max($delayEarly + 5, [Math]::Floor($MaxSeconds * 0.7))
+    foreach ($tag in @("early", "late")) {
+      $delay = if ($tag -eq "early") { $delayEarly } else { $delayLate }
+      $outFile = "$memDir\sample_$tag"
+      $dumpCmd = "Start-Sleep -Seconds $delay; & '$ProcdumpExe' -accepteula -ma $samplePid '$outFile'; exit"
+      $p = Start-Process powershell -ArgumentList @(
+        "-NoProfile", "-Command", $dumpCmd
+      ) -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
+      if ($p) { $pdProcs += $p }
+      Log ("procdump[$tag] scheduled in {0}s pid={1}" -f $delay, $samplePid)
+    }
   }
 
   # ---- KB: Early-Bird/APC-aware capture + sandbox input jiggle -----------
@@ -388,14 +401,20 @@ if (Test-Path $frRun) {
 }
 Log ("window effective={0}s reason={1} adaptive={2} gate={3}/{4}" -f $windowEffective, $windowReason, [bool]$Adaptive, [string]$StopOn, $(if ($windowGate.fired) { [string]$windowGate.kind } else { "not-fired" }))
 
-# The delayed in-run procdump (scheduled at capture time) should be done or
-# nearly done - bounded wait, then report how many dumps landed.
-if ($pdProc) {
-  if (-not ($pdProc | Wait-Process -Timeout 90 -ErrorAction SilentlyContinue)) {
-    Stop-Process -Id $pdProc.Id -Force -ErrorAction SilentlyContinue
+# The delayed in-run procdumps (scheduled at capture time) should be done or
+# nearly done - bounded wait, then report how many dumps landed. Both passes
+# are reported separately: a behaviour-gated window stops early, so the EARLY
+# pass is the one that survives and logging only a combined 0 would hide it.
+foreach ($d in $pdProcs) {
+  if (-not ($d | Wait-Process -Timeout 90 -ErrorAction SilentlyContinue)) {
+    Stop-Process -Id $d.Id -Force -ErrorAction SilentlyContinue
   }
-  Log ("procdump done ({0} dmp)" -f (Get-ChildItem $memDir -Filter "sample_full*.dmp" -ErrorAction SilentlyContinue | Measure-Object).Count)
 }
+foreach ($tag in @("early", "late")) {
+  $n = (Get-ChildItem $memDir -Filter "sample_$tag*.dmp" -ErrorAction SilentlyContinue | Measure-Object).Count
+  Log ("procdump[$tag] done ({0} dmp)" -f $n)
+}
+Log ("procdump total ({0} dmp)" -f (Get-ChildItem $memDir -Filter "sample_*.dmp" -ErrorAction SilentlyContinue | Measure-Object).Count)
 
 Kill-Image "$SampleProcName.exe"
 Kill-Image "frida-helper-64.exe"

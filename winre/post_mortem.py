@@ -208,14 +208,40 @@ def memory_harvest(dyn_dir: Path, sample_pid: int | None) -> dict:
         return {"ok": False, "error": "no sample pid - nothing to harvest"}
     if not Path(PROCDUMP).is_file():
         return {"ok": False, "error": f"procdump missing at {PROCDUMP}"}
+    # A dead pid is the common cause of a failed post-run dump, and procdump's
+    # own message is actively misleading about it: it prints "Try elevating the
+    # command prompt or using PsExec to make one as SYSTEM" for a process that
+    # no longer exists, which sends the analyst chasing a privilege problem
+    # that does not exist. Reproduced live on 2026-10-06 against a stopped PID.
+    try:
+        _pid = int(sample_pid)
+    except (TypeError, ValueError):
+        _pid = -1
+    try:
+        import psutil as _ps
+        alive = _ps.pid_exists(_pid)
+    except Exception:
+        alive = None
+    if alive is False:
+        return {
+            "ok": False, "dumps": [], "count": 0, "dump_dir": str(mem_dir),
+            "note": ("post-run procdump (pid must still be alive)"),
+            "reason": "pid-exited",
+            "error": (f"process {_pid} had already exited before the dump "
+                      "could be taken. Fast-exiting loaders are the rule, not "
+                      "the exception: the in-run capture must happen while the "
+                      "pid is still alive."),
+        }
     rc, out, err = _run([PROCDUMP, "-accepteula", "-ma", str(sample_pid),
                          str(mem_dir / "sample")], 120)
     dumped = sorted(str(p) for p in mem_dir.rglob("*.dmp"))
+    reason = None if dumped else "no-dump-written"
     return {"ok": rc == 0 and bool(dumped),
             "dumps": dumped[:20],
             "count": len(dumped),
             "dump_dir": str(mem_dir),
             "note": ("post-run procdump (pid must still be alive)"),
+            "reason": reason,
             "error": None if dumped else (err or out)[-200:]}
 
 
