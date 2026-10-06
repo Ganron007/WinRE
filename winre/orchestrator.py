@@ -978,6 +978,13 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
             # sample pid (captured while alive) -> post-mortem harvest +
             # ntdll integrity + DFIR-Nexus memory correlation
             meta["sample_pid"] = jm.get("sample_pid")
+            # how the sample was launched. "rundll32" means a DLL was hosted
+            # with a chosen entry point, and the trace header names rundll32 -
+            # a reader needs that before interpreting a single line of it.
+            meta["loader"] = jm.get("loader") or "direct"
+            meta["loader_entry"] = jm.get("loader_entry")
+            if jm.get("detonation_reason"):
+                meta["error"] = jm.get("detonation_reason")
             # detonation-window telemetry (behaviour gate; RevAI item 9)
             meta["max_seconds"] = jm.get("max_seconds")
             if isinstance(jm.get("window"), dict):
@@ -1440,6 +1447,13 @@ def run_dynamic(
                 meta["pe_sieve_pid"] = job_meta.get("pe_sieve_pid")
                 meta["pe_sieve_rc"] = job_meta.get("pe_sieve_rc")
                 meta["sample_pid"] = job_meta.get("sample_pid")
+                # how the sample was launched: "rundll32" means a DLL was
+                # hosted with a chosen entry point (the trace header will say
+                # rundll32, so a reader needs this first)
+                meta["loader"] = job_meta.get("loader") or "direct"
+                meta["loader_entry"] = job_meta.get("loader_entry")
+                if job_meta.get("detonation_reason"):
+                    meta["error"] = job_meta.get("detonation_reason")
             except Exception:
                 pass
 
