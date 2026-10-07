@@ -88,6 +88,54 @@ def test_an_unreachable_vm_fails_closed(ssh):
 
 # ------------------------------------------------------------- the message
 
+def test_the_probe_command_survives_the_ssh_cmd_powershell_hop():
+    """The bug this closes: the first `_probe` wrapped `Test-Path` in an
+    if/else inside `powershell -Command "..."`. The nested quoting did not
+    survive ssh -> cmd -> powershell, so PowerShell echoed the script text
+    and stdout was never "True" - the gate reported every CLEAN VM as dirty
+    and would have blocked every run. The stubbed unit tests could not catch
+    it, because a stub agrees with whatever the implementation says.
+    """
+    from winre import vm_gate
+
+    seen = {}
+
+    def _cap(cfg, cmd, timeout=60):
+        seen["cmd"] = cmd
+
+        class R:
+            returncode = 0
+            stdout = "True"
+            stderr = ""
+        return R()
+
+    orig = vm_gate.remote_driver.ssh_run
+    vm_gate.remote_driver.ssh_run = _cap
+    try:
+        assert vm_gate.vm_is_clean({}) is True
+        cmd = seen["cmd"]
+        assert "Test-Path C:\\WinRE\\.clean_snapshot" in cmd
+        assert "{ 'True' }" not in cmd, "an if/else inside the quotes is the bug"
+    finally:
+        vm_gate.remote_driver.ssh_run = orig
+
+
+def test_a_malformed_probe_answer_is_not_read_as_clean():
+    """A stdout that is the script text rather than True/False must read as
+    dirty: fail closed on shape, not only on content."""
+    from winre import vm_gate
+
+    class Echo:
+        returncode = 0
+        stdout = "if (Test-Path C:\\WinRE\\.clean_snapshot) { 'True' } else { 'False' }"
+        stderr = ""
+
+    orig = vm_gate.remote_driver.ssh_run
+    vm_gate.remote_driver.ssh_run = lambda *a, **k: Echo()
+    try:
+        assert vm_gate.vm_is_clean({}) is False
+    finally:
+        vm_gate.remote_driver.ssh_run = orig
 def test_the_blocker_says_what_to_do(ssh):
     ssh(marker=False)
     b = vm_gate.dirty_blocker({})

@@ -52,10 +52,19 @@ def vm_is_clean(cfg: dict) -> bool:
 
 
 def _probe(cfg: dict):
-    return remote_driver.ssh_run(
-        cfg, f"powershell -NoProfile -Command \\\"if (Test-Path "
-             f"C:\\\\WinRE\\\\{CLEAN_MARKER}) {{ 'True' }} else {{ 'False' }}\\\"",
-        timeout=60)
+    """One SSH call; stdout is exactly "True" or "False".
+
+    Caught by the re-audit: the first version wrapped the test in an
+    if/else inside `powershell -Command "..."`. The nested quoting did not
+    survive the ssh->cmd->powershell hop, and PowerShell echoed the script
+    text instead of running it, so stdout was never "True" and the gate
+    reported every CLEAN VM as dirty - which would have blocked every run.
+    `Test-Path` alone is the form that works; the unit tests did not catch
+    it because they stub ssh_run and so validated my own mistake.
+    """
+    ps = ('powershell -NoProfile -Command '
+          '"Test-Path C:\\WinRE\\' + CLEAN_MARKER + '"')
+    return remote_driver.ssh_run(cfg, ps, timeout=60)
 
 
 def dirty_blocker(cfg: dict) -> dict | None:
