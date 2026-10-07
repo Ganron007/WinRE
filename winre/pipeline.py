@@ -663,13 +663,27 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
     # (the console) that debugged this sha earlier must not be allowed to
     # execute again off a freshly restored, armed snapshot.
     _gate.reset_session()
+    # phase 5 (DESIGN.md section 7): a VM that has already executed a sample is
+    # not a trustworthy analysis host. Read-only modes may still run - they
+    # execute nothing, so demanding a revert per read would be absurd.
+    from . import vm_gate as _vmgate
+    gate_ok, blocker = _vmgate.require_clean_vm(
+        remote_driver.flare_cfg(), mode=mode,
+        agentic_dbg=enable_agentic_dbg, dynamic=enable_dynamic)
+    if blocker:
+        _vmgate.record_refusal(pack, blocker)
     plan = _gate.execution_plan(dynamic=enable_dynamic, debug=enable_agentic_dbg)
     write_execution_plan(pack, plan)
     results["execution_plan"] = plan
-    if not plan.get("ok"):
-        print(f"[winre-pipeline] ABORT: {plan.get('error')}", flush=True)
+    results["vm_gate"] = blocker
+    if not gate_ok or not plan.get("ok"):
+        _msg = blocker.get("reason") if blocker else plan.get("error")
+        print(f"[winre-pipeline] ABORT: {_msg}", flush=True)
+        if blocker:
+            for _step in blocker.get("how_to_clear") or []:
+                print(f"[winre-pipeline]   -> {_step}", flush=True)
         results["aborted"] = True
-        results["error"] = plan.get("error")
+        results["error"] = _msg
         # An audit must ALWAYS reflect the latest attempt. Without this the
         # previous run's truly_green:true survived a refused run, so the UI
         # and AUDIT-REPORT.md showed a green section whose newest run never

@@ -1209,13 +1209,28 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
     # the run intended.
     from . import snapshot_gate as _gate
     _gate.reset_session()      # debug-session scope is per run, not per process
+    # phase 5 (DESIGN.md section 7): a VM that has already executed a sample
+    # is not a trustworthy analysis host, so no executing mode may start on it.
+    # Read-only modes (static/agentic) may: they execute nothing.
+    from . import vm_gate as _vmgate
+    gate_ok, blocker = _vmgate.require_clean_vm(
+        cfg, mode=mode, agentic_dbg=enable_agentic_dbg, dynamic=enable_dynamic)
+    if blocker:
+        _vmgate.record_refusal(pack, blocker)
+        print(f"[winre-remote] VM GATE: {blocker.get('reason')}", flush=True)
+        for _step in blocker.get("how_to_clear") or []:
+            print(f"[winre-remote]   -> {_step}", flush=True)
     plan = _gate.execution_plan(dynamic=enable_dynamic, debug=enable_agentic_dbg)
     write_execution_plan(pack, plan)
-    results: dict = {"execution_plan": plan}
-    if not plan.get("ok"):
-        print(f"[winre-remote] ABORT: {plan.get('error')}", flush=True)
+    results: dict = {"execution_plan": plan, "vm_gate": blocker}
+    if not gate_ok or not plan.get("ok"):
+        _msg = blocker.get("reason") if blocker else plan.get("error")
+        print(f"[winre-remote] ABORT: {_msg}", flush=True)
+        if blocker:
+            for step in blocker.get("how_to_clear") or []:
+                print(f"[winre-remote]   -> {step}", flush=True)
         results["aborted"] = True
-        results["error"] = plan.get("error")
+        results["error"] = _msg
         # An audit must ALWAYS reflect the latest attempt: without this the
         # previous run's `truly_green: true` survived a refused run and the UI
         # showed a green section whose newest run never executed anything

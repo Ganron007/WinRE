@@ -103,8 +103,78 @@ def _pack_verdicts(root: Path) -> dict:
         out["deep"] = v.get("verdict") if isinstance(v, dict) else (v if isinstance(v, str) else None)
         if isinstance(agent.get("source"), str):
             out["source"] = agent["source"]
+    # the analysis plane's verdict for this mode, which is what the composite
+    # consumes and what the report now renders (was: nothing produced it)
+    f = _findings(root)
+    if f:
+        v = f.get("verdict") or {}
+        out["findings"] = {
+            "level": v.get("level"), "confidence": v.get("confidence"),
+            "basis": (v.get("basis") or [])[:10],
+            "limitations": f.get("limitations") or [],
+            "drops": (f.get("findings") or {}).get("drops") or [],
+            "persistence": (f.get("findings") or {}).get("persistence") or [],
+        }
     return out
 
+
+def _sample_summary(sha: str) -> dict:
+    """Everything the UI needs for ONE sample across its modes.
+
+    This is the new workflow's view: four independent producers, one
+    composite, and whether the gate will let the next run start.
+    """
+    modes = {}
+    for m in MODES:
+        root = LOGS_DIR / sha / m
+        if root.is_dir():
+            modes[m] = _pack_verdicts(root)
+    comp = _mode_composite(sha) or {}
+    return {
+        "sha": sha,
+        "modes": modes,
+        "composite": {
+            "level": comp.get("level"),
+            "confidence": comp.get("confidence"),
+            "basis": (comp.get("basis") or [])[:12],
+            "deciding_mode": comp.get("deciding_mode"),
+            "sources": comp.get("sources") or {},
+            "conflicts": comp.get("conflicts") or [],
+        },
+        "vm_gate": _vm_gate_state(),
+    }
+
+
+
+def _findings(root: Path) -> dict | None:
+    """A mode's findings.json - the analysis plane's output (DESIGN.md 2)."""
+    return _read_json(root / "findings.json")
+
+
+def _mode_composite(sha: str) -> dict | None:
+    """The dynamic-weighted verdict over whichever modes produced findings.
+
+    Static is a first-class producer but never the deciding voice: WinRE runs
+    the sample on Windows under a debugger and in a live detonation, and the
+    execution is the stronger claim.
+    """
+    try:
+        from winre.compose import compose_for_sample
+        return compose_for_sample(sha, LOGS_DIR)
+    except Exception:
+        return None
+
+
+def _vm_gate_state() -> dict:
+    """Whether a run may start. A detonated VM is not a trustworthy analysis
+    host, so this is a gate and not a footnote (DESIGN.md 7)."""
+    try:
+        from winre import vm_gate
+        cfg = flare_cfg()
+        return {"clean": vm_gate.dirty_blocker(cfg) is None,
+                "blocker": vm_gate.dirty_blocker(cfg)}
+    except Exception as e:
+        return {"clean": False, "blocker": {"reason": f"gate unreachable: {e}"}}
 
 def _packs() -> list[dict]:
     """List evidence packs (newest first) with audit summaries + verdicts.
