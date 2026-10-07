@@ -51,6 +51,24 @@ def vm_is_clean(cfg: dict) -> bool:
         return False
 
 
+
+ON_VM_REPO = Path("C:/WinRE")
+
+
+def on_vm_repo_root() -> Path | None:
+    """The VM's repo root when this process runs ON the VM, else None.
+
+    control plane the checkout is elsewhere, and reading a marker locally there
+    would silently answer for the wrong machine - so it must return None and
+    let the SSH path stand.
+    """
+    try:
+        here = Path(__file__).resolve().parents[1]
+    except (NameError, OSError):
+        return None
+    return here if str(here).upper() == str(ON_VM_REPO).upper() else None
+
+
 def _probe(cfg: dict):
     """One SSH call; stdout is exactly "True" or "False".
 
@@ -62,6 +80,20 @@ def _probe(cfg: dict):
     `Test-Path` alone is the form that works; the unit tests did not catch
     it because they stub ssh_run and so validated my own mistake.
     """
+    # Running ON the VM (the orchestrator / `--driver local` path), the marker
+    # is a local file and an SSH hop would be ssh-to-self with an empty
+    # hostname - which times out, and vm_is_clean() fails closed, so EVERY
+    # VM-local run was blocked by its own gate. Read it directly there.
+    local = on_vm_repo_root()
+    if local is not None:
+        # This process is the VM control plane, so the marker is a local file
+        # and no hop is needed.
+        class _Local:
+            returncode = 0
+            stdout = "True" if (local / CLEAN_MARKER).is_file() else "False"
+            stderr = ""
+        return _Local()
+
     ps = ('powershell -NoProfile -Command '
           '"Test-Path C:\\WinRE\\' + CLEAN_MARKER + '"')
     return remote_driver.ssh_run(cfg, ps, timeout=60)

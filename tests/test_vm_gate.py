@@ -203,3 +203,52 @@ def test_the_module_has_no_hypervisor_dependency():
     for bad in ("vmrun", "subprocess.run", "Restore-Snapshot",
                 "hypervisor_restore", "revert_snapshot"):
         assert bad not in src, f"{bad} would make the gate a revert feature"
+
+def test_a_run_started_on_the_vm_must_not_ssh_to_itself(tmp_path, monkeypatch):
+    """The defect this closes: `_probe` always used ssh_run, so code running ON
+    the VM SSHed to itself with an empty hostname, timed out after 60s, and
+    vm_is_clean() failed closed - blocking every VM-local run.
+
+    hop is needed.
+    """
+    import winre.vm_gate as vg
+
+    fake = tmp_path / "WinRE"
+    fake.mkdir(parents=True)
+    monkeypatch.setattr(vg, "on_vm_repo_root", lambda: fake)
+    marker = fake / vg.CLEAN_MARKER
+    marker.write_text("armed")
+
+    def _boom(*a, **k):
+        raise AssertionError("must not SSH to itself")
+
+    monkeypatch.setattr(vg.remote_driver, "ssh_run", _boom)
+    assert vg.vm_is_clean({}) is True, "an armed VM must not block a local run"
+
+    marker.unlink()
+    assert vg.vm_is_clean({}) is False, "a dirty VM must still block"
+    # falling back to SSH is covered by test_a_host_run_still_uses_ssh
+
+
+def test_a_host_run_still_uses_ssh():
+    """The control plane is NOT on the VM, so it must keep using SSH - reading a
+    local path there would silently answer for the wrong machine."""
+    import winre.vm_gate as vg
+    seen = {}
+
+    def _cap(cfg, cmd, timeout=60):
+        seen["cmd"] = cmd
+
+        class R:
+            returncode = 0
+            stdout = "True"
+            stderr = ""
+        return R()
+
+    orig = vg.remote_driver.ssh_run
+    vg.remote_driver.ssh_run = _cap
+    try:
+        assert vg.vm_is_clean({}) is True
+        assert "Test-Path" in seen.get("cmd", ""), "the host must still probe over SSH"
+    finally:
+        vg.remote_driver.ssh_run = orig
