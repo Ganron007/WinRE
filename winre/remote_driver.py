@@ -44,7 +44,8 @@ from .mcp.x64dbg_client import X64DbgClient
 from . import findings as _findings  # host-side analysis plane; no VM tools
 
 REPO = Path(__file__).resolve().parents[1]
-LOCAL_LOGS = Path(os.environ.get("WINRE_PIPELINE_LOGS", str(REPO / "logs")))
+from .paths import evidence_root as _evidence_root
+LOCAL_LOGS = _evidence_root()
 
 
 def flare_cfg() -> dict:

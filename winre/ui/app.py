@@ -39,7 +39,7 @@ from winre.remote_driver import flare_cfg  # noqa: E402
 from winre.evidence import MODES, pack_sections  # noqa: E402
 
 # Evidence packs live on the control plane (pulled by remote driver)
-LOGS_DIR = Path(remote_driver.LOCAL_LOGS)
+LOGS_DIR = Path(remote_driver.LOCAL_LOGS)   # one authority: winre.paths
 
 # A single run at a time (deterministic; avoid VM stampede)
 _run_lock = threading.Lock()

@@ -57,8 +57,13 @@ except ImportError:
 # host, so this yields C:\\WinRE\\logs there and <checkout>\\logs here.
 # WINRE_PIPELINE_LOGS overrides both. Always gitignored.
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LOGS_DIR = Path(os.environ.get("WINRE_PIPELINE_LOGS")
-                 or (REPO_ROOT / "logs")).resolve()
+# ONE authority: winre.paths.evidence_root(). Do not derive this locally.
+# pipeline, remote_driver and the UI each computed it separately and
+# disagreed on a real input (a path with whitespace resolved differently
+# in the two), making the UI and the CLI show different packs for the
+# same run. docs/internal/DESIGN.md section 6.
+from .paths import evidence_root as _evidence_root
+LOGS_DIR = _evidence_root()
 SESSIONS_DIR = LOGS_DIR.parent / "sessions"
 
 
