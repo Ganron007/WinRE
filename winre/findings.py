@@ -518,7 +518,8 @@ def static_findings(mode_root: Path, *, sha: str = "") -> dict:
     # --- emulation (the Windows advantage: run it, don't just read it) ----
     emu = (ev.get("emulation") or {}) or {}
     apis = emu.get("api_calls") or []
-    findings["emulation"] = {"api_calls": len(apis) if isinstance(apis, list) else 0,
+    emu_apis = apis if isinstance(apis, list) else []
+    findings["emulation"] = {"api_calls": len(emu_apis),
                              "ok": bool(emu.get("ok"))}
 
     # --- what the deep dive itself concluded ------------------------------
@@ -533,11 +534,24 @@ def static_findings(mode_root: Path, *, sha: str = "") -> dict:
     for e in (deep.get("key_evidence") or [])[:6]:
         basis.append("evidence:" + (e if isinstance(e, str) else json.dumps(e))[:60])
 
+    # Capa capabilities mapped to ATT&CK are independent evidence: a sample
+    # that encodes with XOR/DES and walks the PEB has done something worth
+    # reporting even when the deep dive declines to call it. Weighting them is
+    # what keeps a static run from collapsing to `unknown` on real signal.
+    attack_caps = [c for c in caps if c["attack"]]
+    strong = [c for c in findings["yara"]
+              if isinstance(c.get("reliability"), int) and c["reliability"] >= 60]
+    high_lvl = [a for a in anomalies if isinstance(a.get("level"), int) and a["level"] >= 3]
+
     level, conf = UNKNOWN, "low"
-    if dv == MALICIOUS:
+    if dv == MALICIOUS or (strong and high_lvl):
         level, conf = MALICIOUS, "high"
     elif dv == SUSPICIOUS:
         level, conf = SUSPICIOUS, "medium"
+    elif len(attack_caps) >= 4 or strong or high_lvl:
+        level, conf = SUSPICIOUS, "medium"
+    elif attack_caps or emu_apis:
+        level, conf = SUSPICIOUS, "low"
     elif dv == BENIGN:
         level, conf = BENIGN, "medium" if basis else "low"
 

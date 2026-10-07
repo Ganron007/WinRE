@@ -38,6 +38,7 @@ from .evidence import (EvidencePack, stage_result, utcnow, verdict_fields,
                        write_execution_plan, resolve_pack_mode)
 from . import audit as audit_mod
 from . import yara_gen
+from .findings import build as _build_findings   # analysis plane (DESIGN.md 2)
 
 # Make `python -m winre.pipeline` work; also allow `python winre/pipeline.py`.
 try:
@@ -788,6 +789,12 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
             "unmet_expectations": audit_res.get("unmet_expectations") or [],
             "execution_plan": plan,
             "pack_mode": pack_mode,
+            # findings for THIS mode. Without this a --driver local run of
+            # --mode static produced no findings.json at all, so the
+            # dynamic-weighted composite (winre.compose) had nothing to
+            # consume and the report said "the analysis plane did not run"
+            # when it had simply never been invoked.
+            "findings": _build_findings(pack_mode, pack.root, sha=sha),
             "llm_roles": audit_res.get("llm_roles"),
             "generated_at": utcnow(),
         }, indent=2) + "\n", encoding="utf-8")
