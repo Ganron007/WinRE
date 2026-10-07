@@ -83,8 +83,8 @@ def test_limitations_are_always_present():
     assert f["ok"] is False
 
 
-def test_a_missing_pack_is_not_silent():
-    f = findings.build("dynamic", pathlib.Path("does-not-exist"), sha="y" * 64)
+def test_a_missing_pack_is_not_silent(tmp_path):
+    f = findings.build("dynamic", tmp_path / "nope", sha="y" * 64)
     assert f["ok"] is False and f["verdict"]["level"] == findings.UNKNOWN
     assert f["limitations"]
 
