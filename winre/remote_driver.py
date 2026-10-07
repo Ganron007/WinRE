@@ -41,6 +41,7 @@ from .evidence import (EvidencePack, stage_result, verdict_fields
 from . import run_nonce
 from .run_nonce import new_run_id
 from .mcp.x64dbg_client import X64DbgClient
+from . import findings as _findings  # host-side analysis plane; no VM tools
 
 REPO = Path(__file__).resolve().parents[1]
 LOCAL_LOGS = Path(os.environ.get("WINRE_PIPELINE_LOGS", str(REPO / "logs")))
@@ -459,6 +460,10 @@ env.setdefault("WINRE_ORCH_LOCK", str(pipeline / "lock" / "orchestrator.lock"))
 env["REVENG_LOGS_DIR"] = str(pipeline / "logs")
 env["WINRE_DYNAMIC_DIR"] = str(pipeline / "logs" / sha / section / "dynamic")
 env["REVENG_SESSIONS_DIR"] = str(sessions)
+# phase 3 (docs/internal/DESIGN.md section 2): the orchestrator is about to run
+# ON THE FLAREVM, so the analysis half of _post_pull_enrich must not run there.
+# It runs on this side after the pull, in winre.analysis.
+env["WINRE_POST_PULL_OFF_VM"] = "1"
 if run_id:
     env["WINRE_RUN_ID"] = run_id
 
@@ -686,9 +691,35 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     # clock skew is a DIAGNOSTIC only (never part of the freshness decision)
     skew = clock_skew_s(cfg, cached=clock)
     restore_required = bool(meta.get("restore_required"))
+
+    # ---- FINDINGS (phase 3, docs/internal/DESIGN.md section 2) ---------
+    # Everything derived happens HERE, on the control plane, after the pull.
+    # The analysis that used to run inside orchestrator._post_pull_enrich ran
+    # ON THE FLAREVM - a box that had just executed the sample, whose python,
+    # tshark and libraries are all fair game for a sample that wanted to
+    # tamper with them. The VM is now an evidence producer only.
+    #
+    # STAGE.json's `verdict` now comes from the findings, so
+    # audit.dynamic_verdict stops being null and dynamic_conflict stops being
+    # dead code that has never once fired.
+    dyn_findings = _findings.build(pack.mode or "dynamic",
+                                   pack.stages["dynamic"], sha=sha)
+    # phase 3: the analysis half of _post_pull_enrich, run HERE. The VM was
+    # told to defer it (WINRE_POST_PULL_OFF_VM) so nothing interprets the
+    # evidence on the box that just executed the sample.
+    if ok:
+        try:
+            from . import analysis as _analysis
+            stage_meta["post_analysis"] = _analysis.run(pack.stages["dynamic"])
+        except Exception as e:
+            stage_meta["post_analysis"] = {"error": f"{type(e).__name__}: {e}"}
+
     stage_meta = stage_result("dynamic", ok, error=err,
                               summary=(f"events={meta.get('frida_events')} "
                                        f"ok={ok}"
+                                       + (f" | findings="
+                                          f"{(dyn_findings.get('verdict') or {}).get('level')}"
+                                          if dyn_findings.get("verdict") else "")
                                        + (" | VM DIRTY - restore the "
                                           "snapshot before the next run"
                                           if restore_required else "")),
@@ -696,7 +727,9 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                               vm_dirty=bool(meta.get("vm_dirty")),
                               frida_events=meta.get("frida_events"),
                               detonation_ran=meta.get("detonation_ran"),
-                              verdict=meta.get("verdict"),
+                              verdict=((dyn_findings.get("verdict") or {})
+                                       .get("level")) or meta.get("verdict"),
+                              findings=dyn_findings,
                               elapsed_s=round(time.time() - t0, 1),
                               gate_pass=gate_pass, gate=gate.get("gate"),
                               helper_rc=helper_rc,

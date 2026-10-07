@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 WinRE dynamic detonation orchestrator (Flare-VM).
 
@@ -110,62 +110,48 @@ def _sample_format(session: dict, sample: str) -> str:
 
 def _post_pull_enrich(dyn_dir: Path, sha: str,
                       sample_pid: int | None = None) -> dict:
-    """tshark enrich + KB-derived post-analysis + ANALYST-NEXT after every
-    dynamic pull (Win or ELF).
+    """Post-run steps after every dynamic pull (Win or ELF).
 
-    KB additions (2026-09-07): pcap beacon/HTTP schema (Wireshark course),
-    Procmon persistence catalog + behavior timeline + spoof suspects (Maldev
-    47/48 + Mandiant cheat sheet), post-mortem harvest + ntdll integrity
-    (Volatility Part3 / Maldev 83-89), emulation-vs-detonation diff
-    (speakeasy predicted vs Frida observed APIs). All best-effort, never gating.
+    SPLIT BY TRUST (docs/internal/DESIGN.md section 2). In remote mode this
+    function runs ON THE FLAREVM, so only steps that need the live VM may run
+    here - and only the ones that COLLECT evidence, never ones that interpret
+    it:
+
+      VM-side, kept   - post_mortem (procdump of a live process +
+                         ReadProcessMemory for ntdll integrity)
+                      - windbg_dump  (mcp-windbg is localhost-bound on :9097)
+
+      host-side, moved - tshark pcap enrich, pcap beacon analysis, the Procmon
+                         persistence catalog, and the emulation diff. Those run
+                         in winre/analysis.py on the control plane, because a
+                         box that has just executed the sample is not a
+                         trustworthy analyst of it.
+
+    The driver sets WINRE_POST_PULL_OFF_VM=1 for remote runs. When that is set
+    the moved steps are recorded as DEFERRED rather than silently absent, so a
+    reader can tell "ran elsewhere" from "never ran".
     """
+    off_vm = os.environ.get("WINRE_POST_PULL_OFF_VM", "").strip() not in (
+        "", "0", "false", "no")
     notes: dict = {"enrich_pcap": None, "analyst_next": None,
                    "pcap_beacon": None, "procmon_post": None,
                    "post_mortem": None, "emu_diff": None}
-    enrich = _local_tool("enrich_pcap_tshark.py")
-    if enrich and (dyn_dir / "network_raw").is_dir():
-        try:
-            r = subprocess.run(
-                [sys.executable, str(enrich), str(dyn_dir)],
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-            notes["enrich_pcap"] = {
-                "rc": r.returncode,
-                "stdout": (r.stdout or "")[-300:],
-            }
-        except Exception as e:
-            notes["enrich_pcap"] = {"error": str(e)}
+    deferred = {}
+
+    if off_vm:
+        for k in ("enrich_pcap", "pcap_beacon", "procmon_post", "emu_diff"):
+            deferred[k] = "deferred: runs on the control plane (winre.analysis)"
     else:
-        notes["enrich_pcap"] = {"skipped": True, "reason": "no script or no network_raw"}
+        notes.update(_post_pull_enrich_local(dyn_dir))
 
-    # KB: beacon cadence + HTTP param/UA schema from pcaps
-    try:
-        from winre.pcap_beacon import analyze_pcaps
-        notes["pcap_beacon"] = analyze_pcaps(dyn_dir)
-    except Exception as e:
-        notes["pcap_beacon"] = {"error": str(e)[:200]}
-
-    # KB: Procmon persistence catalog + behavior timeline + spoof suspects
-    if (dyn_dir / "procmon.csv").is_file():
-        try:
-            from winre.procmon_post import build_procmon_report
-            notes["procmon_post"] = build_procmon_report(dyn_dir)
-        except Exception as e:
-            notes["procmon_post"] = {"error": str(e)[:200]}
-
-    # KB: memory harvest + ntdll integrity + process snapshot (DFIR-Nexus
-    # handoff: process-level dumps here; full-image is DFIR-Nexus-owned)
+    # VM-side: live capture + localhost-bound dump triage
     try:
         from winre.post_mortem import run_all as _pm
-        # prefer the caller's live value (META.json may not be written yet
-        # when this runs — it is written AFTER enrichment)
         if sample_pid is None:
             meta_f = dyn_dir / "META.json"
             if meta_f.is_file():
                 try:
-                    meta_pm = json.loads(meta_f.read_text(encoding="utf-8")) or {}
+                    meta_pm = json.loads(meta_f.read_text(encoding="utf-8-sig")) or {}
                     sample_pid = meta_pm.get("sample_pid")
                 except Exception:
                     pass
@@ -173,41 +159,61 @@ def _post_pull_enrich(dyn_dir: Path, sha: str,
     except Exception as e:
         notes["post_mortem"] = {"error": str(e)[:200]}
 
-    # emulation-vs-detonation diff: speakeasy predicted vs Frida observed
-    try:
-        from winre.emu_diff import compare as _emu_diff
-        notes["emu_diff"] = _emu_diff(dyn_dir)
-    except Exception as e:
-        notes["emu_diff"] = {"error": str(e)[:200]}
-
-    # WinDbg dump analysis (mcp-windbg, PASSIVE): triage the in-run captures
-    # (!analyze -v + exception/module/stack highlights). Runs on the VM where
-    # the :9097 server is localhost-bound; honest skip elsewhere.
     try:
         from winre.windbg_post import analyze_dump as _wb
         notes["windbg_dump"] = _wb(dyn_dir)
     except Exception as e:
         notes["windbg_dump"] = {"error": str(e)[:200]}
 
-    emit = _local_tool("emit_analyst_next.py")
-    if emit:
+    # ANALYST-NEXT over what is present. It enumerates artefacts and names the
+    # human steps; it is not a verdict and must not read as one.
+    try:
+        from winre.emit_analyst_next import emit
+        notes["analyst_next"] = emit(dyn_dir, sha)
+    except Exception as e:
+        notes["analyst_next"] = {"error": str(e)[:200]}
+
+    if deferred:
+        notes["deferred_to_control_plane"] = deferred
+    return notes
+
+
+def _post_pull_enrich_local(dyn_dir: Path) -> dict:
+    """The analysis half, used only when this runs on the analysis host
+    itself (`--driver local`). Never invoked on a remote VM."""
+    notes: dict = {}
+    enrich = _local_tool("enrich_pcap_tshark.py")
+    if enrich and (dyn_dir / "network_raw").is_dir():
         try:
             r = subprocess.run(
-                [sys.executable, str(emit), str(dyn_dir), "--sha", sha],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            notes["analyst_next"] = {
-                "rc": r.returncode,
-                "path": str(dyn_dir / "ANALYST-NEXT.md"),
-                "stdout": (r.stdout or "")[-300:],
-            }
+                [sys.executable, str(enrich), str(dyn_dir)],
+                capture_output=True, text=True, timeout=300,
+                encoding="utf-8", errors="replace")
+            notes["enrich_pcap"] = {"rc": r.returncode,
+                                    "stdout": (r.stdout or "")[-300:]}
         except Exception as e:
-            notes["analyst_next"] = {"error": str(e)}
+            notes["enrich_pcap"] = {"error": str(e)}
     else:
-        notes["analyst_next"] = {"skipped": True, "reason": "emit_analyst_next.py missing"}
+        notes["enrich_pcap"] = {"skipped": True,
+                                "reason": "no script or no network_raw"}
+    try:
+        from winre.pcap_beacon import analyze_pcaps
+        notes["pcap_beacon"] = analyze_pcaps(dyn_dir)
+    except Exception as e:
+        notes["pcap_beacon"] = {"error": str(e)[:200]}
+    if (dyn_dir / "procmon.csv").is_file():
+        try:
+            from winre.procmon_post import build_procmon_report
+            notes["procmon_post"] = build_procmon_report(dyn_dir)
+        except Exception as e:
+            notes["procmon_post"] = {"error": str(e)[:200]}
+    try:
+        from winre.emu_diff import compare as _emu_diff
+        notes["emu_diff"] = _emu_diff(dyn_dir)
+    except Exception as e:
+        notes["emu_diff"] = {"error": str(e)[:200]}
     return notes
+
 
 
 def _run_elf_dynamic(sha: str, sample: str, dyn_dir: Path, max_seconds: int, meta: dict) -> dict:
