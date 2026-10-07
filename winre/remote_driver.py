@@ -432,7 +432,7 @@ section = "agentic"
 run_id = None
 dll_entry = None
 for _a in sys.argv[4:]:
-    if _a.startswith("--section=") and _a.split("=", 1)[1] in ("agentic", "static"):
+    if _a.startswith("--section=") and _a.split("=", 1)[1] in MODES:
         section = _a.split("=", 1)[1]
     if _a.startswith("--idle-stop="):
         try:
@@ -1154,13 +1154,18 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
     mode: "agentic" (default, RevAI agentic) or "static" (deterministic,
     RevAI scripted). dry_llm stays orthogonal.
     """
-    from .evidence import sha256_file
+    from .evidence import sha256_file, resolve_pack_mode
     from . import audit as audit_mod
     from . import yara_gen
 
     cfg = flare_cfg()
     sha = sha256_file(sample)
-    pack = EvidencePack(LOCAL_LOGS, sha, mode=mode).ensure()
+    # one authority decides which pack root this run owns (docs/internal/
+    # DESIGN.md 1.2e: dbg/dynamic used to share the agentic root and overwrite
+    # each other)
+    pack_mode = resolve_pack_mode(mode, agentic_dbg=enable_agentic_dbg,
+                                  dynamic=enable_dynamic)
+    pack = EvidencePack(LOCAL_LOGS, sha, mode=pack_mode).ensure()
 
     # ---- RUN-LEVEL EXECUTION PLAN (fail fast, before any stage) -----------
     # Under `enforce` the clean marker is one-shot: a run that asks for two
@@ -1423,9 +1428,10 @@ def main() -> int:
         # under LOCAL_LOGS, so publishing looked in a different root and
         # either failed or published somebody else's pack (code audit
         # 2026-10-06).
+        _pub_mode = res.get("pack_mode") or args.mode
         pub = publish_case(
-            EvidencePack(LOCAL_LOGS, res["sha"], mode=args.mode).root,
-            mode=args.mode)
+            EvidencePack(LOCAL_LOGS, res["sha"], mode=_pub_mode).root,
+            mode=_pub_mode)
         print(f"[winre-remote] published {pub['dest']}", flush=True)
     return 0 if res["results"]["audit"]["truly_green"] else 1
 

@@ -52,13 +52,47 @@ class EvidencePack:
 
     STAGES = ("intake", "quick", "dynamic", "deep", "yara", "report")
 
-    # Deep-dive engine sections (RevAI: scripted/agentic folders). mode=None
-    # = legacy flat layout logs/<sha>/ (read-only compat for old packs).
-    MODES = ("agentic", "static")
+    # Deep-dive engine sections. mode=None = legacy flat layout logs/<sha>/
+    # (read-only compat for old packs).
+    #
+    # FOUR independent producers, not two. `--agentic-dbg` and `--dynamic` are
+    # CAPABILITIES, not modes, but they produce genuinely different evidence
+    # from a plain agentic run - an unpacked image and a full detonation. When
+    # they shared a pack root, runs overwrote each other (see docs/internal/
+    # DESIGN.md 1.2e): run 3 clobbered run 2's deep.json, so no two modes could
+    # ever be compared and the only "verdict change" observable was
+    # last-write-wins. Each capability now owns its own root.
+    MODES = ("static", "agentic", "dbg", "dynamic")
+    # capability flags that select a pack root; everything else is `static` or
+    # `agentic` on its given engine
+    MODE_AGENTIC_DBG = "dbg"
+    MODE_DYNAMIC = "dynamic"
+
+    @classmethod
+    def resolve_mode(cls, mode: str | None, *, agentic_dbg: bool = False,
+                     dynamic: bool = False) -> str:
+        """The pack mode from the CLI's mode + capability flags.
+
+        A single authority, used by the driver and the pipeline alike, so the
+        two can never disagree about where a run's evidence lands.
+        """
+        if mode == "static":
+            # static has no debug/detonation variants
+            return "static"
+        if dynamic:
+            return cls.MODE_DYNAMIC
+        if agentic_dbg:
+            return cls.MODE_AGENTIC_DBG
+        return "agentic"
 
     def __init__(self, logs_dir: Path, sha: str, mode: str | None = None):
         self.logs_dir = Path(logs_dir)
         self.sha = sha
+        if mode is not None and mode not in self.MODES:
+            # fail closed. An unknown mode used to collapse to the legacy flat
+            # layout and quietly merge two runs' evidence into one pack.
+            raise ValueError(
+                f"unknown pack mode {mode!r}; expected one of {self.MODES}")
         self.mode: str | None = mode if mode in self.MODES else None
         self.root = (self.logs_dir / sha / self.mode) if self.mode \
             else (self.logs_dir / sha)
@@ -135,7 +169,21 @@ def verdict_fields(verdict) -> tuple[dict | None, str | None, bool]:
     return None, None, True
 
 
-MODES = ("static", "agentic")
+MODES = EvidencePack.MODES
+
+
+def resolve_pack_mode(mode: str | None, *, agentic_dbg: bool = False,
+                      dynamic: bool = False) -> str:
+    """The pack mode for a run. One authority, used by every entry point.
+
+    Four independent producers (docs/internal/DESIGN.md section 3): `static`,
+    `agentic`, `dbg`, `dynamic`. A sample analysed with two modes yields two
+    packs and reporting compares them, instead of the second overwriting the
+    first - which is what happened when dbg/dynamic shared the agentic root
+    (DESIGN.md section 1.2e).
+    """
+    return EvidencePack.resolve_mode(mode, agentic_dbg=agentic_dbg,
+                                     dynamic=dynamic)
 
 
 def sha_of(pack_root) -> str:

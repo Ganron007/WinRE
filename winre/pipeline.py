@@ -35,7 +35,7 @@ import time
 from pathlib import Path
 
 from .evidence import (EvidencePack, stage_result, utcnow, verdict_fields,
-                       write_execution_plan)
+                       write_execution_plan, resolve_pack_mode)
 from . import audit as audit_mod
 from . import yara_gen
 
@@ -645,7 +645,11 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
       - requires snapshot restore after (analyst/operator)
     """
     sha = __import__("winre.evidence", fromlist=["sha256_file"]).sha256_file(sample)
-    pack = EvidencePack(LOGS_DIR, sha, mode=mode).ensure()
+# one authority decides which pack root this run owns; dbg and dynamic each
+    # own one so no run overwrites another (docs/internal/DESIGN.md 3)
+    pack_mode = resolve_pack_mode(mode, agentic_dbg=enable_agentic_dbg,
+                                  dynamic=enable_dynamic)
+    pack = EvidencePack(LOGS_DIR, sha, mode=pack_mode).ensure()
     results: dict = {}
 
     # ---- RUN-LEVEL EXECUTION PLAN (fail fast, before any stage) -----------
@@ -756,7 +760,7 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
         _deep_meta = pack.read("deep", "META.json") or {}
         (pack.root / "META.json").write_text(json.dumps({
             "sha256": sha,
-            "mode": mode,
+            "mode": pack_mode,
             "engine": _deep_meta.get("engine"),
             "source": (results.get("report") or {}).get("source"),
             "phase": (results.get("report") or {}).get("phase"),
@@ -764,6 +768,7 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
             "truly_green": audit_res["truly_green"],
             "unmet_expectations": audit_res.get("unmet_expectations") or [],
             "execution_plan": plan,
+            "pack_mode": pack_mode,
             "llm_roles": audit_res.get("llm_roles"),
             "generated_at": utcnow(),
         }, indent=2) + "\n", encoding="utf-8")
@@ -857,8 +862,9 @@ def main() -> int:
         if args.publish:
             from .reporting import publish_case
             from .evidence import EvidencePack as _EP
-            pub = publish_case(_EP(LOGS_DIR, res["sha"], mode=args.mode).root,
-                               mode=args.mode)
+            pub = publish_case(_EP(LOGS_DIR, res["sha"],
+                           mode=res.get("pack_mode") or args.mode).root,
+                               mode=res.get("pack_mode") or args.mode)
             print(f"[winre-pipeline] published {pub['dest']}", flush=True)
         return 0 if res["results"]["audit"]["truly_green"] else 1
     res = run_pipeline(args.sample, max_seconds=args.max_seconds,
@@ -872,8 +878,9 @@ def main() -> int:
         return 2   # fail fast before anything executed
     if args.publish:
         from .reporting import publish_case
-        pub = publish_case(EvidencePack(LOGS_DIR, res["sha"], mode=args.mode).root,
-                           mode=args.mode)
+        pub = publish_case(EvidencePack(LOGS_DIR, res["sha"],
+                                        mode=res.get("pack_mode") or args.mode).root,
+                           mode=res.get("pack_mode") or args.mode)
         print(f"[winre-pipeline] published {pub['dest']}", flush=True)
     return 0 if res["results"]["audit"]["truly_green"] else 1
 

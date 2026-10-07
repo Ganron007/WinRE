@@ -36,7 +36,7 @@ sys.path.insert(0, str(REPO))
 
 from winre import remote_driver  # noqa: E402
 from winre.remote_driver import flare_cfg  # noqa: E402
-from winre.evidence import pack_sections  # noqa: E402
+from winre.evidence import MODES, pack_sections  # noqa: E402
 
 # Evidence packs live on the control plane (pulled by remote driver)
 LOGS_DIR = Path(remote_driver.LOCAL_LOGS)
@@ -51,13 +51,13 @@ def _section_root(sha: str, mode: str | None) -> Path:
     """Pack section root: logs/<sha>/<mode>/, falling back to the legacy
     flat layout logs/<sha>/ for pre-sectioning packs. With no mode given,
     auto-pick the section when the pack only has sectioned layouts."""
-    if mode in ("agentic", "static") and (LOGS_DIR / sha / mode).is_dir():
+    if mode in MODES and (LOGS_DIR / sha / mode).is_dir():
         return LOGS_DIR / sha / mode
     flat = LOGS_DIR / sha
     if mode is None and flat.is_dir():
         stages = ("intake", "quick", "deep", "dynamic", "yara", "report")
         if not any((flat / s).is_dir() for s in stages):
-            for sec in ("agentic", "static"):
+            for sec in MODES:
                 if (flat / sec).is_dir():
                     return flat / sec
     return flat
@@ -88,7 +88,7 @@ def _pack_verdicts(root: Path) -> dict:
     pm = _read_json(root / "META.json") or {}
     dm = _read_json(root / "deep" / "META.json") or {}
     for src in (pm.get("mode"), dm.get("mode")):
-        if src in ("agentic", "static"):
+        if src in MODES:
             out["mode"] = src
             break
     else:
@@ -164,7 +164,7 @@ def _pack_detail(sha: str, mode: str | None = None) -> dict | None:
         detail["stages"][stage] = files
     detail["views"] = _pack_views(d, detail["stages"])
     pm = _read_json(d / "META.json") or {}
-    detail["mode"] = (pm.get("mode") if pm.get("mode") in ("agentic", "static")
+    detail["mode"] = (pm.get("mode") if pm.get("mode") in MODES
                       else mode)
     return detail
 
@@ -751,7 +751,7 @@ def create_app() -> "Flask":
                 except ValueError:
                     idle_stop_seconds = 10
                 mode = request.form.get("mode", "agentic")
-                if mode not in ("agentic", "static"):
+                if mode not in MODES:
                     mode = "agentic"
                 _run_state["sha"] = None
                 _run_state["log"] = []
@@ -844,7 +844,7 @@ def create_app() -> "Flask":
             return jsonify({"ok": False, "error": "pack not found"}), 404
         body = request.get_json(force=True, silent=True) or {}
         mode = body.get("mode") or request.args.get("mode") or "agentic"
-        if mode not in ("agentic", "static"):
+        if mode not in MODES:
             mode = "agentic"
         if stage == "dynamic" and not body.get("confirm_snapshot"):
             return jsonify({
@@ -953,7 +953,7 @@ def create_app() -> "Flask":
             return jsonify({"ok": False, "error": "pack not found"}), 404
         body = request.get_json(force=True, silent=True) or {}
         mode = body.get("mode") or request.args.get("mode") or "agentic"
-        if mode not in ("agentic", "static"):
+        if mode not in MODES:
             mode = "agentic"
         tool = (body.get("tool") or "").strip()
         if tool not in TOOL_NAMES:
@@ -1080,7 +1080,7 @@ def create_app() -> "Flask":
                     continue  # skip >64MB monsters (pcaps dumps are separate)
                 zf.write(f, f.relative_to(root))
         buf.seek(0)
-        tag = (mode or (root.name if root.name in ("agentic", "static") else "pack"))
+        tag = (mode or (root.name if root.name in MODES else "pack"))
         return Response(buf.getvalue(), mimetype="application/zip",
                         headers={"Content-Disposition":
                                  f"attachment; filename=winre-{sha[:16]}-{tag}.zip"})
