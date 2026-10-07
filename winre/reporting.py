@@ -393,9 +393,61 @@ def build_report_v3(pack_root: Path) -> dict:
 
     A("## 8. Dynamic analysis")
     A("")
+
     if has_dynamic:
-        A(f"- Detonation ran (frida_events={dyn.get('frida_events')}) — "
-          "dynamic section expanded after detonation stage; see `dynamic/` artifacts.")
+        dvi = _load(pack_root / "dynamic" / "findings.json")
+        if not dvi:
+            A(f"- Detonation ran (frida_events={dyn.get('frida_events')}). "
+              "No findings.json was produced for this pack - the analysis "
+              "plane did not run, so nothing below is a conclusion.")
+        else:
+            v = dvi.get("verdict") or {}
+            A(f"- **Dynamic findings: {str(v.get('level')).upper()} "
+              f"(confidence {v.get('confidence')})** - derived on the analysis "
+              f"host from pulled evidence, not on the VM.")
+            basis = v.get("basis") or []
+            if basis:
+                A("  - basis: " + ", ".join(f"`{b}`" for b in basis[:10]))
+            fd = dvi.get("findings") or {}
+            if fd.get("drops"):
+                A(f"  - **payload drops ({len(fd['drops'])}):**")
+                for d in fd["drops"][:6]:
+                    flag = (" *(persistence location)*"
+                            if d.get("persistence_location") else "")
+                    A(f"    - `{d['path']}`{flag}")
+            if fd.get("device_writes"):
+                A("  - **raw-device writes:** "
+                  + ", ".join(f"`{x}`" for x in fd["device_writes"][:4])
+                  + " - a wiper or raw-disk tamper")
+            net = fd.get("network") or {}
+            if net.get("c2"):
+                A(f"  - **C2 candidates ({len(net['c2'])}):**")
+                for c in net["c2"][:6]:
+                    A(f"    - `{c.get('host')}` ({c.get('kind')})")
+            if net.get("beacons"):
+                A(f"  - beacon candidates: {len(net['beacons'])}")
+            if net.get("pcap_deep_dive"):
+                A(f"  - pcap deep-dive: {net['pcap_deep_dive']}")
+            for inj in (fd.get("injection") or []):
+                A("  - injection chain: "
+                  + " -> ".join(f"`{a}`" for a in inj.get("chain") or [])
+                  + f" ({inj.get('confidence')})")
+            w = fd.get("window") or {}
+            if w.get("effective_s") is not None:
+                gate = (f"gate {w.get('gate_kind')}/{w.get('gate_api')} "
+                        f"at {w.get('gate_at_s')}s"
+                        if w.get("gate_fired") else "gate did not fire")
+                A(f"  - window: {w.get('effective_s')}s, "
+                  f"stop={w.get('stop_reason')}, {gate}")
+            mem = fd.get("memory") or {}
+            if mem.get("dumps"):
+                A(f"  - memory: {mem['dumps']} dumps, "
+                  f"{mem.get('bytes', 0) / 1e6:.0f} MB")
+            lim = dvi.get("limitations") or []
+            if lim:
+                A("  - **limitations:**")
+                for l in lim[:5]:
+                    A(f"    - {l}")
         ed = _load(pack_root / "dynamic" / "emu_diff.json") or {}
         if ed.get("ok"):
             A(f"- **Emulation-vs-detonation:** speakeasy predicted "
@@ -405,18 +457,16 @@ def build_report_v3(pack_root: Path) -> dict:
             if ed.get("only_predicted"):
                 A("- predicted-only: "
                   + ", ".join(f"`{a}`" for a in ed["only_predicted"][:10])
-                  + " — emulation saw these, detonation didn't "
-                  "(env-gating/anti-emulation candidate — investigate).")
+                  + " - emulation saw these, detonation didn't "
+                  "(env-gating/anti-emulation candidate - investigate).")
             if ed.get("only_observed"):
                 A("- observed-only: "
                   + ", ".join(f"`{a}`" for a in ed["only_observed"][:10])
-                  + " — detonation saw these, emulation missed "
+                  + " - detonation saw these, emulation missed "
                   "(emulation coverage gap).")
     else:
         A("- Not run (static-only pack). Detonation is opt-in, segregated, "
-          "runs LAST, snapshot-gated. Dynamic findings will append here: "
-          "process behavior, network (FakeNet sink), Frida API trace, "
-          "pe-sieve dumps, unpacked-image re-analysis.")
+          "runs LAST, snapshot-gated, and its findings land here.")
     A("")
 
     A("## 9. Honesty & audit")
