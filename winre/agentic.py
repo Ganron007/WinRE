@@ -1283,6 +1283,46 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
 
     cfg = remote_driver.flare_cfg()
     registry = ToolRegistry(sample_name, sha, cfg, mode=mode)
+
+    # ---- the debugger is PART OF THE CONTRACT, not a planner's whim --------
+    #
+    # The defect this closes: --agentic-dbg exposed the bounded x64dbg tools to
+    # the planner but never started the debugger. The only code that launches
+    # the x64dbg MCP server lives INSIDE a tool call (_dbg_gate), so a planner
+    # that did not pick a debug tool left the server down - and with it down
+    # there was nothing to pick. The mode was circular: the real run recorded
+    # 17 turns, one windbg call, zero x64dbg calls, and a pack whose dbg_ensure
+    # was null while ports 9094/9095 were dead.
+    #
+    # In agentic-dbg mode the debugger does not get a veto. It is started
+    # here, before the planner sees a single tool, on the VM snapshot, and the
+    # outcome is journaled so a pack can tell "the debugger was never
+    # available" (a product defect) from "the agent declined it".
+    dbg_preflight: dict | None = None
+    if dynamic and mode == "remote":
+        try:
+            gate = registry._dbg_gate()
+            info = getattr(registry, "_dbg_ensure_info", None)
+            if gate and gate.get("error"):
+                dbg_preflight = {"ok": False, "error": gate["error"]}
+            elif isinstance(info, dict):
+                dbg_preflight = {"ok": True, **{
+                    k: info.get(k) for k in
+                    ("arch", "debugger", "exe", "already_up", "launched",
+                     "replaced_wrong_arch", "port")
+                    if info.get(k) is not None}}
+            else:
+                # autostart disabled: say so plainly up front rather than
+                # letting the agent discover it one failed tool call at a time
+                dbg_preflight = {
+                    "ok": False,
+                    "error": "x64dbg MCP was not started: "
+                             "remote_driver.mcp_autostart_enabled() is "
+                             "False. Set WINRE_MCP_AUTOSTART=1 for "
+                             "agentic-dbg runs."}
+        except Exception as e:
+            dbg_preflight = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
     history: list[dict] = []
     findings: dict[str, Any] = {}
     state = {"calls": 0, "redundant": 0, "seen": set(), "chars": 0}
@@ -1390,7 +1430,7 @@ dynamic tool errors, fall back to static — do not retry more than once.
     # x64dbg otherwise (P1-F1). Recorded so a pack is self-describing: if the
     # flavour were wrong the OEP failure would be otherwise indistinguishable
     # from a genuine "sample refused to unpack".
-    dbg_ensure: dict | None = None
+    dbg_ensure: dict | None = dbg_preflight or None
     try:
         _i = getattr(registry, "_dbg_ensure_info", None)
         if isinstance(_i, dict):

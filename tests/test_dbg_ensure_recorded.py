@@ -28,12 +28,39 @@ def test_tool_registry_captures_the_ensure_info_on_success():
 
 def test_agent_result_carries_dbg_ensure():
     src = pathlib.Path(inspect.getsourcefile(agentic)).read_text(encoding="utf-8")
-    assert "dbg_ensure: dict | None = None" in src
+    # dbg_ensure must come from the preflight if there was one
+    assert "dbg_ensure: dict | None = dbg_preflight or None" in src
     # every return that reports windbg_dump must report the debugger too
     n = src.count('"windbg_dump": windbg_dump, "dbg_ensure": dbg_ensure')
     assert n >= 4, f"only {n} return sites carry dbg_ensure"
     # and it must be trimmed to the fields that matter, not dumped raw
     assert "replaced_wrong_arch" in src
+
+
+def test_agentic_dbg_starts_the_debugger_before_the_planner_runs():
+    """--agentic-dbg must not be advisory.
+
+    The defect: the tools were exposed to the planner but the only code that
+    launches the x64dbg MCP server lives INSIDE a tool call (_dbg_gate). A
+    planner that picked no debug tool therefore left the server down, and
+    with it down there was nothing to pick - 17 turns, zero x64dbg calls,
+    dbg_ensure null, ports 9094/9095 dead. The debugger cannot be left to the
+    LLM's discretion in a mode whose entire purpose is to use it.
+    """
+    src = pathlib.Path(inspect.getsourcefile(agentic)).read_text(encoding="utf-8")
+    i = src.find("def run_langgraph_deep_dive(")
+    assert i != -1
+    body = src[i:src.find("\ndef ", i + 10)] if "\ndef " in src[i + 10:] else src[i:]
+    # the gate must run BEFORE the planner is built (not merely imported)
+    gate = body.find("registry._dbg_gate()")
+    planner = body.find("agent = create_react_agent(")
+    assert gate != -1, "the deep dive never starts the debugger"
+    assert planner != -1, "the deep dive never builds the planner"
+    assert gate < planner, (
+        "the debugger is brought up after the planner already exists")
+    # and it only applies to the debug mode
+    assert "if dynamic and mode == \"remote\":" in body, (
+        "starting the debugger must be gated on the agentic-dbg mode")
 
 
 def test_both_projections_carry_dbg_ensure():

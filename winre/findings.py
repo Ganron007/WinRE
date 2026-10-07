@@ -376,19 +376,30 @@ def dbg_findings(mode_root: Path, *, sha: str = "") -> dict:
     agent = deep.get("agent") or {}
     up = agent.get("unpack_prepass") or {}
     dbg = agent.get("dbg_ensure") or {}
+    # recorded at deep-dive START, so we can tell "the debugger was
+    # never available" (a product defect) from "the agent declined"
+    dbg_ensure = deep.get("dbg_ensure") or dbg
 
     findings: dict = {
         "debugger": {"arch": dbg.get("arch"), "exe": dbg.get("exe"),
-                     "launched": dbg.get("launched")},
+                     "launched": dbg.get("launched"),
+                     "port": dbg.get("port"),
+                     "ok": dbg.get("ok")},
         "unpack": {},
     }
 
     if not dbg and not up:
-        limitations.append(
-            "no debugger evidence in this pack: the agent either never called "
-            "a debug tool, or a later run overwrote this pack (fixed in "
-            "evidence.MODES). The mode is a suggestion to the planner - see "
-            "DESIGN.md section 6")
+        if dbg_ensure is not None:
+            limitations.append(
+                "the debugger was NOT available when the deep dive started: "
+                f"{dbg_ensure.get('error') or dbg_ensure}. The agent could not "
+                "have used it, so the absence of debugger evidence is a "
+                "product defect, not a planner choice.")
+        else:
+            limitations.append(
+                "no debugger evidence in this pack: the agent either never "
+                "called a debug tool, or a later run overwrote this pack "
+                "(fixed in evidence.MODES)")
         level, conf = UNKNOWN, "low"
         return _frame("dbg", sha, ok=False,
                       verdict=_verdict(level, conf, basis),
