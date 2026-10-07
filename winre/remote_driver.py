@@ -415,6 +415,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from winre.evidence import MODES  # the four producer modes (design section 3)
+
 sha = sys.argv[1]
 sample = sys.argv[2]
 max_seconds = int(sys.argv[3])
@@ -607,20 +610,29 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     from . import snapshot_gate as _sg
     _marker_fwd = (f"$env:WINRE_SNAPSHOT_MARKER='{_sg.MARKER}'; "
                    if os.environ.get("WINRE_SNAPSHOT_MARKER") else "")
-    cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "'
-           f"$env:WINRE_SNAPSHOT_GATE='{_sg.mode()}'; "
-           + _marker_fwd
-           + f'& {py} '
-           f'{cfg["remote_pipeline"]}\\winre\\_remote_dynamic_helper.py '
-           f'{sha} "{remote_sample}" {int(max_seconds)}'
-           f'{" --pesieve" if enable_pesieve else ""}'
-           f'{" --adaptive" if adaptive else ""}'
-           f' --idle-stop={int(idle_stop_seconds)}'
-           f'{"" if not stop_on else " --stop-on=" + str(stop_on)}'
-           f'{"" if not stop_on else " --stop-on-settle=" + str(int(stop_on_settle))}'
-           f' --section={pack.mode or "agentic"}'
-           f' --run-id={run_id} 2>&1"')
-    r = ssh_run(cfg, cmd, timeout=int(max_seconds) + 700)
+    # Build a real PowerShell script and send it via -EncodedCommand.
+    #
+    # The previous form wrapped everything in one inline
+    # `powershell -Command "..."` string. That quoting does not survive the
+    # cmd  ssh  powershell nesting: the sample path's own double quotes were
+    # consumed, PowerShell reported a parse error, `cmd` came back as the whole
+    # script text, and the DETONATION NEVER RAN - while STAGE.json still
+    # carried a stage result as though it had. ssh_ps() exists precisely for
+    # this ("inline -Command strings get mangled by the nesting") and the rest
+    # of the VM plumbing already uses it.
+    _script = (f"$env:WINRE_SNAPSHOT_GATE='{_sg.mode()}'; "
+               + _marker_fwd
+               + f"& '{py}' "
+               f"'{cfg['remote_pipeline']}\\winre\\_remote_dynamic_helper.py' "
+               f"'{sha}' '{remote_sample}' '{int(max_seconds)}'"
+               f'{" --pesieve" if enable_pesieve else ""}'
+               f'{" --adaptive" if adaptive else ""}'
+               f' --idle-stop={int(idle_stop_seconds)}'
+               f'{"" if not stop_on else " --stop-on=" + str(stop_on)}'
+               f'{"" if not stop_on else " --stop-on-settle=" + str(int(stop_on_settle))}'
+               f' --section={pack.mode or "agentic"}'
+               f' --run-id={run_id}')
+    r = ssh_ps(cfg, _script, timeout=int(max_seconds) + 700)
     # honest RC check: the helper prints RC=<code> as its last line
     helper_rc = None
     for line in reversed((r.stdout or "").splitlines()):
@@ -1326,6 +1338,15 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
     from .pipeline import _report
     results["report"] = _report(pack, sha, results["quick"], results.get("dynamic"),
                                 results["deep"])
+
+    # findings for THIS mode (design section 2: every mode is a producer).
+    # This previously ran only after a dynamic pull, so --mode static,
+    # --mode agentic and --agentic-dbg wrote no findings.json at all - which
+    # left the dynamic-weighted composite with nothing to weigh and the
+    # report saying "the analysis plane did not run" when it had never been
+    # invoked.
+    results["findings"] = _findings.build(pack_mode, pack.root, sha=sha)
+
     audit_res = audit_mod.audit(pack.root)
     (pack.root / "audit.json").write_text(
         json.dumps(audit_res, indent=2) + "\n", encoding="utf-8")
