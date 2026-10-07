@@ -65,7 +65,7 @@ def test_findings_have_a_machine_readable_basis():
     """basis is the audit trail; an empty basis on a malicious level is a bug."""
     @pytest.mark.parametrize("sha", _real)
     def _check(sha):
-        f = findings.dynamic_findings(LOGS / sha / "agentic" / "dynamic", sha=sha)
+        f = findings.dynamic_findings(LOGS / sha / "agentic", sha=sha)
         assert f["schema"] == findings.SCHEMA
         v = f["verdict"]
         if v["level"] == findings.MALICIOUS:
@@ -100,7 +100,7 @@ def test_unknown_mode_is_reported_not_crashed():
 @needs_real
 def test_the_real_packs_now_carry_the_evidence_they_always_had():
     """The defect: b108 dropped b.wnry/taskdl.exe and the report said nothing."""
-    f = findings.dynamic_findings(LOGS / B108 / "agentic" / "dynamic", sha=B108)
+    f = findings.dynamic_findings(LOGS / B108 / "agentic", sha=B108)
     assert f["ok"] is True
     assert f["verdict"]["level"] == findings.MALICIOUS
     drops = [d["path"].lower() for d in f["findings"]["drops"]]
@@ -109,14 +109,14 @@ def test_the_real_packs_now_carry_the_evidence_they_always_had():
 
 @needs_real
 def test_persistence_in_the_startup_folder_is_named():
-    f = findings.dynamic_findings(LOGS / B106 / "agentic" / "dynamic", sha=B106)
+    f = findings.dynamic_findings(LOGS / B106 / "agentic", sha=B106)
     assert "persistence:startup-path" in f["verdict"]["basis"]
     assert any(d.get("persistence_location") for d in f["findings"]["drops"])
 
 
 @needs_real
 def test_c2_hosts_are_found_and_os_noise_is_not():
-    f = findings.dynamic_findings(LOGS / B101 / "agentic" / "dynamic", sha=B101)
+    f = findings.dynamic_findings(LOGS / B101 / "agentic", sha=B101)
     hosts = {c["host"] for c in f["findings"]["network"]["c2"]}
     assert "x1.c.lencr.org" in hosts
     for noise in ("ecs.office.com", "ctldl.windowsupdate.com", "g.live.com"):
@@ -127,7 +127,7 @@ def test_c2_hosts_are_found_and_os_noise_is_not():
 def test_procmon_counts_are_labelled_system_wide():
     """`drop_file: 3886` is a window total for the whole VM, not sample
     behaviour. Labelling it as sample evidence would be inventing facts."""
-    f = findings.dynamic_findings(LOGS / B108 / "agentic" / "dynamic", sha=B108)
+    f = findings.dynamic_findings(LOGS / B108 / "agentic", sha=B108)
     for p in f["findings"]["persistence"]:
         assert "system-wide" in p["scope"]
     assert "Procmon counts are window-wide" in f["findings"]["persistence_note"]
@@ -135,7 +135,7 @@ def test_procmon_counts_are_labelled_system_wide():
 
 @needs_real
 def test_a_dead_detonation_does_not_claim_behaviour():
-    f = findings.dynamic_findings(LOGS / B108 / "agentic" / "dynamic", sha=B108)
+    f = findings.dynamic_findings(LOGS / B108 / "agentic", sha=B108)
     assert f["ok"] is True
     assert f["findings"]["window"]["gate_fired"] is True
 

@@ -398,7 +398,7 @@ def dbg_findings(mode_root: Path, *, sha: str = "") -> dict:
     # Assigning findings["route"] BEFORE the dict exists is the same
     # use-before-def mistake that made a successful detonation report
     # "did not run" - and the only thing that caught it was running the code.
-    route = {
+    findings["route"] = {
         "managed": managed,
         "native_unpack_applies": (not managed),
         "method": ("dotnet_analyze (managed IL) + windbg dumps"
@@ -412,7 +412,6 @@ def dbg_findings(mode_root: Path, *, sha: str = "") -> dict:
                      "port": dbg.get("port"),
                      "ok": dbg.get("ok")},
         "unpack": {},
-        "route": route,
     }
 
     if not dbg and not up:
