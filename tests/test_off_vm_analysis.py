@@ -111,7 +111,10 @@ def test_the_driver_runs_the_analysis_locally_after_the_pull():
     drv = pathlib.Path(remote_driver.__file__).read_text(encoding="utf-8")
     assert "from . import analysis as _analysis" in drv
     assert "_analysis.run(" in drv
-    assert 'stage_meta["post_analysis"]' in drv
+    # stage_meta must exist BEFORE this block: the ordering defect that made a
+    # successful detonation report "did not run" over 32 files of evidence
+    assert "post_analysis=post_analysis" in drv
+    assert 'stage_meta["post_analysis"]' not in drv
 
 
 # --------------------------------------------------------- it works for real

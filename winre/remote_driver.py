@@ -715,17 +715,25 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     # STAGE.json's `verdict` now comes from the findings, so
     # audit.dynamic_verdict stops being null and dynamic_conflict stops being
     # dead code that has never once fired.
-    dyn_findings = _findings.build(pack.mode or "dynamic",
-                                   pack.stages["dynamic"], sha=sha)
+    dyn_findings = _findings.build(
+        pack.mode or "dynamic", pack.root, sha=sha,
+        evidence_dir=pack.stages["dynamic"])
     # phase 3: the analysis half of _post_pull_enrich, run HERE. The VM was
     # told to defer it (WINRE_POST_PULL_OFF_VM) so nothing interprets the
     # evidence on the box that just executed the sample.
+    # stage_meta must already exist: an earlier version of this block ran
+    # BEFORE `stage_meta = stage_result(...)`, so every detonation that
+    # succeeded crashed the control plane AFTER the evidence had been pulled.
+    # The pack then said "detonation did not run" over 32 files of real
+    # evidence including two memory dumps - the exact dishonesty this
+    # architecture is meant to prevent.
+    post_analysis = None
     if ok:
         try:
             from . import analysis as _analysis
-            stage_meta["post_analysis"] = _analysis.run(pack.stages["dynamic"])
+            post_analysis = _analysis.run(pack.stages["dynamic"])
         except Exception as e:
-            stage_meta["post_analysis"] = {"error": f"{type(e).__name__}: {e}"}
+            post_analysis = {"error": f"{type(e).__name__}: {e}"}
 
     stage_meta = stage_result("dynamic", ok, error=err,
                               summary=(f"events={meta.get('frida_events')} "
@@ -749,7 +757,8 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                               run_id=run_id, nonce=nonce,
                               clock_skew_s=(skew or {}).get("clock_skew_s"),
                               control_plane_started_at=started_at,
-                              vm_finished_at=meta.get("finished_at"))
+                              vm_finished_at=meta.get("finished_at"),
+                              post_analysis=post_analysis)
     pack.write("dynamic", "STAGE.json", stage_meta)
     return stage_meta
 
@@ -1345,7 +1354,9 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
     # left the dynamic-weighted composite with nothing to weigh and the
     # report saying "the analysis plane did not run" when it had never been
     # invoked.
-    results["findings"] = _findings.build(pack_mode, pack.root, sha=sha)
+    results["findings"] = _findings.build(
+            pack_mode, pack.root, sha=sha,
+            evidence_dir=pack.stages["dynamic"])
 
     audit_res = audit_mod.audit(pack.root)
     (pack.root / "audit.json").write_text(

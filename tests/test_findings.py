@@ -154,9 +154,18 @@ def test_build_writes_findings_json(tmp_path):
 def test_build_for_sample_returns_one_entry_per_mode(tmp_path):
     sha = "s" * 64
     for m in ("static", "agentic", "dbg", "dynamic"):
-        (tmp_path / sha / m).mkdir(parents=True)
+        (tmp_path / sha / m / "dynamic").mkdir(parents=True)
     out = findings.build_for_sample(sha, tmp_path)
     assert [f["mode"] for f in out] == ["static", "agentic", "dbg", "dynamic"]
+    # the findings file must land at the MODE root, where compose reads it
+    for m in ("static", "agentic", "dbg", "dynamic"):
+        assert (tmp_path / sha / m / "findings.json").is_file(), m
+
+
+def test_compose_reads_the_mode_root():
+    """compose must read <mode>/findings.json, not the stage subdir."""
+    src = pathlib.Path("winre/compose.py").read_text(encoding="utf-8")
+    assert 'Path(logs_dir) / sha / m / "findings.json"' in src
 
 
 def test_host_tools_are_consulted_and_absent_ones_become_limitations():

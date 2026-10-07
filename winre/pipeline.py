@@ -794,7 +794,9 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
             # dynamic-weighted composite (winre.compose) had nothing to
             # consume and the report said "the analysis plane did not run"
             # when it had simply never been invoked.
-            "findings": _build_findings(pack_mode, pack.root, sha=sha),
+            "findings": _build_findings(
+                pack_mode, pack.root, sha=sha,
+                evidence_dir=pack.stages["dynamic"]),
             "llm_roles": audit_res.get("llm_roles"),
             "generated_at": utcnow(),
         }, indent=2) + "\n", encoding="utf-8")

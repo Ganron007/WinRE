@@ -579,28 +579,40 @@ _DISPATCH = {
 }
 
 
-def build(mode: str, mode_root: Path, *, sha: str = "") -> dict:
-    """Extract findings for one mode and write <mode_root>/findings.json.
+def build(mode: str, pack_root: Path, *, sha: str = "",
+          evidence_dir: Path | None = None) -> dict:
+    """Extract findings for one mode and write <pack_root>/findings.json.
+
+    `pack_root` is the MODE root (logs/<sha>/<mode>/) - that is where
+    compose.load_findings() and the UI read from. `evidence_dir` is where the
+    mode's evidence lives, defaulting to <pack_root>/dynamic/.
 
     Returns the dict. Never raises: a mode that cannot be analysed returns
     ok=False with the reason, because a missing findings file is silent and
     silence is what made the dynamic section invisible for so long.
     """
+    pack_root = Path(pack_root)
+    evidence = Path(evidence_dir) if evidence_dir else pack_root / "dynamic"
     if mode not in _DISPATCH:
         return _frame(mode, sha, ok=False,
                       verdict=_verdict(UNKNOWN, "low", []),
                       findings={}, evidence_used=[],
                       limitations=[f"no findings extractor for mode {mode!r}"])
     try:
-        out = _DISPATCH[mode](Path(mode_root), sha=sha)
+        out = _DISPATCH[mode](evidence, sha=sha)
+        # The mode is THIS function's parameter, authoritative. The extractors
+        # used to infer it from the directory name, which worked while they
+        # received the mode root - but they receive the evidence dir, so
+        # static_findings would mislabel itself "agentic".
+        out["mode"] = mode
     except Exception as e:
         out = _frame(mode, sha, ok=False,
                      verdict=_verdict(UNKNOWN, "low", []), findings={},
                      evidence_used=[],
                      limitations=[f"{type(e).__name__}: {str(e)[:200]}"])
     try:
-        (Path(mode_root)).mkdir(parents=True, exist_ok=True)
-        (Path(mode_root) / "findings.json").write_text(
+        pack_root.mkdir(parents=True, exist_ok=True)
+        (pack_root / "findings.json").write_text(
             json.dumps(out, indent=2, default=str) + "\n", encoding="utf-8")
     except Exception as e:
         out.setdefault("limitations", []).append(
