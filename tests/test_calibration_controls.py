@@ -196,3 +196,80 @@ def test_the_lead_note_states_the_rule():
     n = net({"captures": [{"dns_queries": [HOST], "tls_sni": [],
                            "http_requests": []}]})
     assert "not a C2 host" in n["lead_note"]
+
+
+# ------------------------------------------------------------------ W5
+
+def test_the_pcap_status_is_not_derived_from_a_binary_being_installed():
+    """W5: `pcap_deep_dive` read the status of the ANALYSIS off the PRESENCE OF
+    A BINARY. A host with tshark installed reported "done" over a pcap that was
+    never analysed."""
+    n = net({})                       # no enrichment record at all
+    assert n["pcap_deep_dive"].startswith("not-run"), (
+        f"absence of any record was reported as {n['pcap_deep_dive']!r}")
+
+
+def test_a_failed_enrichment_is_reported_as_skipped_with_the_reason():
+    n = net({"ok": False, "error": "tshark not installed"})
+    assert n["pcap_deep_dive"].startswith("skipped")
+    assert "tshark not installed" in n["pcap_deep_dive"]
+
+
+def test_a_recorded_analysis_reports_what_it_actually_found():
+    """The status must carry the operation's real output, not a boast."""
+    n = net({"ok": True, "captures": [
+        {"dns_queries": ["a.com", "b.com"], "http_requests": ["a.com\tGET\t/"],
+         "tls_sni": ["a.com"]}]})
+    s = n["pcap_deep_dive"]
+    assert s.startswith("done")
+    assert "1 capture" in s and "2 dns" in s and "1 http" in s
+
+
+def test_an_empty_capture_list_is_not_completion():
+    n = net({"ok": True, "captures": []})
+    assert n["pcap_deep_dive"].startswith("not-run"), (
+        "enrichment recorded nothing and was reported as done")
+
+
+# ------------------------------------------------------------------ W4
+
+def _pack_with(static_ok=True, dynamic_ok=True):
+    import tempfile
+    root = pathlib.Path(tempfile.mkdtemp()) / "pack"
+    for st in ("intake", "quick", "deep", "yara", "report"):
+        (root / st).mkdir(parents=True)
+        (root / st / "META.json").write_text(
+            json.dumps({"ok": True, "verdict": "benign"}), encoding="utf-8")
+    (root / "dynamic").mkdir(parents=True)
+    (root / "dynamic" / "STAGE.json").write_text(
+        json.dumps({"ok": dynamic_ok,
+                    "error": None if dynamic_ok else "detonation did not run"}),
+        encoding="utf-8")
+    return root
+
+
+def test_require_dynamic_is_honoured_when_the_dynamic_stage_failed():
+    """W4: the parameter was accepted, documented, and never read. A caller who
+    explicitly required the dynamic stage got the same green as one who did not."""
+    from winre import audit
+    root = _pack_with(dynamic_ok=False)
+    assert audit.audit(root, require_dynamic=False)["all_green"] is True, (
+        "static-only green is a deliberate product decision and must not move")
+    assert audit.audit(root, require_dynamic=True)["all_green"] is False, (
+        "require_dynamic=True was ignored - successful static stages plus a "
+        "FAILED dynamic stage still returned green")
+
+
+def test_require_dynamic_still_greens_when_dynamic_succeeded():
+    from winre import audit
+    root = _pack_with(dynamic_ok=True)
+    assert audit.audit(root, require_dynamic=True)["all_green"] is True
+
+
+def test_the_default_never_silently_started_requiring_dynamic():
+    """Guard against 'fixing' W4 by making dynamic mandatory for everyone: that
+    would break the deliberate static-first design."""
+    from winre import audit
+    import inspect
+    assert inspect.signature(audit.audit).parameters["require_dynamic"].default \
+        is False

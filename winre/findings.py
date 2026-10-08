@@ -122,11 +122,6 @@ def _classify_path(p: str, sample: str | None = None) -> str | None:
     return "other"
 
 
-def _tshark() -> str | None:
-    import shutil
-    return shutil.which("tshark") or shutil.which("tshark.exe")
-
-
 def _host_tools() -> dict:
     """Which host-side analysis tools exist. Absent ones become limitations."""
     import shutil
@@ -369,9 +364,7 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
         "sample looked the name up. Promotion to c2 requires communication "
         "semantics (an HTTP request or periodic beaconing) or independent "
         "attribution.")
-    net["pcap_deep_dive"] = (
-        "done (host tshark)" if _tshark() else
-        "skipped: tshark not on the analysis host")
+    net["pcap_deep_dive"] = _pcap_status(ni)
     findings["network"] = net
     for c in net["c2"]:
         basis.append(f"c2:{c['host']}")
@@ -524,6 +517,37 @@ def _promote_to_c2(host: str, beaconed: set[str], http_hosts: set[str],
     if host in sni_hosts and host in http_hosts:
         return ("tls-sni+http", "TLS SNI and an HTTP request to this host")
     return None
+
+
+def _pcap_status(ni) -> str:
+    """Did the pcap deep dive actually HAPPEN? W5 (RevAI review 2026-10-08).
+
+    This used to be `"done (host tshark)" if _tshark() else "skipped..."` - the
+    status of the analysis was read off the PRESENCE OF A BINARY. A host with
+    tshark installed reported "done" over a fictitious pcap with no analysis
+    operation performed at all, which is availability dressed as completion.
+
+    The enrichment records what it did: enrich_pcap_tshark.py writes
+    `ok: true` with `captures: [...]` when it ran, `ok: false` with an `error`
+    when tshark was missing, and writes nothing at all when it never ran. So
+    the status is derived from that record, and the counts are the operation's
+    actual output.
+    """
+    if not isinstance(ni, dict) or not ni:
+        return "not-run: this pack carries no network enrichment record, so " \
+               "no pcap analysis was performed (having tshark installed says " \
+               "nothing about whether it ran)"
+    if ni.get("ok") is False:
+        return f"skipped: {ni.get('error') or 'enrichment reported failure'}"
+    caps = ni.get("captures") or []
+    if not caps:
+        return ("not-run: enrichment recorded no captures, so no pcap was " \
+                "analysed")
+    dns = sum(len(c.get("dns_queries") or []) for c in caps)
+    http = sum(len(c.get("http_requests") or []) for c in caps)
+    sni = sum(len(c.get("tls_sni") or []) for c in caps)
+    return (f"done: {len(caps)} capture(s) analysed - {dns} dns, {http} http, "
+            f"{sni} tls-sni observation(s)")
 
 
 def _is_reserved_or_noise(host: str) -> bool:

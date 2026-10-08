@@ -63,12 +63,22 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
           require_dynamic: bool = False) -> dict:
     """Run the truly_green gate over an evidence pack.
 
-    Dynamic is OPTIONAL by design (static-first, segregated). It only
-    contributes to all_green when it was actually run (dynamic/ present with
-    ok=true) or require_dynamic=True. A static-only run can be truly_green.
+    Dynamic is OPTIONAL by design (static-first, segregated), so a static-only
+    run can be truly_green - that is a deliberate product decision and it stays.
+
+    W4 (RevAI review 2026-10-08): `require_dynamic=True` was accepted and
+    documented, then never read. `required` unconditionally excluded dynamic, so
+    a caller that explicitly required the dynamic stage got the same all_green
+    as one that did not - successful static stages plus a FAILED dynamic stage
+    both returned green. A parameter that does not do what its name and its
+    docstring say is worse than no parameter: it is an assurance the caller
+    believes they have and did not.
+
+    It is honoured now. The default is unchanged, so no existing static-only
+    green verdict moves.
     """
-    # required stages = everything except dynamic (dynamic optional)
-    required = tuple(s for s in stages if s != "dynamic")
+    required = tuple(stages if require_dynamic
+                     else (s for s in stages if s != "dynamic"))
     checks = [_stage_ok(evidence, s) for s in stages]
     req_checks = [c for c in checks if c["stage"] in required]
     all_green = all(c["ran"] for c in req_checks)

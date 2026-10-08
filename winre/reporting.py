@@ -395,7 +395,20 @@ def build_report_v3(pack_root: Path) -> dict:
     A("")
 
     if has_dynamic:
-        dvi = _load(pack_root / "dynamic" / "findings.json")
+        # W3 (RevAI review 2026-10-08): read the MODE ROOT.
+        #
+        # findings.build writes <mode>/findings.json; this read
+        # <mode>/dynamic/findings.json - the stage dir. The producer-root
+        # contract changed and this consumer was not moved with it, so for
+        # every mode the report claimed "the analysis plane did not run" over a
+        # pack that had findings. This is the third time one side of a
+        # findings contract moved alone (MODES unimported in the embedded
+        # helper; findings written to the stage dir; now the reader).
+        #
+        # tests/test_findings_contract.py asserts this end to end - producer
+        # writes, report consumes the same file - because a string grep on the
+        # reader is exactly the check that let the mismatch ship.
+        dvi = _load(pack_root / "findings.json")
         if not dvi:
             A(f"- Detonation ran (frida_events={dyn.get('frida_events')}). "
               "No findings.json was produced for this pack - the analysis "
