@@ -630,7 +630,11 @@ def _report(pack: EvidencePack, sha: str, quick: dict, dynamic: dict | None,
 def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool = False,
                  enable_dynamic: bool = False, dry_llm: bool = False,
                  mode: str = "agentic", enable_agentic_dbg: bool = False,
-                 adaptive: bool = False, idle_stop_seconds: int = 10) -> dict:
+                 adaptive: bool = False, idle_stop_seconds: int = 10,
+                  stop_on: str = "network,file",
+                  # referenced by the dynamic call below but never declared:
+                  # the dynamic path raised NameError on both of these
+                  stop_on_settle: int = 20) -> dict:
     """Run the WinRE pipeline.
 
     DEFAULT = STATIC-ONLY (mirrors RevEng/RevAI): intake → quick → deep → yara
@@ -673,8 +677,13 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
     # not a trustworthy analysis host. Read-only modes may still run - they
     # execute nothing, so demanding a revert per read would be absurd.
     from . import vm_gate as _vmgate
+    # remote_driver is imported lazily in the other entry point below to
+    # avoid a circular import (remote_driver imports pipeline._report), so a
+    # module-level import would be wrong too - but the bare reference was an
+    # undefined name, so EVERY VM-gate call raised NameError. Import it here.
+    from . import remote_driver as _remote_driver
     gate_ok, blocker = _vmgate.require_clean_vm(
-        remote_driver.flare_cfg(), mode=mode,
+        _remote_driver.flare_cfg(), mode=mode,
         agentic_dbg=enable_agentic_dbg, dynamic=enable_dynamic)
     if blocker:
         _vmgate.record_refusal(pack, blocker)

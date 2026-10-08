@@ -64,9 +64,12 @@ def summarize_frida(trace: Path) -> dict:
                     "access": dec.get("access"),
                     "writes": dec.get("writes"),
                     "reads": dec.get("reads"),
-                    "provenance": ("access-mask"
-                                   if dec.get("access") is not None
-                                   else "none"),
+                    # W1, second proof: a write-family call against an
+                    # attributed path is positive evidence with no mask needed
+                    "provenance": (
+                        dec.get("provenance")
+                        or ("access-mask" if dec.get("access") is not None
+                            else "none")),
                 })
     return {
         "status": "ok",

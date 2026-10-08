@@ -227,6 +227,17 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
         rec["api"] = rec["api"] or ev.get("api")
         rec["access"] = rec["access"] or ev.get("access")
 
+    # The evidence is the UNION of both sources, not one of them. A path can be
+    # present in file_events and absent from decoded_paths - the summary keeps
+    # only 80 sorted unique strings, and the write-family proof can attribute a
+    # path the flat list lost. Iterating decoded_paths alone silently deleted
+    # any drop whose only proof was a WriteFile to an attributed handle, which
+    # is how a strict fix becomes a blind fix.
+    seen_paths = set(paths)
+    for _p in prov:
+        if _p not in seen_paths:
+            paths.append(_p)
+
     drops, device_writes, system_loads = [], [], []
     unverified: list[dict] = []
     for p in paths:
@@ -587,6 +598,14 @@ _READ_BITS = 0x80000000 | 0x00000001 | 0x00000008 | 0x00000080
 # EXCLUDED - their access mask sits at a different offset, and guessing would
 # reintroduce exactly the unproven-claim defect this fixes.
 _BACKFILL_APIS = {"createfilew", "createfilea"}
+# W1, second proof. A write-family call whose handle the tracer already resolved
+# to a path (P1-F6's handlePaths) is positive evidence of writing that file,
+# needing no access mask at all. Excluding it would DISCARD real drops - 683
+# real WriteFile events across the packs on disk carry an attributed path, and
+# one of them is b110's genuine Temp drop. Missing this is how a strict fix
+# becomes a blind fix.
+_WRITE_FAMILY_APIS = {"writefile", "writefileex", "writefilegather",
+                      "ntwritefile", "flushfilebuffers", "fwrite", "fputs"}
 
 
 def _backfill_provenance(dyn_dir: Path, max_lines: int = 200_000) -> list[dict]:
@@ -619,9 +638,23 @@ def _backfill_provenance(dyn_dir: Path, max_lines: int = 200_000) -> list[dict]:
                     continue
                 if not isinstance(ev, dict) or ev.get("type") != "call":
                     continue
-                if str(ev.get("api") or "").lower() not in _BACKFILL_APIS:
-                    continue
                 dec = ev.get("decoded") or {}
+                api = str(ev.get("api") or "")
+                if api.lower() in _WRITE_FAMILY_APIS:
+                    # the handle was resolved to a path: that IS the write
+                    p = dec.get("path")
+                    if not isinstance(p, str) or not p:
+                        continue
+                    out.append({
+                        "path": p,
+                        "api": ev.get("api"),
+                        "access": None,
+                        "writes": True,
+                        "reads": False,
+                        "provenance": "write-to-attributed-path",
+                        "source": "backfilled-from-raw-trace",
+                    })
+                    continue
                 path = dec.get("arg0")
                 if not isinstance(path, str) or not path:
                     continue

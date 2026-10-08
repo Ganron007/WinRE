@@ -476,6 +476,11 @@ const createApiSet = new Set(['CreateFileW', 'CreateFileA',
   'CreateFileTransactedW', 'CreateFileTransactedA', 'NtCreateFile',
   'ZwCreateFile']);
 const closeApiSet = new Set(['CloseHandle']);
+// W1, second half: APIs that WRITE through a handle. With handlePaths
+// resolution (P1-F6) their `decoded.path` is an attributed file, so such a call
+// is positive write evidence without needing any access mask.
+const writeFamilySet = new Set(['WriteFile', 'WriteFileEx', 'WriteFileGather',
+  'NtWriteFile', 'FlushFileBuffers', 'fwrite', 'fputs']);
 // W1 (RevAI review 2026-10-08): the access bits that make a file open a WRITE.
 // These mirror WRITE_ACCESS_BITS on the Python side and gate_for() uses the
 // same constants, so the recorded provenance and the gate can never disagree.
@@ -588,6 +593,25 @@ function enrichArgs(name, args) {{
         decoded['access'] = '0x' + acc.toString(16);
         decoded['writes'] = !!(acc & WRITE_ACCESS_MASK);
         decoded['reads'] = !!(acc & READ_ACCESS_MASK);
+        decoded['provenance'] = 'access-mask';
+    }}
+    // W1, second half: a WRITE-FAMILY call with an attributed path is positive
+    // write evidence in its own right, independent of any access mask.
+    //
+    // Without this, the strict "require write provenance" rule would DISCARD
+    // real drops: a sample that opens a handle (sometimes before Frida attaches,
+    // so the CreateFile is never observed) and then writes through it is every
+    // bit a drop, and 683 real WriteFile events across the packs on disk carry
+    // an attributable path. Getting this wrong in the strict direction loses the
+    // very evidence the fix was supposed to protect.
+    //
+    // handlePaths is resolved by the tracer (P1-F6), so `decoded.path` being
+    // present means the write is attributed to a specific file. A write-family
+    // call against a read-only handle would fail at the API, so the call itself
+    // is the evidence.
+    if (writeFamilySet.has(name) && decoded['path']) {{
+        decoded['writes'] = true;
+        decoded['provenance'] = 'write-to-attributed-path';
     }}
     return {{ args: out, decoded: decoded }};
 }}

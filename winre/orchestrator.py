@@ -687,12 +687,18 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
     try:
         from winre.debug_loops import dump_schema_block as _dump_schema
     except Exception as _schema_err:                      # pragma: no cover
+        # Python unbinds `except ... as e` when the handler EXITS, so a closure
+        # over it inside the handler dies with it: calling this fallback later
+        # raised `NameError: _schema_err` - which is exactly what the comment
+        # above promises can never happen. Bind it into a default argument,
+        # which is evaluated now and survives the handler.
+        _schema_err_text = f"{type(_schema_err).__name__}: {str(_schema_err)[:120]}"
+
         def _dump_schema(path, *, dump_kind="module", oep=None,
                          ran_to_oep=False, rebuild_applicable=False,
-                         rebuild_reason=""):
+                         rebuild_reason="", _err_text=_schema_err_text):
             return {"dump_kind": dump_kind, "is_pe": None, "pe_valid": None,
-                    "dump_schema_error": f"{type(_schema_err).__name__}: "
-                                         f"{str(_schema_err)[:120]}"}
+                    "dump_schema_error": _err_text}
     if not cli.is_up():
         # on-demand heal: the boot launcher starts with -NoX64dbg, so a
         # dynamic run must launch the GUI/plugin itself instead of silently
