@@ -655,6 +655,13 @@ def _backfill_provenance(dyn_dir: Path, max_lines: int = 200_000) -> list[dict]:
                         "source": "backfilled-from-raw-trace",
                     })
                     continue
+                # ONLY a Create*-style API has (arg0=path, arg1=dwDesiredAccess).
+                # Without this filter every hooked API's arg0/arg1 get read as
+                # path + access mask, so LoadLibraryW and CreateProcessW would
+                # INVENT "proven writes" from unrelated arguments - the same
+                # class of invented evidence the W1 fix exists to remove.
+                if api.lower() not in _BACKFILL_APIS:
+                    continue
                 path = dec.get("arg0")
                 if not isinstance(path, str) or not path:
                     continue
