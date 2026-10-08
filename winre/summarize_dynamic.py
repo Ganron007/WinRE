@@ -14,6 +14,9 @@ def summarize_frida(trace: Path) -> dict:
     apis: Counter = Counter()
     paths: list[str] = []
     sockaddrs: list[str] = []
+    # W1: per-event file provenance (access mask / read / write). decoded_paths
+    # cannot carry it, and that is the whole defect.
+    file_events: list[dict] = []
     calls = 0
     if not trace.is_file():
         return {"status": "missing", "path": str(trace)}
@@ -39,12 +42,39 @@ def summarize_frida(trace: Path) -> dict:
                     sockaddrs.append(v)
                 elif "\\" in v or "/" in v or v.endswith(".exe") or v.startswith("Software"):
                     paths.append(v)
+            # W1 (RevAI review 2026-10-08): KEEP THE PROVENANCE.
+            #
+            # decoded_paths is a flat list of strings, so a CreateFileW opened
+            # for GENERIC_READ and one opened for GENERIC_WRITE are the same
+            # thing downstream. findings.py therefore treated every observed
+            # open as a write, and one read of a file in the analyst's own
+            # Downloads became `drop:` and a malicious/high verdict. The tracer
+            # already records the access mask and the write/read bits in
+            # `decoded`; this layer was throwing them away.
+            #
+            # file_events keeps them. decoded_paths stays for back-compat with
+            # existing packs and other consumers, but it is no longer the only
+            # thing a verdict may be built from.
+            _p = (dec.get("path") or dec.get("arg0") or dec.get("arg5")
+                  or dec.get("arg1"))
+            if isinstance(_p, str) and _p and ("\\" in _p or "/" in _p):
+                file_events.append({
+                    "path": _p,
+                    "api": api,
+                    "access": dec.get("access"),
+                    "writes": dec.get("writes"),
+                    "reads": dec.get("reads"),
+                    "provenance": ("access-mask"
+                                   if dec.get("access") is not None
+                                   else "none"),
+                })
     return {
         "status": "ok",
         "calls": calls,
         "top_apis": apis.most_common(25),
         "decoded_paths": sorted(set(paths))[:80],
         "sockaddrs": sorted(set(sockaddrs))[:40],
+        "file_events": file_events[:200],
     }
 
 

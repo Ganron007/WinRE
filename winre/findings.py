@@ -189,29 +189,112 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
         basis.append(f"loader:rundll32:{job.get('loader_entry')}")
 
     # --- sample-attributable paths (Frida hooks the sample process) -------
+    #
+    # W1 (RevAI review 2026-10-08): AN OPEN IS NOT A DROP.
+    #
+    # decoded_paths is a flat list of strings, so this loop could not tell a
+    # CreateFileW(..., GENERIC_READ) from one opened GENERIC_WRITE. Every
+    # observed open of an .exe therefore became `drop:` and, alone, a
+    # malicious/high verdict - including a plain read of a file in the
+    # analyst's own Downloads folder. Reading is not an intent to plant.
+    #
+    # The tracer records the access mask now (tools/frida_api_trace.py) and the
+    # summary keeps it (summarize_dynamic.py -> file_events), so a drop needs
+    # POSITIVE write evidence. Where a pack predates that recording there is no
+    # proof, and an unproven path is reported as an OBSERVATION under
+    # unverified_opens - visible, citable, and never counted as a drop.
     own = _sample_path(dyn_dir)
     paths = [p for p in (fs.get("decoded_paths") or []) if isinstance(p, str)]
+
+    # path -> {"writes": bool, "reads": bool, "api": str, "access": str}
+    prov: dict[str, dict] = {}
+    has_provenance = False
+    _events = fs.get("file_events") or []
+    if not _events:
+        # a pack pulled before provenance was summarised still has the access
+        # mask in its raw trace; recover the proof rather than discard real
+        # evidence because of a lossy intermediate summary
+        _events = _backfill_provenance(dyn_dir)
+    for ev in _events:
+        if not isinstance(ev, dict):
+            continue
+        ep = ev.get("path")
+        if not isinstance(ep, str) or not ep:
+            continue
+        if ev.get("access") is not None or ev.get("writes") is not None:
+            has_provenance = True
+        rec = prov.setdefault(ep, {"writes": False, "reads": False,
+                                   "api": None, "access": None})
+        if ev.get("writes"):
+            rec["writes"] = True
+        if ev.get("reads"):
+            rec["reads"] = True
+        rec["api"] = rec["api"] or ev.get("api")
+        rec["access"] = rec["access"] or ev.get("access")
+
     drops, device_writes, system_loads = [], [], []
+    unverified: list[dict] = []
     for p in paths:
         kind = _classify_path(p, own)
+        pv = prov.get(p)
+        proven = bool(pv and pv.get("writes"))
         if kind == "drop":
-            rec = {"path": p}
-            if any(d in _norm(p) for d in ("\\startup\\", "\\start menu\\")):
-                rec["persistence_location"] = True
-            drops.append(rec)
+            if proven:
+                rec = {"path": p, "proven": True,
+                       "api": pv.get("api"), "access": pv.get("access")}
+                if any(d in _norm(p) for d in ("\\startup\\", "\\start menu\\")):
+                    rec["persistence_location"] = True
+                drops.append(rec)
+            else:
+                # observed, not attributed: recorded, never a drop
+                unverified.append({
+                    "path": p,
+                    "reason": ("opened-for-read"
+                               if (pv or {}).get("reads") else
+                               "no write provenance recorded"),
+                    "api": (pv or {}).get("api"),
+                })
         elif kind == "device":
             # \\.\pipe\... is a named pipe, not a raw-device write
             if not _norm(p).startswith("\\\\.\\pipe"):
-                device_writes.append(p)
+                if proven:
+                    device_writes.append(p)
+                else:
+                    unverified.append({
+                        "path": p,
+                        "reason": ("opened-for-read"
+                                   if (pv or {}).get("reads") else
+                                   "no write provenance recorded"),
+                        "api": (pv or {}).get("api"),
+                    })
         elif kind == "system-load":
             system_loads.append(p)
+
+    # only a PROVEN write earns a drop basis tag
     for d in drops:
         basis.append("drop:" + Path(d["path"].replace("\\", "/")).stem[:24])
         if d.get("persistence_location"):
             basis.append("persistence:startup-path")
+
+    if unverified:
+        limitations.append(
+            f"{len(unverified)} path(s) looked like a drop by shape but carry "
+            "no proof of being written: they are reported as observations, not "
+            "as drops. A read of an executable is not evidence of planting one.")
+    if not has_provenance and paths:
+        limitations.append(
+            "this pack predates file-access provenance (frida file_events), so "
+            "NO path in it can be attributed to a write. Path shape alone is "
+            "not sufficient to claim a drop.")
     findings["drops"] = drops
+    findings["unverified_opens"] = unverified[:60]
     findings["device_writes"] = device_writes
     findings["system_loads"] = len(system_loads)
+    findings["file_provenance"] = {
+        "available": has_provenance,
+        "events": len(prov),
+        "proven_writes": sum(1 for v in prov.values() if v.get("writes")),
+    }
 
     # --- system-wide context (NOT sample-attributable) --------------------
     cat = (ps.get("persistence") or {}) if isinstance(ps, dict) else {}
@@ -234,17 +317,58 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
     findings["process_spawns"] = ps.get("process_spawns") if isinstance(ps, dict) else None
 
     # --- network ---------------------------------------------------------
-    net = {"c2": [], "beacons": [], "pcaps": [], "pcap_deep_dive": "not-run"}
-    for cap in (ni.get("captures") or []):
-        for q in cap.get("dns_queries") or []:
-            if _looks_like_c2(q):
-                net["c2"].append({"host": q, "kind": "dns"})
-        for s in cap.get("tls_sni") or []:
-            if _looks_like_c2(s):
-                net["c2"].append({"host": s, "kind": "tls-sni"})
-        net["pcaps"].extend(cap.get("pcap") and [cap["pcap"]] or [])
+    net = {"c2": [], "leads": [], "beacons": [], "pcaps": [],
+           "pcap_deep_dive": "not-run"}
     ba = (ni.get("beacon_analysis") or {}) if isinstance(ni, dict) else {}
     net["beacons"] = ba.get("beacons") or []
+
+    # every host the sample resolved or negotiated with, and HOW
+    seen: dict[str, set[str]] = {}
+    http_hosts: set[str] = set()
+    for cap in (ni.get("captures") or []):
+        for q in cap.get("dns_queries") or []:
+            if isinstance(q, str) and q.strip():
+                seen.setdefault(q.strip().lower(), set()).add("dns")
+        for h in cap.get("tls_sni") or []:
+            if isinstance(h, str) and h.strip():
+                seen.setdefault(h.strip().lower(), set()).add("tls-sni")
+        for line in cap.get("http_requests") or []:
+            # tshark -T fields: host, method, uri
+            host = str(line).split("\t")[0].strip().lower()
+            if host:
+                http_hosts.add(host)
+                seen.setdefault(host, set()).add("http")
+        net["pcaps"].extend(cap.get("pcap") and [cap["pcap"]] or [])
+
+    beaconed = set()
+    for b in net["beacons"]:
+        if isinstance(b, dict):
+            h = (b.get("host") or b.get("domain") or b.get("server") or "")
+            if isinstance(h, str) and h.strip():
+                beaconed.add(h.strip().lower())
+        elif isinstance(b, str) and b.strip():
+            beaconed.add(b.strip().lower())
+
+    for host, how in sorted(seen.items()):
+        if not _looks_like_c2(host):
+            continue
+        promoted = _promote_to_c2(host, beaconed, http_hosts, set())
+        if promoted:
+            kind, reason = promoted
+            net["c2"].append({"host": host, "kind": kind, "reason": reason,
+                              "observed_as": sorted(how)})
+        else:
+            net["leads"].append({
+                "host": host, "observed_as": sorted(how),
+                "status": "lead (resolution only - no communication, "
+                          "no beaconing, no independent attribution)",
+            })
+    net["leads"] = net["leads"][:80]
+    net["lead_note"] = (
+        "A resolved host is not a C2 host. These are reported as leads: the "
+        "sample looked the name up. Promotion to c2 requires communication "
+        "semantics (an HTTP request or periodic beaconing) or independent "
+        "attribution.")
     net["pcap_deep_dive"] = (
         "done (host tshark)" if _tshark() else
         "skipped: tshark not on the analysis host")
@@ -354,15 +478,149 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
                   findings=findings, evidence_used=used, limitations=limitations)
 
 
-def _looks_like_c2(host: str) -> bool:
-    """A resolver/OS host is not a C2 host."""
+# RFC 2606 / RFC 6761 reserved and documentation names. These exist so
+# documentation, examples and tests cannot be mistaken for infrastructure.
+# example.org being reported as C2 is the single most embarrassing way for a
+# findings plane to be wrong.
+_RESERVED_NAMES = frozenset({
+    "example.com", "example.net", "example.org", "example", "localhost",
+})
+_RESERVED_SUFFIXES = (".example", ".test", ".invalid", ".localhost",
+                      ".arpa", ".local", ".lan", ".onion.test")
+
+# Resolver / OS / CDN telemetry. Still a denylist, and still incomplete - which
+# is why it is no longer sufficient on its own to call something C2.
+_OS_NOISE = frozenset({
+    "microsoft.com", "windowsupdate.com", "msftncsi.com", "windows.com",
+    "office.com", "officeapps.live.com", "live.com", "msn.com", "bing.com",
+    "adnxs.com", "doubleclick.net", "gstatic.com", "akamaitechnologies.com",
+    "akamaiedge.net", "cloudflare.com", "cloudflare-dns.com", "verisign.com",
+})
+
+
+
+def _promote_to_c2(host: str, beaconed: set[str], http_hosts: set[str],
+                   sni_hosts: set[str]) -> tuple[str, str] | None:
+    """Decide whether an observed host is C2, and say why. -> (kind, reason).
+
+    W2: RESOLUTION IS NOT ATTRIBUTION. A DNS answer proves the name was looked
+    up, nothing more - which is why every benign program that resolves a CDN
+    produced `c2:` and a malicious/medium verdict.
+
+    A lead is promoted only on evidence of COMMUNICATION or ATTRIBUTION:
+      * beaconed            - periodic callbacks (communication semantics)
+      * http-requested      - the sample actually sent a request to the host,
+                               which is more than resolving it
+      * tls-sni + http      - both, the strongest passive case
+
+    Returns None to leave it a lead.
+    """
+    if _is_reserved_or_noise(host):
+        return None
+    if host in beaconed:
+        return ("beacon", "periodic callbacks to this host")
+    if host in http_hosts:
+        return ("http", "the sample sent an HTTP request to this host")
+    if host in sni_hosts and host in http_hosts:
+        return ("tls-sni+http", "TLS SNI and an HTTP request to this host")
+    return None
+
+
+def _is_reserved_or_noise(host: str) -> bool:
+    """Never C2, whatever else is true: a reserved name or OS telemetry."""
     h = (host or "").lower().strip(".")
-    if not h or h.endswith((".arpa", ".local", ".lan")):
-        return False
-    noise = ("microsoft.com", "windowsupdate.com", "msftncsi.com",
-             "office.com", "officeapps.live.com", "live.com", "msn.com",
-             "bing.com", "adnxs.com", "doubleclick.net", "gstatic.com")
-    return not any(h == d or h.endswith("." + d) for d in noise)
+    if not h:
+        return True
+    if h in _RESERVED_NAMES or h.endswith(_RESERVED_SUFFIXES):
+        return True
+    if h in _OS_NOISE:
+        return True
+    return any(h.endswith("." + d) for d in _OS_NOISE)
+
+
+def _looks_like_c2(host: str) -> bool:
+    """Is this host even a CANDIDATE?
+
+    W2 (RevAI review 2026-10-08): this used to BE the C2 decision, which made a
+    denylist the only thing standing between a DNS query and a `c2:` basis tag.
+    `example.org` passed it, as would every legitimate domain not on a ten-entry
+    list. It is now only the first filter: surviving it makes a host a LEAD, and
+    a lead only becomes C2 with communication semantics or independent evidence
+    (see _promote_to_c2).
+    """
+    return not _is_reserved_or_noise(host)
+
+
+# W1 (RevAI review 2026-10-08): the file-access bits that make an open a WRITE.
+# These mirror WRITE_ACCESS_BITS in tools/frida_api_trace.py. They are restated
+# rather than imported because findings.py is the host-side analysis plane and
+# may not import VM-side tools; tests/test_w1_provenance.py asserts the two
+# copies stay identical, so the restatement cannot drift silently.
+_WRITE_BITS = 0x40000000 | 0x00000002 | 0x00000004 | 0x00000100
+_READ_BITS = 0x80000000 | 0x00000001 | 0x00000008 | 0x00000080
+# Create*-style APIs whose argument layout is unambiguous here: arg0 is the
+# path, arg1 is dwDesiredAccess. NtCreateFile/ZwCreateFile are deliberately
+# EXCLUDED - their access mask sits at a different offset, and guessing would
+# reintroduce exactly the unproven-claim defect this fixes.
+_BACKFILL_APIS = {"createfilew", "createfilea"}
+
+
+def _backfill_provenance(dyn_dir: Path, max_lines: int = 200_000) -> list[dict]:
+    """Reconstruct file-access provenance from the RAW trace.
+
+    Every pack pulled before 2026-10-08 has the access mask in its
+    frida_trace.jsonl - the tracer recorded it all along - but
+    summarize_dynamic.py collapsed it into a flat decoded_paths list. Reading
+    the raw trace recovers the proof instead of throwing away genuine evidence
+    because of a lossy summary.
+
+    Fails closed: a CreateFile whose access mask cannot be parsed yields no
+    event, so its path stays unproven rather than being assumed a write.
+    """
+    tr = Path(dyn_dir) / "frida_trace.jsonl"
+    if not tr.is_file():
+        return []
+    out: list[dict] = []
+    try:
+        with tr.open("r", encoding="utf-8", errors="replace") as fh:
+            for n, line in enumerate(fh):
+                if n >= max_lines:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(ev, dict) or ev.get("type") != "call":
+                    continue
+                if str(ev.get("api") or "").lower() not in _BACKFILL_APIS:
+                    continue
+                dec = ev.get("decoded") or {}
+                path = dec.get("arg0")
+                if not isinstance(path, str) or not path:
+                    continue
+                args = ev.get("args") or []
+                if len(args) < 2 or args[1] is None:
+                    continue          # no access mask: cannot prove anything
+                try:
+                    acc = int(str(args[1]), 16) if isinstance(args[1], str) \
+                        else int(args[1])
+                except (TypeError, ValueError):
+                    continue          # unparseable mask: do not guess
+                out.append({
+                    "path": path,
+                    "api": ev.get("api"),
+                    "access": "0x%08x" % (acc & 0xFFFFFFFF),
+                    "writes": bool(acc & _WRITE_BITS),
+                    "reads": bool(acc & _READ_BITS),
+                    "provenance": "access-mask",
+                    "source": "backfilled-from-raw-trace",
+                })
+    except OSError:
+        return []
+    return out
 
 
 # ------------------------------------------------------------- dbg findings

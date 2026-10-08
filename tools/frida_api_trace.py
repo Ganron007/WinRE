@@ -476,6 +476,14 @@ const createApiSet = new Set(['CreateFileW', 'CreateFileA',
   'CreateFileTransactedW', 'CreateFileTransactedA', 'NtCreateFile',
   'ZwCreateFile']);
 const closeApiSet = new Set(['CloseHandle']);
+// W1 (RevAI review 2026-10-08): the access bits that make a file open a WRITE.
+// These mirror WRITE_ACCESS_BITS on the Python side and gate_for() uses the
+// same constants, so the recorded provenance and the gate can never disagree.
+const WRITE_ACCESS_MASK = 0x40000000 | 0x00000002 | 0x00000004 | 0x00000100;
+const READ_ACCESS_MASK = 0x80000000 | 0x00000001 | 0x00000008 | 0x00000080;
+function ptrToU32(p) {{
+    try {{ return (p.toUInt32() >>> 0); }} catch (e) {{ return 0; }}
+}}
 // sockaddr* argument index by API name
 const sockaddrArgs = {{
   connect: [1],
@@ -567,6 +575,19 @@ function enrichArgs(name, args) {{
     if (hIdx !== undefined && args[hIdx]) {{
         const known = handlePaths[args[hIdx].toString()];
         if (known) decoded['path'] = known;
+    }}
+    // W1 (RevAI review 2026-10-08): RECORD the access mask for Create*-style
+    // calls. The gate below already refuses to claim a drop without write
+    // bits, but that decision was thrown away at the summary layer, so
+    // findings.py saw a flat list of paths and had to treat every open as a
+    // write. A single CreateFileW(..., GENERIC_READ) on a file in the
+    // analyst's own Downloads then became `drop:` and a malicious/high verdict.
+    // Provenance has to survive into the evidence, not just into the gate.
+    if (createApiSet.has(name) && args[1]) {{
+        const acc = ptrToU32(args[1]);
+        decoded['access'] = '0x' + acc.toString(16);
+        decoded['writes'] = !!(acc & WRITE_ACCESS_MASK);
+        decoded['reads'] = !!(acc & READ_ACCESS_MASK);
     }}
     return {{ args: out, decoded: decoded }};
 }}
