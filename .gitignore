@@ -30,6 +30,11 @@ logs/
 local-runs/
 cache/
 
+# RevAI session bridge records, one per sample, written on the VM per run.
+# A committed fake session (sha256 = 64 a's) would be read as a real one by any
+# consumer, so this stays runtime output like logs/.
+sessions/
+
 # Frida / Procmon / FakeNet runtime output
 *.pml
 *.pcap

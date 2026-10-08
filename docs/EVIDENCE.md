@@ -113,6 +113,17 @@ lab specifics redacted, no binaries).
 - `AUDIT-REPORT.md` renders `audit.json` — the same gate that decides
   `truly_green`.
 
+## Session bridge (RevAI)
+
+sessions/<sha256>.json is written **on the VM** by the dynamic job and handed
+to RevAI through REVENG_SESSIONS_DIR. It is a per-sample runtime record like
+logs/, deliberately gitignored: a committed fixture (sha256: 64 x a) would be
+indistinguishable from a real session to any consumer that trusted it.
+
+It is not evidence and not a finding. It is a handoff descriptor - which sample,
+which path, what the intake classified it as - and the analysis plane never
+reads it.
+
 ## Honesty contract
 
 - Dynamic is **opt-in** and runs LAST. A static-only pack is valid.
