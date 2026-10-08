@@ -55,7 +55,11 @@ if (Test-Path $Staging) { Remove-Item -LiteralPath $Staging -Recurse -Force -Err
 # match here because $_.Name never contains a backslash - so the
 # gitignored handoff notes were silently shipped to the VM on every run.
 # Nested paths are pruned explicitly below instead.
-$Excludes = @(".git","__pycache__","logs","cache","local-runs","dist",".env","internal",".pytest_cache",".mypy_cache")
+# sessions/ is VM-side per-sample runtime output (the dynamic job writes it).
+# Excluded for the reason above: an untracked host fixture was reinstalled on
+# the VM by every sync - a fake session file (sha256 = 64 a's) reappeared three
+# times while being "deleted" from the VM, because scp copies and never prunes.
+$Excludes = @(".git","__pycache__","logs","cache","local-runs","dist",".env","internal",".pytest_cache",".mypy_cache","sessions",".ruff_cache")
 
 function Die([string]$m) { Write-Error "[sync_to_flare] FATAL: $m"; exit 2 }
 function Step([string]$m) { Write-Host "[sync_to_flare] $m" }
