@@ -161,8 +161,51 @@ def _ssh_ps(cfg: dict, script: str, timeout: int = 60) -> subprocess.CompletedPr
 
 # --- L1: marker -------------------------------------------------------------
 
+def _on_vm_repo_root() -> Path | None:
+    """This process's repo root when it runs ON the VM, else None.
+
+    Reads the same marker file the SSH path would check, locally - so a
+    VM-local run is not blocked by its own gate. Mirrors
+    winre/vm_gate.py::on_vm_repo_root(); if that one changes, change this.
+
+    Returning None on the control plane is the important half: the checkout
+    there is elsewhere, and answering for the wrong machine would silently
+    authorise an execution on a dirty VM.
+    """
+    try:
+        here = Path(__file__).resolve().parents[1]
+    except (NameError, OSError):
+        return None
+    return here if str(here).upper() == str(_VM_REPO_ROOT).upper() else None
+
+
+_VM_REPO_ROOT = Path("C:/WinRE")
+
+
+def _local_marker_path(local: Path) -> Path:
+    """Where the marker file actually is, when this process runs ON the VM.
+
+    MARKER defaults to the absolute VM path `C:\\WinRE\\.clean_snapshot`, so it
+    is already correct on the VM - building `local / MARKER` from it produced
+    `C:/STUDY/.../C:\\WinRE\\.clean_snapshot`, an invalid path that always
+    looked absent. Only a marker overridden to a RELATIVE name has to be
+    resolved against the repo root.
+    """
+    p = Path(MARKER)
+    return p if p.is_absolute() else (local / p.name)
+
+
 def marker_exists(cfg: dict | None = None, timeout: int = 45) -> bool | None:
     """True/False per the VM; None when SSH/marker probe fails."""
+    # Running ON the VM, the marker is a local file; SSHing to reach it is
+    # ssh-to-self with an empty hostname, which times out - and this returns
+    # None, so gate_status() reports "VM unreachable" and blocks a run on a VM
+    # whose marker is sitting right there. winre/vm_gate.py::_probe fixed this
+    # for the VM gate; this is the same defect in the other gate, and the two
+    # disagreeing about whether a VM is clean is the worst possible outcome.
+    local = _on_vm_repo_root()
+    if local is not None:
+        return _local_marker_path(local).is_file()
     cfg = cfg or flare_cfg()
     try:
         p = _ssh_ps(cfg, f"Test-Path -LiteralPath '{MARKER}'", timeout=timeout)
@@ -176,6 +219,20 @@ def marker_exists(cfg: dict | None = None, timeout: int = 45) -> bool | None:
 
 def consume_marker(cfg: dict | None = None, timeout: int = 45) -> bool | None:
     """Delete the marker iff present; True=consumed, False=absent, None=unknown."""
+    # Same rule as marker_exists: on the VM the marker is a local file, so the
+    # delete is a local delete. SSHing to reach it is ssh-to-self, which fails -
+    # and a failed consume reads as "not consumed", so a VM-local execution
+    # would not be recorded and the next run would reuse the same clean state.
+    local = _on_vm_repo_root()
+    if local is not None:
+        p = _local_marker_path(local)
+        if not p.is_file():
+            return False
+        try:
+            p.unlink()
+            return True
+        except OSError:
+            return None
     cfg = cfg or flare_cfg()
     try:
         p = _ssh_ps(cfg, f"if (Test-Path -LiteralPath '{MARKER}') "
@@ -195,6 +252,27 @@ def create_marker(cfg: dict | None = None, timeout: int = 45) -> bool:
     Content is audit-only (`created` + `boot_epoch`); the gate contract stays
     presence-based so pre-existing empty markers remain valid.
     """
+    local = _on_vm_repo_root()
+    if local is not None:
+        # On the VM this is a local file write. Run the same shape of content so
+        # a locally-armed marker and an SSH-armed one are indistinguishable.
+        try:
+            boot = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime"
+                 ".ToString('o')"],
+                capture_output=True, text=True, timeout=30)
+            created = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-Date -Format o)"],
+                capture_output=True, text=True, timeout=30)
+            v = (f"created={created.stdout.strip()};"
+                 f"boot_epoch={boot.stdout.strip()}")
+            p = _local_marker_path(local)
+            p.write_text(v, encoding="ascii")
+            return p.is_file()
+        except Exception:
+            return False
     cfg = cfg or flare_cfg()
     p = _ssh_ps(cfg, "$boot=(Get-CimInstance Win32_OperatingSystem).LastBootUpTime; "
                      f"$v='created=' + (Get-Date -Format o) + ';boot_epoch=' + $boot.ToString('o'); "
