@@ -273,3 +273,46 @@ def test_the_default_never_silently_started_requiring_dynamic():
     import inspect
     assert inspect.signature(audit.audit).parameters["require_dynamic"].default \
         is False
+
+# ------------------------------------------------- audit trail is complete
+
+def test_the_injection_chain_names_itself_in_the_basis():
+    """The specific fix: the injection evidence must appear in the basis.
+
+    `findings["injection"]` raised the dynamic verdict to suspicious/medium
+    without appending a basis tag, so the pack showed a verdict and no trail for
+    it. The existing guard only checked MALICIOUS levels; this widens it to every
+    level above unknown, because a suspicious verdict is still a verdict.
+    """
+    import inspect
+    from winre import findings as F
+    src = inspect.getsource(F.dynamic_findings)
+    assert 'basis.append("injection:"' in src, (
+        "the injection chain raises the verdict but is not cited in the basis")
+
+
+def test_no_pack_on_disk_reports_a_verdict_without_a_basis():
+    """Machine-checked over every pack in logs/, not just the synthetic ones.
+
+    Reads the packs that already exist so a regression on real evidence is
+    caught here rather than in a report someone has to read carefully.
+    """
+    from winre import findings as F
+    from winre.evidence import MODES
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    logs = repo / "logs"
+    if not logs.is_dir():
+        pytest.skip("no packs in logs/")
+    checked = 0
+    gaps = []
+    for sample in sorted(p for p in logs.iterdir() if p.is_dir()):
+        for mode in MODES:
+            root = sample / mode
+            if not root.is_dir():
+                continue
+            checked += 1
+            v = F.build(mode, root, sha=sample.name)["verdict"]
+            if not v["basis"] and v["level"] not in ("unknown", "benign"):
+                gaps.append((sample.name[:10], mode, v["level"]))
+    assert checked > 0, "no packs were found to check"
+    assert not gaps, f"{len(gaps)} pack(s) report a verdict with no basis tag: {gaps[:5]}"

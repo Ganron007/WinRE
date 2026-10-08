@@ -395,6 +395,12 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
         [{"chain": chain, "evidence": "frida top_apis",
           "confidence": "medium" if len(chain) >= 2 else "low"}]
         if chain else [])
+    # The injection chain is what raises this pack to suspicious/medium below,
+    # so it must be named in the basis. A level with an empty basis is
+    # un-auditable: the report shows a verdict and no trail for it, which is
+    # the same defect class as the calibration items - a claim nothing supports.
+    if chain:
+        basis.append("injection:" + "+".join(chain))
     if len(chain) >= 2:
         basis.append("injection:" + "+".join(chain))
 
