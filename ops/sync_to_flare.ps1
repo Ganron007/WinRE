@@ -72,8 +72,14 @@ Get-ChildItem -LiteralPath $Repo -Force | Where-Object { $_.Name -notin $Exclude
 }
 # strip any pycache left inside staged tree
 Get-ChildItem -LiteralPath $Staging -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-# nested local-only content (the filter above is top-level by name only)
-foreach ($nested in @("docs\internal", ".pytest_cache", ".mypy_cache")) {
+# nested local-only content (the filter above is top-level by name only).
+# Caches are stripped RECURSIVELY, the way __pycache__ is: a nested
+# winre/.pytest_cache survived the top-level prune and shipped to the VM, which
+# is how a cache directory came to sit inside the deployed tree at all.
+Get-ChildItem -LiteralPath $Staging -Recurse -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -in @(".pytest_cache", ".mypy_cache", ".ruff_cache") } |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+foreach ($nested in @("docs\internal")) {
     $np = Join-Path $Staging $nested
     if (Test-Path $np) { Remove-Item -LiteralPath $np -Recurse -Force -ErrorAction SilentlyContinue }
 }
