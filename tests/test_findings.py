@@ -97,6 +97,11 @@ def test_unknown_mode_is_reported_not_crashed():
 
 # --------------------------------------------------------- the real evidence
 
+def _is_link_local(host: str) -> bool:
+    from winre import findings as F
+    return F._is_link_local_or_multicast(host)
+
+
 @needs_real
 def test_the_real_packs_now_carry_the_evidence_they_always_had():
     """The defect: b108 dropped b.wnry/taskdl.exe and the report said nothing."""
@@ -118,9 +123,37 @@ def test_persistence_in_the_startup_folder_is_named():
 def test_c2_hosts_are_found_and_os_noise_is_not():
     f = findings.dynamic_findings(LOGS / B101 / "agentic", sha=B101)
     hosts = {c["host"] for c in f["findings"]["network"]["c2"]}
-    assert "x1.c.lencr.org" in hosts
-    for noise in ("ecs.office.com", "ctldl.windowsupdate.com", "g.live.com"):
-        assert noise not in hosts, f"{noise} is OS telemetry, not C2"
+    # B101's capture contains ONLY OS and CA infrastructure: ctldl.windowsupdate.com
+    # and four Let's Encrypt CDN hosts. There is no C2 in it. This test used to
+    # assert the opposite - `x1.c.lencr.org` was demanded as C2 because the sample
+    # completed a TLS handshake, and OCSP validation contacts Let's Encrypt on
+    # every TLS session on the box. That false positive only became visible once
+    # the host-side tshark enrichment actually ran; before that this pack carried
+    # no captures and the assertion passed over a set that was empty for the
+    # wrong reason.
+    for ca in ("x1.c.lencr.org", "x2.c.lencr.org", "ye.c.lencr.org",
+               "yr.c.lencr.org", "lencr.org", "e1.o.lencr.org"):
+        assert ca not in hosts, f"{ca} is Let's Encrypt CDN, not C2"
+    assert "ctldl.windowsupdate.com" not in hosts, "Windows Update is not C2"
+    assert not hosts, (
+        f"B101 has no C2 - every host in its capture is OS or CA "
+        f"infrastructure, but these were reported: {hosts}")
+    # and nothing link-local is ever a candidate
+    for h in (f["findings"]["network"]["leads"] or []):
+        assert not _is_link_local(h), f"{h} is link-local/multicast"
+
+
+@needs_real
+def test_real_c2_is_still_found_after_the_exclusions():
+    """The paired control: excluding CA/CDN and multicast must not blind the
+    engine. b109's capture contains a DGA domain - an algorithmically generated
+    name with no legitimate registrant - which is C2 by construction.
+    """
+    f = findings.dynamic_findings(LOGS / B109 / "agentic", sha=B109)
+    hosts = {c["host"] for c in f["findings"]["network"]["c2"]}
+    assert any("iuqerfsodp9ifjaposdfjhgosurijfaewrwergwea" in h for h in hosts), (
+        f"a DGA domain was lost by the exclusions: {hosts}")
+    assert f["verdict"]["level"] in (findings.MALICIOUS, findings.SUSPICIOUS)
 
 
 @needs_real

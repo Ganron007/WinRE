@@ -33,8 +33,21 @@ from pathlib import Path
 
 
 def _tool(dyn_dir: Path, name: str) -> Path | None:
+    """Find an analysis tool by name.
+
+    Looks in the pulled pack first (a packed copy wins), then the repo's `tools/`
+    and `winre/` directories. The `winre/` entry is not redundant: the
+    host-side analysis tools - enrich_pcap_tshark, pcap_beacon, emu_diff,
+    procmon_post - all live in `winre/`, and looking only in `tools/` made
+    enrich_pcap skip every single run with "not found" while tshark was
+    installed and the pcaps were sitting right there.
+    """
+    repo = Path(__file__).resolve().parents[1]
     for cand in (dyn_dir.parents[1] / "tools" / name,
-                 dyn_dir.parents[0] / "tools" / name):
+                 dyn_dir.parents[0] / "tools" / name,
+                 repo / "tools" / name,
+                 repo / "winre" / name,
+                 repo / name):
         if cand.is_file():
             return cand
     return None
