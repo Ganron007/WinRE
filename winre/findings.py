@@ -123,12 +123,64 @@ def _classify_path(p: str, sample: str | None = None) -> str | None:
 
 
 def _host_tools() -> dict:
-    """Which host-side analysis tools exist. Absent ones become limitations."""
+    """Which tools the analysis plane can actually use on THIS box.
+
+    W2/host-provisioning: this used to be `shutil.which(name)` for four names,
+    which is wrong in both directions and sent a reviewer down the wrong path:
+
+      * yara is normally a LIBRARY on the analysis host (yara-python, imported
+        as `yara`), not an executable on PATH. `which("yara")` therefore reports
+        "not installed" while yara-python is present and working.
+      * floss is likewise usually the pip package. And capa - which the static
+        findings weight heavily - was never checked at all.
+      * It says nothing about WHERE it looked, so a limitation reads as "this
+        tool does not exist" rather than "this tool is not on the box that runs
+        the analysis". The FlareVM has yara-x at C:/Tools/yara-x\\yr.exe and 57
+        curated rules at C:/Tools/yara-rules; the analysis plane cannot use them
+        because the VM is dirty after a detonation.
+
+    So: probe by IMPORT for the Python tools, by PATH for the binaries, and
+    record the rules directory separately - `ops/provision_host.ps1` is what
+    fills these in.
+    """
+    import importlib
     import shutil
-    out = {}
-    for t in ("tshark", "yara", "floss", "strings"):
-        out[t] = bool(shutil.which(t))
+
+    out: dict = {}
+    for t in ("tshark", "strings", "7z"):
+        out[t] = bool(shutil.which(t) or shutil.which(t + ".exe"))
+    # python modules: importability is the real test
+    for mod in ("yara", "floss", "capa"):
+        try:
+            importlib.import_module(mod)
+            out[mod] = True
+        except Exception:
+            out[mod] = False
+    rules = _yara_rules_dir()
+    out["yara_rules"] = bool(rules)
+    out["yara_rules_dir"] = str(rules) if rules else None
     return out
+
+
+def _yara_rules_dir() -> "Path | None":
+    """The curated rule set on this box, if any.
+
+    `ops/provision_host.ps1` stages it from the FlareVM (which holds the
+    authority copy at C:/Tools/yara-rules). An env override wins so a host that
+    keeps rules elsewhere does not need a code change.
+    """
+    import os
+    from pathlib import Path as _P
+    env = os.environ.get("WINRE_YARA_RULES")
+    for cand in ([_P(env)] if env else []) + [
+            _P("C:/Tools/yara-rules"), _P("C:/yara-rules"),
+            _P(__file__).resolve().parents[1] / "yara-rules"]:
+        try:
+            if cand.is_dir() and any(cand.rglob("*.yar*")):
+                return cand
+        except OSError:
+            continue
+    return None
 
 
 def _frame(mode: str, sha: str, **kw) -> dict:
@@ -423,7 +475,7 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
         "bytes": sum(f.stat().st_size for f in dumps if f.is_file()),
         "harvest_ok": mh.get("ok"),
         "harvest_reason": mh.get("reason"),
-        "triage": {"note": "dump triage runs on the analysis host, not the VM"},
+        "triage": _triage_dumps(dyn_dir, dumps),
     }
     if not dumps:
         limitations.append(
@@ -760,6 +812,83 @@ def _backfill_provenance(dyn_dir: Path, max_lines: int = 200_000) -> list[dict]:
     except OSError:
         return []
     return out
+
+
+
+def _triage_dumps(dyn_dir: Path, dumps: list[Path]) -> dict:
+    """YARA-triage the pulled memory dumps, HERE, with the host's yara.
+
+    W2/host-provisioning: the findings plane has reported
+    `memory: {dumps, bytes}` since the beginning and then said only that triage
+    "runs on the analysis host, not the VM". Nothing ran it. The limitation that
+    used to excuse this - "yara is not installed on the analysis host" - was
+    true, and it was true because the control plane was never provisioned:
+    the FlareVM has yara-x and 57 curated rules, the box that does the analysis
+    had neither, and no installer covered it.
+
+    Now that `ops/provision_host.ps1` provisions this box, the triage runs here.
+
+    Bounded on purpose: a dump is 60-300 MB, rule sets are large, and yara is
+    slow. A per-dump wall-clock cap and a total hit cap keep a pathological
+    dump from hanging the whole derivation - and a timeout is reported as a
+    timeout, never as "no hits", because a silent cap would be the same
+    dishonesty the rest of this module is built to avoid.
+    """
+    import os
+    import time
+    rules_dir = _yara_rules_dir()
+    if not rules_dir:
+        return {"ran": False, "reason": "no curated YARA rules on this host "
+                                        "(ops/provision_host.ps1 stages them "
+                                        "from the FlareVM)"}
+    try:
+        import yara
+    except Exception as e:
+        return {"ran": False, "reason": f"yara-python not importable: {e}"}
+
+    # one compiled ruleset over the whole directory, rather than per file
+    paths = sorted(rules_dir.rglob("*.yar")) + sorted(rules_dir.rglob("*.yara"))
+    if not paths:
+        return {"ran": False, "reason": f"no .yar/.yara files under {rules_dir}"}
+    try:
+        rules = yara.compile(filepaths={f"r{i}": str(p)
+                                        for i, p in enumerate(paths)})
+    except Exception as e:
+        return {"ran": False,
+                "reason": f"could not compile {len(paths)} rule file(s): "
+                          f"{type(e).__name__}: {str(e)[:120]}"}
+
+    cap_s = float(os.environ.get("WINRE_DUMP_TRIAGE_S", "90"))
+    hits: list[dict] = []
+    scanned, timed_out = 0, False
+    for d in dumps:
+        if not d.is_file():
+            continue
+        t0 = time.monotonic()
+        try:
+            for m in rules.match(str(d)):
+                hits.append({"dump": d.name, "rule": m.rule,
+                             "meta": (m.meta or {}).get("description")})
+                if len(hits) >= 40:
+                    break
+        except Exception:
+            # a dump that yara cannot read is reported, not swallowed
+            hits.append({"dump": d.name, "rule": None,
+                         "error": "yara could not read this dump"})
+            continue
+        scanned += 1
+        if time.monotonic() - t0 > cap_s:
+            timed_out = True
+            break
+
+    return {"ran": True, "rules_files": len(paths),
+            "rules_dir": str(rules_dir), "dumps_scanned": scanned,
+            "hits": hits[:40],
+            "hit_count": len(hits),
+            "timed_out": timed_out,
+            "note": ("a timeout is a timeout, not 'no hits': a dump left "
+                     "unscanned means its contents are unknown, not clean"
+                     if timed_out else None)}
 
 
 # ------------------------------------------------------------- dbg findings
