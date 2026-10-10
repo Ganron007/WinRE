@@ -121,6 +121,21 @@ if (Test-Path $RulesDest) {
 
 # ---------------------------------------------------------------- report
 ""
+"  --- debugging tools: the WinDbg dump analysis runs HERE now ---"
+# windbg_post used to run on the VM because mcp-windbg is localhost-bound there.
+# It is passive analysis of a file, so it moved to this host - which means this
+# host needs cdb. It is usually already present in the Windows SDK's Debuggers
+# directory, not on PATH, so a PATH-only probe would miss it.
+$cdb = $null
+foreach ($c in @("C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe",
+                 "C:\Program Files\Windows Kits\10\Debuggers\x64\cdb.exe")) {
+    if (Test-Path $c) { $cdb = $c; break }
+}
+if (-not $cdb) { $cdb = (Get-Command cdb -EA SilentlyContinue).Source }
+if ($cdb) { Ok "cdb -> $cdb" } else {
+    Bad "cdb.exe missing - install the Windows SDK 'Debugging Tools for Windows'"
+}
+
 "  === what the analysis plane will now find on this host ==="
 & $py -c @"
 import shutil, sys
