@@ -105,6 +105,26 @@ def emulation_diff(dyn_dir: Path) -> dict:
         return {"error": f"{type(e).__name__}: {str(e)[:160]}"}
 
 
+def analyst_next(dyn_dir: Path) -> dict:
+    """ANALYST-NEXT.md + analyst_next.json — the human next-steps checklist.
+
+    Moved off the VM. It is pure enumeration over files already on disk, so a
+    box that has just executed the sample has no business producing it. It is
+    also NOT a verdict: it lists what was collected and what a human still has
+    to do, and `analyst_only` items must never be reported as complete.
+
+    This used to run on the VM via `from winre.emit_analyst_next import emit`,
+    which was a name that never existed — so every run recorded an ImportError
+    and produced nothing. `winre/tests/test_off_vm_split.py` now pins both the
+    import and the host-side wiring so that cannot regress.
+    """
+    try:
+        from winre.emit_analyst_next import emit
+        return emit(dyn_dir)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {str(e)[:160]}"}
+
+
 def run(dyn_dir: Path) -> dict:
     """Every host-side analysis step, best-effort and individually reported.
 
@@ -115,7 +135,8 @@ def run(dyn_dir: Path) -> dict:
     out: dict = {"ran_on": "control-plane", "steps": {}}
     for name, fn in (("enrich_pcap", enrich_pcap), ("pcap_beacon", beacon),
                      ("procmon_post", procmon_catalog),
-                     ("emu_diff", emulation_diff)):
+                     ("emu_diff", emulation_diff),
+                     ("analyst_next", analyst_next)):
         try:
             out["steps"][name] = fn(dyn_dir)
         except Exception as e:                      # pragma: no cover

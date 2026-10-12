@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -40,6 +41,14 @@ from winre.evidence import MODES, pack_sections  # noqa: E402
 
 # Evidence packs live on the control plane (pulled by remote driver)
 LOGS_DIR = Path(remote_driver.LOCAL_LOGS)   # one authority: winre.paths
+
+# Per-file cap for the analyst export zip. Files over this are NOT embedded,
+# but they ARE listed in the archive's EXPORT-NOT-EMBEDDED.txt with their
+# sizes and reasons, and the response reports the counts in headers. A
+# successful-looking archive that is quietly missing its largest evidence is
+# the defect this replaces (see pack_export).
+EXPORT_SIZE_CAP = int(os.environ.get("WINRE_EXPORT_SIZE_CAP",
+                                      str(64 * 1024 * 1024)))
 
 # A single run at a time (deterministic; avoid VM stampede)
 _run_lock = threading.Lock()
@@ -1133,7 +1142,26 @@ def create_app() -> "Flask":
 
     @app.route("/packs/<sha>/export")
     def pack_export(sha: str):
-        """Zip the whole evidence pack (analyst export)."""
+        """Zip the whole evidence pack (analyst export).
+
+        Files over EXPORT_SIZE_CAP are not embedded - a 500 MB download of
+        procmon.pml and two 150 MB memory dumps is not what an analyst wants
+        from an "export the pack" button - but they are no longer dropped in
+        SILENCE.
+
+        This used to `continue` past them with no record. Driven against the
+        fc75410 pack, that produced a 143-entry archive that was quietly
+        missing 534 MB of primary evidence (memory/sample_early.dmp,
+        memory/sample_late.dmp, procmon.pml) and said nothing about it. The
+        archive still carried manifest.json, so a reader who cross-checked
+        every hash would eventually notice - but nothing in the export itself
+        admitted the gap, which is the same dishonesty the rest of this
+        architecture exists to remove.
+
+        So the skipped files are written into the zip as
+        EXPORT-NOT-EMBEDDED.txt, with sizes and reasons, and the response
+        carries the count in a header so the UI can say it too.
+        """
         import io
         import zipfile
         from flask import Response, abort
@@ -1143,17 +1171,62 @@ def create_app() -> "Flask":
         root = _section_root(sha, mode).resolve()
         if not root.is_dir():
             return jsonify({"error": "not found"}), 404
+        cap = EXPORT_SIZE_CAP
         buf = io.BytesIO()
+        skipped: list[tuple[str, int]] = []
+        n_embedded = 0
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in sorted(root.rglob("*")):
-                if not f.is_file() or f.stat().st_size > 64 * 1024 * 1024:
-                    continue  # skip >64MB monsters (pcaps dumps are separate)
-                zf.write(f, f.relative_to(root))
+                if not f.is_file():
+                    continue
+                rel = str(f.relative_to(root))
+                try:
+                    size = f.stat().st_size
+                except OSError:
+                    skipped.append((rel, -1))
+                    continue
+                if size > cap:
+                    skipped.append((rel, size))
+                    continue
+                try:
+                    zf.write(f, rel)
+                    n_embedded += 1
+                except OSError as e:
+                    skipped.append((f"{rel} (read failed: {e})", size))
+            if skipped:
+                # The record of the gap, inside the archive itself.
+                lines = [
+                    "WinRE evidence export — NOT EMBEDDED",
+                    "",
+                    f"pack   : {sha}",
+                    f"root   : {root}",
+                    f"cap    : {cap:,} bytes per file",
+                    f"count  : {len(skipped)} file(s) are NOT in this archive",
+                    "",
+                    "These files exist in the evidence pack on the control",
+                    "plane. They were left out only because of their size -",
+                    "NOT because they are absent, empty, or unimportant.",
+                    "",
+                    f"{'size':>15}  path",
+                ]
+                for rel, size in sorted(skipped, key=lambda x: -x[1]):
+                    lines.append(f"{size:>15,}  {rel}")
+                lines += [
+                    "",
+                    "To obtain them, copy them from the pack directory above",
+                    "directly, or raise WINRE_EXPORT_SIZE_CAP and re-export.",
+                ]
+                zf.writestr("EXPORT-NOT-EMBEDDED.txt", "\n".join(lines) + "\n")
         buf.seek(0)
         tag = (mode or (root.name if root.name in MODES else "pack"))
-        return Response(buf.getvalue(), mimetype="application/zip",
+        resp = Response(buf.getvalue(), mimetype="application/zip",
                         headers={"Content-Disposition":
                                  f"attachment; filename=winre-{sha[:16]}-{tag}.zip"})
+        resp.headers["X-WinRE-Export-Embedded"] = str(n_embedded)
+        resp.headers["X-WinRE-Export-Skipped"] = str(len(skipped))
+        resp.headers["X-WinRE-Export-Skipped-Bytes"] = str(
+            sum(s for _, s in skipped if s > 0))
+        return resp
 
     @app.route("/packs/<sha>/<stage>/<fname>")
     def pack_file(sha: str, stage: str, fname: str):

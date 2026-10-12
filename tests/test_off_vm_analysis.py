@@ -20,10 +20,10 @@ from winre import analysis, orchestrator
 
 # ------------------------------------------------- the split is declared
 
-def test_the_analysis_module_declares_the_four_host_side_steps():
+def test_the_analysis_module_declares_the_five_host_side_steps():
     src = pathlib.Path(analysis.__file__).read_text(encoding="utf-8")
     for step in ("enrich_pcap", "beacon", "procmon_catalog",
-                 "emulation_diff"):
+                 "emulation_diff", "analyst_next"):
         assert f"def {step}(" in src, f"{step} is not a host-side step"
 
 
@@ -55,7 +55,8 @@ def test_the_orchestrator_defers_when_told(tmp_path, monkeypatch):
     assert not called, "_post_pull_enrich_local ran on a remote VM"
     assert "deferred_to_control_plane" in notes
     assert set(notes["deferred_to_control_plane"]) == {
-        "enrich_pcap", "pcap_beacon", "procmon_post", "emu_diff"}
+        "enrich_pcap", "pcap_beacon", "procmon_post", "emu_diff",
+        "analyst_next"}
     assert all("control plane" in v
                for v in notes["deferred_to_control_plane"].values())
 
@@ -125,13 +126,13 @@ def test_analysis_run_records_best_effort_and_never_raises(tmp_path):
     out = analysis.run(d)
     assert out["ran_on"] == "control-plane"
     assert set(out["steps"]) == {"enrich_pcap", "pcap_beacon",
-                                 "procmon_post", "emu_diff"}
+                                 "procmon_post", "emu_diff", "analyst_next"}
     # every step either succeeded or said why not - none is silently absent
     for name, step in out["steps"].items():
         assert isinstance(step, dict), name
         keys = set(step)
         assert keys & {"ok", "rc", "error", "skipped", "beacons",
-                       "persistence", "highlights", "anomalies"}, (
+                       "persistence", "highlights", "anomalies", "items"}, (
             f"{name}: nothing actionable in {step}")
 
 

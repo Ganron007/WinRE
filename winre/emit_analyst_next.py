@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 """Emit ANALYST-NEXT.md + analyst_next.json for a dynamic (or doc) pack.
 
-Usage (Remnux):
-  python3 emit_analyst_next.py /opt/samples/logs/<sha>/dynamic
-  python3 emit_analyst_next.py /opt/samples/logs/<sha>/dynamic --sha <sha>
+Usage (control plane):
+  python -m winre.emit_analyst_next <dyn_dir>
+  python emit_analyst_next.py /opt/samples/logs/<sha>/dynamic
+  python emit_analyst_next.py /opt/samples/logs/<sha>/dynamic --sha <sha>
+
+This module is PURE ENUMERATION over files that are already on disk. It never
+touches the network, the sample, or the VM, so it runs on the control plane —
+a box that has just executed the sample is not a trustworthy analyst of it
+(docs/internal/DESIGN.md section 2). The orchestrator used to call it on the
+VM; that is what `orchestrator._post_pull_enrich` now defers instead.
+
+`emit()` is the entry point for the analysis plane; `main()` is the CLI.
+Both write the same two artifacts and return the same summary.
 """
 from __future__ import annotations
 
@@ -235,6 +245,48 @@ def render_md(data: dict[str, Any]) -> str:
         "",
     ]
     return "\n".join(lines)
+
+
+def emit(dyn: Path, sha: str = "") -> dict:
+    """Write ANALYST-NEXT.md + analyst_next.json into `dyn`. Never raises.
+
+    This is the entry point `winre.analysis` calls on the control plane.
+
+    It exists because the orchestrator called `from winre.emit_analyst_next
+    import emit` — a name that was never defined here. Every run since that
+    edit recorded `{"error": "cannot import name 'emit' ..."}` and the most
+    recent real detonation (fc75410, 2026-10-08) is the one that shows it. The
+    `except` around the call turned a broken import into a recorded error
+    rather than a crash, which is how it survived a full suite run.
+
+    Returns a small summary so the caller can record WHAT was written, not
+    just that something happened.
+    """
+    out: dict[str, Any] = {"ok": False}
+    try:
+        dyn = Path(dyn)
+        if not dyn.is_dir():
+            out.update({"ok": False, "error": f"not a directory: {dyn}"})
+            return out
+        sha = sha or dyn.parent.name
+        meta = _load_meta(dyn)
+        data = build_items(dyn, sha, meta)
+        md_p = dyn / "ANALYST-NEXT.md"
+        js_p = dyn / "analyst_next.json"
+        md_p.write_text(render_md(data), encoding="utf-8")
+        js_p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        out.update({
+            "ok": True,
+            "host": "control-plane",
+            "path": str(md_p),
+            "items": len(data["items"]),
+            "collected": len(data["collected"]),
+            "analyst_only": sum(1 for i in data["items"]
+                                if i.get("analyst_only")),
+        })
+    except Exception as e:
+        out.update({"ok": False, "error": f"{type(e).__name__}: {str(e)[:160]}"})
+    return out
 
 
 def main() -> int:

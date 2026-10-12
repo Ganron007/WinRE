@@ -139,7 +139,8 @@ def _post_pull_enrich(dyn_dir: Path, sha: str,
     deferred = {}
 
     if off_vm:
-        for k in ("enrich_pcap", "pcap_beacon", "procmon_post", "emu_diff"):
+        for k in ("enrich_pcap", "pcap_beacon", "procmon_post", "emu_diff",
+                  "analyst_next"):
             deferred[k] = "deferred: runs on the control plane (winre.analysis)"
     else:
         notes.update(_post_pull_enrich_local(dyn_dir))
@@ -165,13 +166,17 @@ def _post_pull_enrich(dyn_dir: Path, sha: str,
     except Exception as e:
         notes["windbg_dump"] = {"error": str(e)[:200]}
 
-    # ANALYST-NEXT over what is present. It enumerates artefacts and names the
-    # human steps; it is not a verdict and must not read as one.
-    try:
-        from winre.emit_analyst_next import emit
-        notes["analyst_next"] = emit(dyn_dir, sha)
-    except Exception as e:
-        notes["analyst_next"] = {"error": str(e)[:200]}
+    # ANALYST-NEXT moved to the control plane with the rest of the analysis.
+    # It is pure enumeration over files already on disk, so there is no reason
+    # to run it on a box that has just executed the sample. It used to run
+    # here via `from winre.emit_analyst_next import emit` — a name that never
+    # existed in that module, so every run since recorded an ImportError as
+    # "analyst_next": {"error": ...}. The `except` below is what let a broken
+    # import pass as a recorded failure instead of a crash; a run that
+    # produced no ANALYST-NEXT read the same as one that did.
+    if off_vm:
+        deferred["analyst_next"] = (
+            "deferred: runs on the control plane (winre.analysis)")
 
     if deferred:
         notes["deferred_to_control_plane"] = deferred
