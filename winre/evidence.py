@@ -318,6 +318,52 @@ def preserve_dynamic(pack: "EvidencePack", *, stamp: str | None = None) -> dict:
     return out
 
 
+def archive_stage_for_fresh_run(pack, stage: str = "dynamic") -> dict:
+    """Move an existing stage dir aside so the next pull lands in an EMPTY dir.
+
+    The defect this closes: `remote_dynamic` deleted `META.json` and `memory/`
+    and then pulled fresh files OVER whatever else was already in the stage.
+    Everything else survived from the previous run - frida_trace.jsonl,
+    procmon.csv, network_raw/, post_mortem.json, windbg_analysis.json,
+    process_snapshot*.json - so a partial pull, or a same-named file missing
+    from this run, left an old sibling beside a fresh META whose run nonce
+    checked out. One pack on disk held http_*.txt and packets_*.pcap from three
+    different dates while claiming a single fresh run.
+
+    Same contract as `mark_dynamic_not_requested`: the previous run is MOVED to
+    previous_runs/, never deleted, and a failed move leaves the pack untouched
+    and says so - an honest gap beats silent evidence loss.
+
+    Never raises.
+    """
+    out: dict = {"ok": True, "archived": False, "preserved_previous": None,
+                 "preserved_artifacts": 0}
+    try:
+        import shutil
+        d = pack.stages.get(stage)
+        if not (d and d.exists()):
+            return out
+        # real evidence = anything that is not one of our own wrappers
+        payload = [ch for ch in d.iterdir()
+                   if ch.name not in _DYNAMIC_WRAPPERS]
+        if not payload:
+            return out
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        dest = pack.root / "previous_runs" / f"{stage}_{stamp}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.move(str(d), str(dest))
+            d.mkdir(parents=True, exist_ok=True)
+            out.update({"archived": True,
+                        "preserved_previous": f"previous_runs/{dest.name}",
+                        "preserved_artifacts": len(payload)})
+        except OSError as e:
+            out.update({"ok": False, "error": str(e)[:160]})
+    except Exception as e:                                  # pragma: no cover
+        out.update({"ok": False, "error": str(e)[:160]})
+    return out
+
+
 def mark_dynamic_not_requested(pack: "EvidencePack") -> dict:
     """Fresh dynamic/STAGE.json + SKIP.json for a run that never detonated.
 

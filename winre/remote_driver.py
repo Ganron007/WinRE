@@ -37,7 +37,8 @@ from pathlib import Path
 
 from .envfile import load_dotenv  # noqa: F401  (ensures .env is loaded)
 from .evidence import (EvidencePack, stage_result, verdict_fields
-                       as _verdict_fields, write_execution_plan)
+                       as _verdict_fields, write_execution_plan,
+                       archive_stage_for_fresh_run)
 from . import run_nonce
 from .run_nonce import new_run_id
 from .mcp.x64dbg_client import X64DbgClient
@@ -645,28 +646,25 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
             break
     job_ran = r.returncode == 0 and helper_rc is not None and helper_rc >= 0
 
-    # delete stale local META BEFORE pull so a failed run can't resurrect
-    # a previous run's ok (freshness check below is the second guard)
-    stale = pack.stages["dynamic"] / "META.json"
-    if stale.exists():
-        try:
-            stale.unlink()
-        except Exception:
-            pass
-
-    # pull dynamic dir back (from the run's mode section on the VM).
-    # Recursive: a wildcard pull (dir\*) only copies top-level files and
-    # silently drops subdirs (memory/, network_raw/) — the 7 pe-sieve dumps
-    # + raw pcap stayed on the VM exactly this way. scp -r onto the section
-    # root merges into the existing dynamic/ dir.
+    # ARCHIVE the previous stage, do not patch it.
+    #
+    # This used to delete `META.json` and `memory/` and then pull fresh files
+    # OVER whatever else was already there. Everything else survived from the
+    # previous run - frida_trace.jsonl, procmon.csv, network_raw/,
+    # post_mortem.json, windbg_analysis.json, process_snapshot*.json - so a
+    # partial pull, or a same-named file missing from this run, left an old
+    # sibling beside a fresh META whose nonce checked out. That is not a
+    # hypothetical: one pack on disk holds http_*.txt and packets_*.pcap from
+    # three different dates while claiming a single fresh run.
+    #
+    # The fix follows the pattern `evidence.mark_dynamic_not_requested` already
+    # established: the previous run is MOVED to previous_runs/, never deleted,
+    # and the pull lands in an empty directory. A run that produces nothing now
+    # produces nothing, rather than producing a mixture of two runs.
     local_dyn = pack.stages["dynamic"]
+    archived = archive_stage_for_fresh_run(pack)
     local_dyn.mkdir(parents=True, exist_ok=True)
-    # freshness: drop the previous run's memory captures before the pull so
-    # stale dumps can never masquerade as this run's evidence
-    try:
-        shutil.rmtree(local_dyn / "memory", ignore_errors=True)
-    except Exception:
-        pass
+
     ok = False
     err = None
     remote_dyn = (rf'{cfg["remote_pipeline"]}\logs\{sha}'
