@@ -363,6 +363,23 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
                               gate_pass=meta.get("gate_marker_consumed"),
                               run_id=run_id, nonce=nonce)
     pack.write("dynamic", "STAGE.json", stage_meta)
+    # ---- the artifact manifest (design §8) ---------------------------------
+    # Same contract as remote_driver: written after the pull so it describes what
+    # actually arrived, and it is what makes "this run produced no network
+    # capture" distinguishable from "the network capture is empty".
+    try:
+        from . import manifest as _manifest
+        stage_meta["manifest"] = _manifest.write_manifest(
+            pack.stages["dynamic"], run_id=run_id, sha256=sha,
+            mode=pack.mode or "dynamic", meta=meta,
+            requested={"frida": True, "procmon": True, "memory": True,
+                       "network": True, "process_snapshot": True,
+                       "malcat": True, "job": True})
+        pack.write("dynamic", "STAGE.json", stage_meta)
+    except Exception as e:
+        stage_meta["manifest"] = {"schema": "winre-artifact-manifest/v1",
+                                  "ok": False,
+                                  "error": f"{type(e).__name__}: {e}"}
     # The VM refused the execution (the local driver has no control-plane
     # preflight: the gate acts inside the orchestrator). Preserve any previous
     # pack rather than leaving stale artifacts beside a record that says there

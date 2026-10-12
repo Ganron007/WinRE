@@ -535,6 +535,25 @@ def clock_skew_s(cfg: dict | None = None, *, cached: dict | None = None,
     return out
 
 
+def _requested_sources(pack, meta: dict) -> dict:
+    """Which artifact sources this run actually asked for.
+
+    The manifest's coverage verdict depends on this: a source that was never
+    requested is `not_requested`, not silently missing. Guessing from what is
+    present would make every pack look complete.
+    """
+    req = {"frida": True, "procmon": True, "memory": True, "network": True,
+           "process_snapshot": True, "malcat": True, "job": True}
+    # pe-sieve / x64dbg unpack are opt-in capabilities
+    for flag in ("pesieve", "x64dbg"):
+        req[flag] = bool(meta.get(f"{flag}_ran") or meta.get(flag))
+    # windbg's MCP is localhost-bound on the VM; if it never came up the source
+    # was requested and failed, which is exactly what the manifest should say
+    req["windbg"] = bool(meta.get("windbg_dump") is not None
+                         or meta.get("windbg_ran"))
+    return req
+
+
 def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                    max_seconds: int, enable_pesieve: bool,
                    adaptive: bool = False,
@@ -733,6 +752,22 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
         except Exception as e:
             post_analysis = {"error": f"{type(e).__name__}: {e}"}
 
+    # ---- the artifact manifest (design §8) ---------------------------------
+    # Written AFTER the analysis steps so it covers the derived files too, and
+    # after the pull so it describes what actually arrived. This is what makes
+    # "this run produced no network capture" distinguishable from "the network
+    # capture is empty" - a distinction nothing recorded before.
+    manifest_rec = None
+    try:
+        from . import manifest as _manifest
+        manifest_rec = _manifest.write_manifest(
+            pack.stages["dynamic"], run_id=run_id, sha256=sha,
+            mode=pack.mode or "dynamic", meta=meta,
+            requested=_requested_sources(pack, meta))
+    except Exception as e:
+        manifest_rec = {"schema": "winre-artifact-manifest/v1", "ok": False,
+                        "error": f"{type(e).__name__}: {e}"}
+
     stage_meta = stage_result("dynamic", ok, error=err,
                               summary=(f"events={meta.get('frida_events')} "
                                        f"ok={ok}"
@@ -756,7 +791,8 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                               clock_skew_s=(skew or {}).get("clock_skew_s"),
                               control_plane_started_at=started_at,
                               vm_finished_at=meta.get("finished_at"),
-                              post_analysis=post_analysis)
+                              post_analysis=post_analysis,
+                              manifest=manifest_rec)
     pack.write("dynamic", "STAGE.json", stage_meta)
     return stage_meta
 

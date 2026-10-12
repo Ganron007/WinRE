@@ -509,6 +509,21 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
             "detonation produced no API observations; it is not evidence of "
             "anti-emulation")
 
+    # ---- what this run did NOT capture ------------------------------------
+    # The manifest is the authority on coverage. Before it, "no file" and "empty
+    # file" were the same thing, so a capture that never happened read as a
+    # sample that did nothing. Consult it and say so.
+    try:
+        from . import manifest as _manifest
+        gaps = _manifest.incomplete_sources(dyn_dir)
+        if gaps:
+            limitations.append(
+                "incomplete evidence collection: "
+                + "; ".join(f"{s} {r}" for s, r in gaps[:6])
+                + ". Absence of a signal below may mean the sensor never ran.")
+    except Exception:
+        pass
+
     # --- verdict ----------------------------------------------------------
     level, conf = UNKNOWN, "low"
     if not ran:
