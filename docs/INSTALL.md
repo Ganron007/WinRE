@@ -127,6 +127,21 @@ command re-applies everything to a fresh/reverted VM -
 
 5. **Take/update the VM snapshot** now — setup created
    `C:\WinRE\.clean_snapshot` and it must be inside the snapshot.
+
+   **The GOLD procedure (operator, in this order):**
+
+   1. Confirm the VM is **current and uncontaminated**: marker armed,
+      `C:\WinRE\.env` absent, 0 staged samples, no `.dmp`/`.pcap`/`.pml`
+      residue anywhere, and the synced code matches host HEAD (parity).
+   2. **Shut the VM down.** Memory state is not wanted — a baseline that
+      carries a live guest's RAM is not a clean baseline, and reverting to one
+      resumes a session rather than starting fresh.
+   3. Take the GOLD snapshot (disk-only, no `.vmss`).
+   4. **Start the VM again** so the MCP autostart tasks bring up :9009 / :9097.
+
+   A running-VM snapshot is a crash-consistent capture of a live guest, which
+   is a different thing from a baseline. Prefer the shutdown form.
+
 6. Reboot once: the Startup launcher starts Malcat (:9009) and WinDbg
    (:9097) MCP servers; x64dbg (:9094) starts on demand (its MCP needs a
    console session).
