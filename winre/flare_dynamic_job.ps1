@@ -559,7 +559,9 @@ if (Test-Path $summaryPy) {
 }
 
 if (Test-Path $trace) {
+  Log "copying Frida trace into output"
   Copy-Item $trace (Join-Path $OutDir "frida_trace.json") -Force
+  Log ("Frida trace copied bytes={0}" -f (Get-Item (Join-Path $OutDir "frida_trace.json")).Length)
 }
 
   # How the sample was launched. Frida prints "loader=<direct|rundll32>
@@ -568,11 +570,13 @@ if (Test-Path $trace) {
   $launchLoader = $null
   $launchLoaderEntry = $null
   if (Test-Path (Join-Path $OutDir "frida.stderr.txt")) {
+    Log "reading Frida launch metadata"
     $se = (Get-Content (Join-Path $OutDir "frida.stderr.txt") -Raw)
     if ($se -match "loader=(rundll32|direct)") { $launchLoader = $Matches[1] }
     if ($se -match "(?m)^loader=(?:rundll32|direct) entry=(.*)$") {
       $launchLoaderEntry = $Matches[1].Trim()
     }
+    Log "Frida launch metadata read"
   }
   # A detonation that never spawned the sample is not a green detonation.
   # b105 (2026-10-06) was a DLL masquerading as .exe: Frida's device.spawn
@@ -596,6 +600,7 @@ if (Test-Path $trace) {
     }
     $detonation_err = $reason
   }
+  Log "writing META.job.json"
   @{
     ok = (-not $detonation_err)
     error = $detonation_err
@@ -631,8 +636,8 @@ if (Test-Path $trace) {
   loader_entry = $launchLoaderEntry
   finished_at = (Get-Date).ToUniversalTime().ToString("o")
 } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $OutDir "META.job.json") -Encoding UTF8
+Log "META.job.json written"
 
-Copy-Item $LogFile (Join-Path $OutDir "job.log") -Force -ErrorAction SilentlyContinue
 if ($SkipZip) {
   Log "ZIP skipped: local caller collects the output directory directly"
   Log "DONE ok=true zip_skipped=true"
@@ -644,6 +649,8 @@ if ($SkipZip) {
   }
   if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
   Log "zipping artifacts"
+  Log "copying current job log into archive"
+  Copy-Item $LogFile (Join-Path $OutDir "job.log") -Force -ErrorAction SilentlyContinue
   Add-Type -AssemblyName System.IO.Compression
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
@@ -656,7 +663,9 @@ if ($SkipZip) {
       if ($_.Name -ieq "procmon.pml") { return }
       if ($_.Name -ieq "frida_trace.json") { return }
       $rel = $_.FullName.Substring($OutDir.Length).TrimStart('\', '/').Replace('\', '/')
-      [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $rel, 'Optimal') | Out-Null
+      [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+        $zip, $_.FullName, $rel,
+        [System.IO.Compression.CompressionLevel]::Fastest) | Out-Null
     }
   } finally {
     $zip.Dispose()
