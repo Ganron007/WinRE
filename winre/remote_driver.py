@@ -181,11 +181,15 @@ def remote_file_inventory(cfg: dict, remote_dir: str) -> dict[str, tuple[int, st
             raise RuntimeError("remote inventory contains an invalid entry")
         rel = str(row.get("path") or "").replace("\\", "/")
         digest = str(row.get("sha256") or "").lower()
+        size_bytes = row.get("size_bytes")
         if (not rel or rel.startswith("/") or ".." in rel.split("/")
                 or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or not isinstance(size_bytes, int)
+                or isinstance(size_bytes, bool) or size_bytes < 0
                 or rel in inventory):
-            raise RuntimeError("remote inventory contains an unsafe or duplicate entry")
-        inventory[rel] = (int(row.get("size_bytes") or -1), digest)
+            raise RuntimeError(
+                "remote inventory contains an unsafe, invalid, or duplicate entry")
+        inventory[rel] = (size_bytes, digest)
     return inventory
 
 

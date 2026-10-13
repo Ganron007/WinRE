@@ -134,6 +134,25 @@ def test_inventory_diff_names_missing_unexpected_and_mismatched_paths():
     }
 
 
+def test_remote_inventory_preserves_zero_byte_file_size(monkeypatch):
+    empty_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+    class Result:
+        returncode = 0
+        stdout = (
+            '[{"path":"frida.stdout.txt","size_bytes":0,'
+            f'"sha256":"{empty_hash}"}}]'
+        )
+        stderr = ""
+
+    monkeypatch.setattr(remote_driver, "ssh_ps",
+                        lambda cfg, script, timeout: Result())
+
+    inventory = remote_driver.remote_file_inventory({}, "C:/WinRE/out")
+
+    assert inventory == {"frida.stdout.txt": (0, empty_hash)}
+
+
 def test_pipeline_report_labels_a_launched_but_incomplete_dynamic_run(tmp_path):
     sha = "a" * 64
     pack = EvidencePack(tmp_path, sha, "dynamic").ensure()
