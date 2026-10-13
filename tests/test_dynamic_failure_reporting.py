@@ -23,6 +23,80 @@ def test_local_detonation_skips_zip_but_ssh_job_keeps_archive_support():
     assert 'Log "copying current job log into archive"' in job
 
 
+def test_local_job_wait_does_not_depend_on_descendant_pipe_eof(tmp_path, monkeypatch):
+    job_script = tmp_path / "flare_dynamic_job.ps1"
+    job_script.write_text("# test stub", encoding="utf-8")
+    work_root = tmp_path / "local-runs"
+    dynamic_dir = tmp_path / "dynamic"
+    dynamic_dir.mkdir()
+    monkeypatch.setattr(orchestrator, "LOCAL_JOB_PS1", job_script)
+    monkeypatch.setenv("FLARE_LOCAL_WORK_ROOT", str(work_root))
+    monkeypatch.setattr(orchestrator, "_kill_stale_local", lambda: None)
+    monkeypatch.setattr(orchestrator, "_apply_detonation_verdict",
+                        lambda meta, trace, dyn_dir: None)
+
+    class FakeProcess:
+        pid = 4242
+        returncode = None
+
+        def __init__(self, stdout, stderr):
+            self.stdout = stdout
+            self.stderr = stderr
+
+        def wait(self, timeout):
+            assert timeout == 301
+            self.stdout.write(b"job completed")
+            self.stderr.write(b"diagnostic warning")
+            self.returncode = 0
+            return 0
+
+    def fake_popen(args, *, stdout, stderr):
+        assert stdout is not orchestrator.subprocess.PIPE
+        assert stderr is not orchestrator.subprocess.PIPE
+        assert "-SkipZip" in args
+        assert args[11] == str(work_root / ("a" * 64) / ("c" * 32))
+        return FakeProcess(stdout, stderr)
+
+    monkeypatch.setattr(orchestrator.subprocess, "Popen", fake_popen)
+    meta = {"artifacts": {}, "run_id": "c" * 32}
+    result = orchestrator._run_local_windows(
+        "a" * 64, tmp_path / "sample.exe", dynamic_dir,
+        1, "CreateFileW", False, meta)
+
+    assert result["job_rc"] == 0
+    assert result["job_stdout_tail"] == "job completed"
+    assert result["job_stderr_tail"] == "diagnostic warning"
+    assert "job_timeout" not in result
+
+
+def test_local_job_refuses_to_reuse_a_run_workspace(tmp_path, monkeypatch):
+    job_script = tmp_path / "flare_dynamic_job.ps1"
+    job_script.write_text("# test stub", encoding="utf-8")
+    work_base = tmp_path / "local-runs"
+    sha = "a" * 64
+    run_id = "c" * 32
+    existing = work_base / sha / run_id
+    existing.mkdir(parents=True)
+    dynamic_dir = tmp_path / "dynamic"
+    dynamic_dir.mkdir()
+    monkeypatch.setattr(orchestrator, "LOCAL_JOB_PS1", job_script)
+    monkeypatch.setenv("FLARE_LOCAL_WORK_ROOT", str(work_base))
+
+    def unexpected_popen(*args, **kwargs):
+        raise AssertionError("reused run ID must not launch a job")
+
+    monkeypatch.setattr(
+        orchestrator.subprocess, "Popen", unexpected_popen,
+    )
+
+    result = orchestrator._run_local_windows(
+        sha, tmp_path / "sample.exe", dynamic_dir,
+        1, "CreateFileW", False, {"artifacts": {}, "run_id": run_id})
+
+    assert result["ok"] is False
+    assert "already exists" in result["error"]
+
+
 def test_dynamic_label_distinguishes_failed_run_from_not_run():
     assert remote_driver._dynamic_status_label({
         "ok": False, "detonation_ran": True,
@@ -49,6 +123,13 @@ def test_inventory_diff_names_missing_unexpected_and_mismatched_paths():
         "missing_local": ["missing.bin"],
         "unexpected_local": ["extra.bin"],
         "content_mismatch": ["changed.bin"],
+        "content_mismatch_details": [{
+            "path": "changed.bin",
+            "remote_size_bytes": 2,
+            "received_size_bytes": 2,
+            "remote_sha256": h1,
+            "received_sha256": h2,
+        }],
         "truncated": False,
     }
 

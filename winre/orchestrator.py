@@ -39,6 +39,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 from datetime import datetime, timezone
@@ -849,9 +850,22 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
         meta["error"] = f"job ps1 missing: {LOCAL_JOB_PS1}"
         meta["ok"] = False
         return meta
-    work_root = Path(os.environ.get("FLARE_LOCAL_WORK_ROOT",
-                                    rf"C:\WinRE\local-runs\{sha}"))
-    (work_root / "out").mkdir(parents=True, exist_ok=True)
+    run_id = str(meta.get("run_id") or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", run_id):
+        run_id = f"manual-{time.time_ns()}"
+    work_base = Path(os.environ.get("FLARE_LOCAL_WORK_ROOT",
+                                   r"C:\WinRE\local-runs"))
+    work_root = work_base / sha / run_id
+    # The output tree is copied wholesale into the run pack. Isolate it by
+    # nonce so old files from a previous analysis cannot leak into this run.
+    # A repeated nonce is refused instead of reusing or deleting its evidence.
+    try:
+        work_root.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        meta["error"] = "local dynamic workspace already exists for this run ID"
+        meta["ok"] = False
+        return meta
+    (work_root / "out").mkdir()
     job_args = [
         "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
         "-File", str(LOCAL_JOB_PS1),
@@ -880,28 +894,44 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
     try:
         # Popen + taskkill-on-timeout: subprocess.run's kill() can BLOCK when
         # a grandchild is wedged in a driver call (observed hang), leaving the
-        # orchestrator stuck with no META. taskkill /T always terminates the
-        # tree; _kill_stale_local sweeps any survivors after.
-        proc = subprocess.Popen(job_args, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True,
-                                encoding="utf-8", errors="replace")
-        try:
-            out, err = proc.communicate(timeout=int(max_seconds) + 300)
-            meta["job_rc"] = proc.returncode
-            meta["job_stdout_tail"] = (out or "")[-800:]
-            meta["job_stderr_tail"] = (err or "")[-800:]
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            meta["job_timeout"] = True
-            meta["error"] = (f"local powershell timeout after "
-                             f"{int(max_seconds) + 300}s")
-            meta["ok"] = False
+        # orchestrator stuck with no META. Capture to files instead of pipes:
+        # PowerShell descendants can inherit stdout/stderr handles, keeping
+        # communicate() blocked on EOF even after the job itself logged DONE.
+        # wait() observes only the job process, while taskkill /T plus the
+        # stale-image sweep still handles a genuine timeout.
+        with tempfile.TemporaryFile(mode="w+b") as stdout_capture, \
+                tempfile.TemporaryFile(mode="w+b") as stderr_capture:
+            proc = subprocess.Popen(job_args, stdout=stdout_capture,
+                                    stderr=stderr_capture)
             try:
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                               capture_output=True, timeout=60)
-            except Exception:
-                pass
-            _kill_stale_local()
+                proc.wait(timeout=int(max_seconds) + 300)
+                meta["job_rc"] = proc.returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                meta["job_timeout"] = True
+                meta["error"] = (f"local powershell timeout after "
+                                 f"{int(max_seconds) + 300}s")
+                meta["ok"] = False
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        capture_output=True, timeout=60)
+                except Exception:
+                    pass
+                _kill_stale_local()
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    meta["job_process_reap_timeout"] = True
+
+            # Keep diagnostic output bounded even if a tool is noisy.
+            for key, capture in (("job_stdout_tail", stdout_capture),
+                                 ("job_stderr_tail", stderr_capture)):
+                capture.flush()
+                size = capture.seek(0, os.SEEK_END)
+                capture.seek(max(0, size - 8192))
+                meta[key] = capture.read().decode(
+                    "utf-8", errors="replace")[-800:]
     except Exception as e:
         meta["error"] = f"local job launch failed: {e}"
         meta["ok"] = False

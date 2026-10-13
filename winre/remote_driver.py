@@ -214,6 +214,16 @@ def _inventory_diff(remote: dict[str, tuple[int, str]],
     mismatched = sorted(
         path for path in remote_paths & received_paths
         if remote[path] != received[path])
+    mismatch_details = [
+        {
+            "path": path,
+            "remote_size_bytes": remote[path][0],
+            "received_size_bytes": received[path][0],
+            "remote_sha256": remote[path][1],
+            "received_sha256": received[path][1],
+        }
+        for path in mismatched[:limit]
+    ]
     return {
         "missing_local_count": len(missing),
         "unexpected_local_count": len(unexpected),
@@ -221,6 +231,7 @@ def _inventory_diff(remote: dict[str, tuple[int, str]],
         "missing_local": missing[:limit],
         "unexpected_local": unexpected[:limit],
         "content_mismatch": mismatched[:limit],
+        "content_mismatch_details": mismatch_details,
         "truncated": any(len(items) > limit
                           for items in (missing, unexpected, mismatched)),
     }
