@@ -1,5 +1,6 @@
 from winre import remote_driver
 from winre.evidence import EvidencePack
+from winre.manifest import write_pack_manifests
 from winre.pipeline import _report
 
 
@@ -57,3 +58,28 @@ def test_pipeline_report_labels_a_launched_but_incomplete_dynamic_run(tmp_path):
     assert report["dynamic"]["job_timeout"] is True
     assert any("coverage gaps" in x for x in report["analyst_next"])
     assert any("Restore FlareVM" in x for x in report["analyst_next"])
+
+
+def test_failed_dynamic_manifest_uses_stage_pid_when_job_meta_is_missing(tmp_path):
+    sha = "b" * 64
+    pack = EvidencePack(tmp_path, sha, "dynamic").ensure()
+    stage = {
+        "run_id": "c" * 32,
+        "ok": False,
+        "detonation_ran": True,
+        "sample_pid": 5536,
+        "job_timeout": True,
+    }
+    pack.write("dynamic", "STAGE.json", stage)
+
+    result = write_pack_manifests(
+        pack.root, run_id="c" * 32, sha256=sha, mode="dynamic",
+        dynamic_requested=True)
+    memory = result["stage_manifests"]["dynamic"]["coverage"]["memory"]
+
+    assert memory["status"] == "partial"
+    assert "no sample process" not in memory["reason"]
+    assert "timed out" in memory["collector_reason"]
+    root_memory = result["artifact_manifest"]["coverage"]["memory"]
+    assert root_memory["status"] == "partial"
+    assert "no sample process" not in root_memory["reason"]

@@ -225,6 +225,10 @@ def test_dynamic_findings_reports_observed_run_with_incomplete_transfer(tmp_path
     assert f["evidence_complete"] is False
     assert f["verdict"]["level"] == "unknown"
     assert any("transfer was incomplete" in x for x in f["limitations"])
+    assert any("no memory dumps were available" in x
+               for x in f["limitations"])
+    assert not any("no memory dumps were produced" in x
+                   for x in f["limitations"])
     assert not any("never spawned" in x or "did nothing" in x
                    for x in f["limitations"])
 

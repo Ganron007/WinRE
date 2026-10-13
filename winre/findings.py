@@ -637,10 +637,16 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "",
         "triage": _triage_dumps(dyn_dir, dumps),
     }
     if not dumps:
-        limitations.append(
-            "no memory dumps were produced: nothing to triage off-VM. A "
-            "short-lived sample plus a gate that fired first is the usual "
-            "cause")
+        if transfer_incomplete:
+            limitations.append(
+                "no memory dumps were available for off-host triage; "
+                "incomplete collection or transfer does not show whether the "
+                "guest produced a dump")
+        else:
+            limitations.append(
+                "no memory dumps were produced: nothing to triage off-VM. A "
+                "short-lived sample plus a gate that fired first is the usual "
+                "cause")
 
     # --- window / gate ----------------------------------------------------
     w = job.get("window") or {}

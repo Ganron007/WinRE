@@ -605,6 +605,9 @@ def _terminal(source: str, stage_dir: Path, meta: dict, job: dict,
         if triage.get("error"):
             return {"status": "failed", "reason": str(triage["error"])[:200]}
     if source == "memory":
+        if meta.get("job_timeout") is True:
+            return {"status": "partial",
+                    "reason": "collection job timed out; memory evidence was not accepted into the current run"}
         if not (job.get("sample_pid") or meta.get("sample_pid")):
             return {"status": "not_applicable", "reason": "no sample process to harvest"}
         pm_path = _find_path(stage_dir, "post_mortem.json")
@@ -790,7 +793,8 @@ def write_pack_manifests(pack_root: Path, *, run_id: str, sha256: str,
             terminal["run_id"] = run_id
             terminal_path.write_text(json.dumps(terminal, indent=2, default=str) + "\n",
                                      encoding="utf-8")
-        source_meta = dynamic_meta if stage == "dynamic" else terminal
+        source_meta = ((dynamic_meta or dynamic_stage)
+                       if stage == "dynamic" else terminal)
         manifest = write_manifest(
             stage_dir, run_id=run_id, sha256=sha256, mode=mode,
             requested=requests, meta=source_meta,
@@ -807,7 +811,7 @@ def write_pack_manifests(pack_root: Path, *, run_id: str, sha256: str,
     root_manifest = build_manifest(
         pack_root, run_id=run_id, sha256=sha256, mode=mode,
         requested=root_requests,
-        meta={**dynamic_meta, "run_id": run_id},
+        meta={**dynamic_stage, **dynamic_meta, "run_id": run_id},
         include_stage_metadata=True)
     root_manifest["execution_plan"] = {
         "dynamic_requested": dynamic_requested,
