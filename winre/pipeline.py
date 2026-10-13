@@ -757,6 +757,10 @@ def _report(pack: EvidencePack, sha: str, quick: dict, dynamic: dict | None,
     source = (agent.get("source") or llm_analysis.get("source")
               or "deterministic_fallback")
     dynamic_ran = bool(d.get("ok"))
+    dynamic_findings = d.get("findings") or {}
+    dynamic_observed = bool(
+        d.get("detonation_ran") is True
+        or dynamic_findings.get("run_observed") is True)
     analyst_next = [
         "If packed: x64dbg OEP detect + dump, then Malcat transforms",
         "If network: follow C2 in network_intel.json",
@@ -764,7 +768,14 @@ def _report(pack: EvidencePack, sha: str, quick: dict, dynamic: dict | None,
     if dynamic_ran:
         analyst_next.insert(0, "Review dynamic artifacts (procmon.csv, pcap)")
         analyst_next.append("Restore FlareVM snapshot after dynamic run")
+    elif dynamic_observed:
+        analyst_next.insert(
+            0, "Review the failed dynamic collection and its coverage gaps; "
+            "do not promote partial evidence")
+        analyst_next.append(
+            "Restore FlareVM snapshot before the next sample run")
     phase = ("static+dynamic" if dynamic_ran else
+             "static+dynamic-incomplete" if dynamic_observed else
              "static+debugger" if (pack.mode or pack.root.name) == "dbg" else
              "static")
     # The verdict is reproduced IN the report (not only in deep.json): a
@@ -804,6 +815,11 @@ def _report(pack: EvidencePack, sha: str, quick: dict, dynamic: dict | None,
         "quick": {k: q.get(k) for k in ("ida", "ghidra", "malcat") if k in q},
         "dynamic": {
             "ok": d.get("ok"),
+            "run_observed": dynamic_observed,
+            "evidence_complete": dynamic_findings.get(
+                "evidence_complete", dynamic_ran),
+            "job_timeout": bool(d.get("job_timeout")),
+            "error": d.get("error"),
             "frida_events": d.get("frida_events"),
             "verdict": d.get("verdict"),
         },
