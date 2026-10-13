@@ -890,7 +890,6 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
         # point. Only the tracer acts on it, and only for a DLL target.
         job_args += ["-DllEntry", str(dll_entry)]
     print(f"[dynamic_run_v2] LOCAL powershell job -> {LOCAL_JOB_PS1}", flush=True)
-    timed_out = False
     try:
         # Popen + taskkill-on-timeout: subprocess.run's kill() can BLOCK when
         # a grandchild is wedged in a driver call (observed hang), leaving the
@@ -907,7 +906,6 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
                 proc.wait(timeout=int(max_seconds) + 300)
                 meta["job_rc"] = proc.returncode
             except subprocess.TimeoutExpired:
-                timed_out = True
                 meta["job_timeout"] = True
                 meta["error"] = (f"local powershell timeout after "
                                  f"{int(max_seconds) + 300}s")
