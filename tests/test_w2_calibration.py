@@ -86,25 +86,20 @@ def test_microsoft_infrastructure_is_not_c2(host):
 
 # -------------------------------------------- SNI is communication
 
-def test_tls_sni_promotes_a_lead_to_c2():
-    """The client sends SNI during the handshake, so seeing it in a capture
-    means the sample MOVED to that host. A plain-HTTP-only rule missed
-    archive.torproject.org - the strongest indicator in the pack - and left it
-    as a mere lead."""
+def test_tls_sni_in_vm_wide_capture_remains_a_lead():
+    """SNI proves a VM flow, not that the sample owned that flow."""
     n = _net({"captures": [{"dns_queries": [HOST], "tls_sni": [HOST],
                             "http_requests": []}]})
-    assert [c["host"] for c in n["c2"]] == [HOST], (
-        "TLS SNI did not promote the host to C2")
-    assert n["c2"][0]["kind"] == "tls-sni"
-    assert "TLS handshake" in n["c2"][0]["reason"]
+    assert n["c2"] == []
+    assert [l["host"] for l in n["leads"]] == [HOST]
 
 
-def test_a_real_dga_domain_is_still_c2():
-    """The paired positive control, built on a real pack's capture."""
+def test_a_real_dga_domain_in_vm_wide_capture_remains_a_lead():
+    """Even a suspicious domain needs process/flow attribution for C2."""
     n = _net({"captures": [{"dns_queries": [REAL], "tls_sni": [],
                             "http_requests": [f"{REAL}\tPOST\t/gate.php"]}]})
-    assert [c["host"] for c in n["c2"]] == [REAL]
-    assert n["c2"][0]["kind"] == "http"
+    assert n["c2"] == []
+    assert [l["host"] for l in n["leads"]] == [REAL]
 
 
 def test_a_dns_only_lookup_is_still_only_a_lead():

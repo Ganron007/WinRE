@@ -1,222 +1,140 @@
 # WinRE
 
 <p align="center">
-  <img src="assets/winre-logo.svg" alt="WinRE Logo" width="620">
+  <img src="assets/winre-logo.svg" alt="WinRE logo" width="620">
 </p>
 
-> [!NOTE]
-> **Status: beta (pre-v1.0).** Tested end-to-end on the live lab and
-> hardened against known breakage, but interfaces can still change — pin a
-> commit if you depend on anything, and report what breaks.
+> **Project status:** pre-v1.0. WinRE is under active development; command-line,
+> evidence, and configuration contracts may change between revisions. Pin a
+> commit when integrating it into another system.
 
-<p align="center">
-  <a href="https://github.com/Ganron007/WinRE"><img src="https://img.shields.io/badge/Status-LLM--assisted-blue.svg" alt="Status"></a>
-  <a href="https://github.com/Ganron007/WinRE"><img src="https://img.shields.io/badge/Platform-Windows%2010%20(FlareVM)-green.svg" alt="Platform"></a>
-  <a href="https://github.com/Ganron007/WinRE"><img src="https://img.shields.io/badge/RE-SQL%20First%20%2B%20Dynamic-blue.svg" alt="RE"></a>
-  <a href="https://github.com/Ganron007/WinRE"><img src="https://img.shields.io/badge/MCP-x64dbg%20%2B%20WinDbg-orange.svg" alt="MCP"></a>
-</p>
+WinRE is a Windows malware-analysis pipeline built around FlareVM. It combines
+deterministic static analysis, optional LLM-assisted investigation, controlled
+dynamic analysis, and debugger-assisted inspection. The LLM interprets
+tool-produced evidence; it does not execute samples.
 
-**WinRE is FlareVM-based Windows malware analysis — static and dynamic — with a dynamic remote driver for [RevAI](https://github.com/Ganron007/RevAI).**
+WinRE can run with a separate **control plane** and **Windows analysis guest**.
+The control plane hosts the driver, UI, reports, evidence packs, and optional
+LLM connection. The FlareVM guest hosts Windows tooling and sample execution.
+The remote driver communicates with the guest over SSH and MCP and brings the
+resulting evidence back to the control plane for analysis. Keep the guest on an
+isolated lab network.
 
-It runs where Windows malware lives: on a [FlareVM](https://github.com/mandiant/flare-vm) analysis machine (Windows 10/11, isolated lab network), as the Windows companion to RevAI's Linux pipeline. The contract between them is **files, not shared process** — a versioned artifact pack the Linux side reads for corroboration, driven over SSH by WinRE's remote driver.
+## Analysis modes
 
-**Built entirely on free tooling.** Ghidra is the primary static engine; x64dbg (+ the bundled MCP plugin), FakeNet-NG, Procmon, pe-sieve, hollows_hunter and Frida power the detonation phase — setup verifies the complete set and refuses to declare the VM ready without it. **Commercial tools are pure upgrades, never requirements:** IDA Pro (via `idasql`) and Malcat are detected when present and skipped gracefully when absent (honest `skipped` annotations, no failures). Free tooling alone gives the complete intake → quick → deep → YARA → report → audit flow, plus detonation.
+The pipeline defaults to the agentic deep-analysis engine, but it does not run
+dynamic analysis unless explicitly requested. Engine choice and execution
+capabilities determine the evidence-pack section:
 
-> [!WARNING]
-> **Malware Sandbox Containment.** WinRE is a dynamic detonation host (Frida, Procmon, FakeNet-NG, pe-sieve). Run it only inside an isolated analysis VM (FlareVM), on a host-only lab network, and **revert the VM snapshot after every run**. The authors accept no liability for payload escapes or network contamination from improper containment.
+| Command | Analysis | Evidence section |
+|---|---|---|
+| `--mode static` | Deterministic checklist; no LLM calls | `logs/<sha256>/static/` |
+| `--mode agentic` | LangGraph investigation with an OpenAI-compatible LLM | `logs/<sha256>/agentic/` |
+| `--mode agentic --agentic-dbg` | Agentic investigation with an x64dbg OEP/unpack probe, bounded 30-second target run, and ETW process observation | `logs/<sha256>/dbg/` |
+| `--mode agentic --dynamic` | Agentic static analysis followed by a separately gated detonation | `logs/<sha256>/dynamic/` |
 
----
+`--mode static` cannot be combined with `--agentic-dbg` or `--dynamic`. Debug
+and detonation are separate producers and cannot be combined in one pipeline
+invocation. Run them after separate clean snapshot restores; the default gate
+allows one gated execution per verified restore.
 
-## What is WinRE?
+## Quick start
 
-**WinRE** is the Windows-side of malware analysis, static and dynamic, with a dynamic remote driver for the RevAI Linux pipeline. Work that must run on Windows stays on Windows: SQL-first Ghidra/IDA querying, in-VM dynamic detonation, and debugger automation over MCP. The Linux side (RevAI) stays headless and static-first; the contract between them is **files, not shared process** — a versioned artifact pack in `logs/<sha>/<mode>/dynamic/` that RevAI reads for corroboration.
+Read the deployment and safety requirements before connecting a FlareVM:
 
-- **Deterministic-first detonation** — a single PowerShell job stages FakeNet-NG (network sink), Procmon (file/reg/process events), Frida (API trace with string/sockaddr decode), and optional pe-sieve + hollows_hunter (injection/hollowing dumps). The LLM can only interpret what these tools emitted — it never runs the sample.
-- **SQL-first Windows RE** — Ghidra is the primary engine through the real **LibGhidraHost + `ghidrasql`** SQL server (`ghidra_sql_client.py`); IDA Pro plugs into the same surface via **`idasql`** (`ida_sql_client.py`). No hand-rolled analyzer post-scripts — the engines are verified live by `install/verify-flarevm.ps1`.
-- **Debugger MCP** — the vendored 71-tool x64dbg MCP server (Zig, MIT) for live control, plus `mcp-windbg` (10-tool, MIT) for passive crash-dump/memory-image analysis over the same JSON-RPC HTTP plane — so an LLM agent can load a binary, find the OEP, dump modules, and triage the captured memory dumps.
-- **Honest artifact contract** — every run emits `META.json` (schema-versioned), Frida/Procmon/network/memory artifacts, and `ANALYST-NEXT.md` marking which next steps are **analyst-only**. Dynamic evidence corroborates but **never clears** high-signal static YARA (`static_yara_wins`).
+1. [Prerequisites](docs/PREREQUISITES.md)
+2. [Install](docs/INSTALL.md)
+3. [Operate the pipeline](docs/OPERATE.md)
 
-> **Reality check.** WinRE is an analyst assistant, not a finished autonomous product. Detonation results vary by sample; a green `META.json` means the tooling ran and produced artifacts — **not** that the sample is benign or fully understood. Unpacking, deep debugging, and full PCAP review are human work. Treat every pack as a starting point for analyst review, never as ground truth.
-
----
-
-## Architecture
-
-```
-FlareVM (Windows 10 + Flare-VM)                       Remnux (Linux, RevAI)
-────────────────────────────────                      ────────────────────
-C:\samples\<sha>.exe  ◄──── analyst copies to both ──►  /opt/samples/<sha>/
-        │                                                  │
-        ├─ tools/flare_ghidra_sql.py ── analyzeHeadless ────┘  static/LLM pipeline
-        │     └─ ghidrasql (LibGhidraHost SQL)           (reads logs/<sha>/<mode>/dynamic/
-        ├─ tools/flarevm_ida_query.py ── idasql.exe          as corroboration only)
-        │
-        └─ winre/orchestrator.py ── ── ── ── ── ── ── ── ── ── ── ── ── ┐
-              └─ winre/flare_dynamic_job.ps1                          │
-                    ├─ FakeNet-NG  → network_raw/*.pcap               │
-                    ├─ Procmon64   → procmon.csv                     │
-                    ├─ Frida       → frida_trace.jsonl               │
-                    ├─ pe-sieve    → memory/ (optional --pesieve)    │
-                    ├─ x64dbg-MCP  → x64dbg/dump/*.dmp (OEP detect)  │
-                    └─ summarize_dynamic.py + enrich_pcap_tshark.py  │
-                                                                      │
-              logs/<sha>/<mode>/dynamic/  ◄── META.json, ANALYST-NEXT.md ───┘
-                       │
-                       └─ SMB → Remnux artifact share (read-only there)
-```
-
-- **SQL services** — `idasql` HTTP (:19300) and `ghidrasql` HTTP (:18080) + LibGhidraHost RPC (:18090) expose `/query` so a remote agent can query Windows databases over HTTP; WinRE's SQL clients own server lifecycle (per-project reuse registry + end-of-run sweep).
-- **Debugger MCP** — `x64dbg-MCP` (:9094 x64 / :9095 x86) and `mcp-windbg` (:9097). Same JSON-RPC shape on every port: `POST / {"jsonrpc":"2.0","method":"tools/call","params":{"name":...,"arguments":{...}}}`.
-- **Artifact contract** — `logs/<sha>/<mode>/dynamic/` is versioned (see [`docs/EVIDENCE.md`](docs/EVIDENCE.md)); RevAI reads it with `load_dynamic_pack()` and never writes into it.
-
-Full breakdown: [`docs/EVIDENCE.md`](docs/EVIDENCE.md) - transports + ports: [`docs/SSH-CONTRACT.md`](docs/SSH-CONTRACT.md) - tool layout: [`docs/TOOL-PATHS.md`](docs/TOOL-PATHS.md).
-
----
-
-## Pipeline
-
-`orchestrator.py` drives one detonation pass. `--mode local` runs the job directly on Flare; `--mode ssh` (legacy) drives the same job over SSH from the Linux host.
-
-```
-winre/orchestrator.py <sha256> --mode local --max-seconds 45 [--pesieve]
-   ├─ format detect (PE / ELF / document) + REVENG_DYNAMIC_SKIP gate
-   ├─ Malcat triage (canary — anomalies + YARA + imports)          → malcat-triage.json
-   ├─ flare_dynamic_job.ps1
-   │    ├─ FakeNet-NG (sink) + Procmon (PML→CSV) + Frida spawn
-   │    ├─ pe-sieve / hollows_hunter mid-run (--pesieve)            → memory/
-   │    └─ summarize_dynamic.py → frida_summary / procmon_summary / network.json
-   ├─ x64dbg-MCP OEP detect + DumpModule (best-effort, fail-open)   → x64dbg/dump/
-   ├─ enrich_pcap_tshark.py → network_intel.json (DNS/HTTP/SNI)
-   ├─ emit_analyst_next.py  → ANALYST-NEXT.md + analyst_next.json
-   └─ META.json (schema_version, yara_lock, ok/skipped/error, artifacts)
-```
-
-Artifacts land in `logs/<sha>/<mode>/dynamic/` (`META.json` + `ANALYST-NEXT.md` are always present). After every Windows run the operator **restores the FlareVM clean snapshot** — the orchestrator never auto-reverts.
-
-ELF samples are rare on Windows; the orchestrator dispatches them to the Linux-side `elf_dynamic_job.sh` path (strace + tcpdump) when one is present.
-
----
-
-## Feature Matrix
-
-| Capability | What makes it distinctive |
-| :--- | :--- |
-| **Frida path/registry decode** | Hooks decode WCHAR/ANSI string args and `sockaddr` (incl. `sendto`/`recvfrom`) so traces contain readable paths, keys, and IP:port instead of pointers |
-| **SQL-first parity** | the same canonical queries run on both hosts — the Windows instance must answer the same questions the Linux side does (5% count tolerance) |
-| **Honest `static_yara_wins`** | Dynamic packs can never clear high-signal YARA from the static stage — the verdict policy is written into every `META.json` |
-| **Fail-open debugger passes** | x64dbg MCP OEP/dump and Malcat triage are best-effort: MCP down or license missing degrades the pack, never fails the run |
-| **Analyst-only markers** | `ANALYST-NEXT.md` explicitly tags human work (PCAP deep-dive, snapshot restore, HITL unpacking) so an agent cannot claim it done |
-| **Vendored debugger MCP** | 71-tool x64dbg server (Zig, MIT) for live debug control + mcp-windbg dump analysis (MIT) share one JSON-RPC shape for the agentic loop |
-| **Unique artifact names** | FakeNet sub-directory outputs (shared filenames like `capture.pcap`) are flattened with collision-free names — no silent capture loss |
-| **Threat-intel triage** | offline known-tool identification (signer/VersionInfo/security-tool markers) + control-plane **VirusTotal hash-only** lookup (only the SHA256 leaves the box; evidence-only by policy) |
-
----
-
-## Requirements
-
-* **OS**: Windows 10/11 (Flare-VM recommended — the VMware Flare image ships IDA/Ghidra/x64dbg/WinDbg/Procmon/FakeNet)
-* **Resources**: 8 GB RAM minimum (16 GB recommended); ≥60 GB disk
-* **Python**: 3.11+ (`frida` for the tracer, `flask` for the SQL/HTTP servers)
-* **Isolated lab network** — host-only VM network, no public internet
-* **Optional tools**: IDA Pro 9.x (for `idasql`), Malcat (commercial license), pe-sieve (`choco install pe-sieve`); Ghidra ships with FlareVM (a chocolatey install is detected automatically)
-* **Linux peer**: the RevAI pipeline on Remnux (optional — WinRE runs standalone; the versioned artifact pack is the only coupling)
-
----
-
-## Quickstart
+From the control-plane checkout, install the Python dependencies listed in
+`docs/INSTALL.md`, copy `.env.template` to `.env`, and configure the FlareVM
+SSH connection. An LLM endpoint is needed for agentic analysis; deterministic
+static mode does not make LLM calls.
 
 ```powershell
-# 1. Clone + place on FlareVM
-git clone https://github.com/Ganron007/WinRE.git C:\WinRE
-
-# 2. Health check the tool stack
-python C:\WinRE\tools\flarevm_toolset.py health          # IDA / idasql
-python C:\WinRE\tools\flare_ghidra_sql.py health         # Ghidra + CADRE PE Loader
-python C:\WinRE\tools\malcat_win.py health               # Malcat (optional, licensed)
-
-# 3. SQL query a sample (IDA)
-python C:\WinRE\tools\flarevm_toolset.py ida "SELECT count(*) FROM funcs" --file C:\samples\foo.i64 --json
-
-# 4. Dynamic detonation (local mode — recommended)
-python C:\WinRE\winre\orchestrator.py <sha256> --mode local --max-seconds 45
-#    → C:\WinRE\logs\<sha>\dynamic\META.json + ANALYST-NEXT.md
-
-# 5. Debugger MCP (x64dbg)
-#    build once:    powershell -File C:\WinRE\tools\build_x64dbg_mcp.ps1
-#    deploy BOTH arches: dist\x64\plugins\x64dbg-MCP-Server.dp64 -> release\x64\plugins\
-#                       dist\x32\plugins\x64dbg-MCP-Server.dp32 -> release\x32\plugins\
-#    then in x64dbg: Plugins > Configure MCP Server (0.0.0.0:9094; setup adds a
-#    firewall allow rule scoped to the lab subnet)
-curl http://127.0.0.1:9094/ -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-
-# 6. Smoke + lab status
-python C:\WinRE\ops\smoke_flare.py
-
-# 7. Full pipeline (static + dynamic + report + audit) — run from C:\WinRE
-python -m winre.pipeline C:\samples\foo.exe --mode static --dynamic --max-seconds 45
-#    invoke as a module from C:\WinRE (WinRE is a package; python winre\pipeline.py fails)
-#    --mode static|agentic selects the deep-dive engine (default agentic);
-#    --dynamic is the opt-in segregated detonation (omit for static-only);
-#    exit 0 only when truly_green; evidence pack under logs/<sha>/<mode>/
-#    --dynamic and --agentic-dbg are EACH a gated execution and one clean
-#    snapshot restore buys exactly one: passing both in one command is refused
-#    up front (exit 2, nothing executed). Check first with
-#      python -m winre.snapshot_gate plan --dynamic --agentic-dbg
-
-# 8. UI console (control plane — operator host, drives FlareVM over SSH)
-python winre\ui\app.py --port 5001
-#    open http://127.0.0.1:5001  → Dashboard / Run Pipeline / Evidence / MCP
-#    UI-only mode: with FLARE_* (+ WINRE_LLM_* for agentic) in .env this is
-#    all you need — one FlareVM is enough, no CLI steps required. dry-LLM
-#    defaults off when the LLM endpoint answers, on when it doesn't.
-
-# 9. Contract tests (offline — no VM, no samples, ~3s)
-python -m pytest tests\ -q
-#    test_contracts.py   one assertion per pipeline contract: one execution
-#                        per clean restore, a verdict-less run is never green,
-#                        static-only runs never destroy a dynamic pack, pack
-#                        freshness by run nonce (never by clocks)
-#    test_entrypoints.py every CLI entry point answers --help with no traceback
+python -m winre.pipeline "C:\samples\sample.exe" --driver remote --mode static
 ```
 
-Docs index: [`docs/`](docs/README.md). Per-feature docs: `docs/PIPELINE.md` · `docs/SQL-GHIDRA.md` · `docs/SQL-IDA.md` · `docs/X64DBG-MCP.md` · `docs/WINDBG-MCP.md` · `docs/DYNAMIC-ORCHESTRATOR.md`. Malcat-specific notes live in [`docs/PREREQUISITES.md`](docs/PREREQUISITES.md) (optional-commercial section).
+The remote driver requires a verified clean-state marker in the guest and a
+clean attestation in the independent control-plane ledger. After restoring the
+FlareVM snapshot, verify the guest and attest from the control plane:
 
----
+```powershell
+python -m winre.snapshot_gate attest --action verified_clean
+```
 
-## Security Guidelines
+WinRE does not restore hypervisor snapshots. Follow the full restore and
+attestation procedure in [Operate](docs/OPERATE.md) before any pipeline run.
 
-* Keep FlareVM on a host-only / isolated lab NIC — **no public internet**.
-* **Snapshot before every detonation run and restore after.** The VM is a detonation host; malware can persist via Run keys or services.
-* Never commit `.env` files, API keys (e.g. `MALCAT_KEY`), or malware samples.
-* MCP/SQL HTTP services are unauthenticated by design (lab-net only) — do not expose ports 9094-9097, 18080/18090, 19300 outside the lab network. `:9094` binds `0.0.0.0` for the control plane and is scoped to `LocalSubnet` by a Windows Firewall rule installed by setup.
+## Evidence and trust
 
----
+Each sample is keyed by SHA-256. Separate sections preserve the deterministic,
+agentic, debugger, and dynamic run outputs. Stage manifests record artifact
+hashes and collection status; the pack manifest summarizes the delivered
+evidence. See [Evidence Packs](docs/EVIDENCE.md) for the schema and audit
+contract.
 
-## What's coming…
+The `truly_green` audit result describes whether requested stages completed
+with usable evidence and without required-tool failures or fallbacks. It is an
+operational quality signal, not a malware verdict and not proof that a sample
+is benign or fully understood. Dynamic observations have explicit scope and
+coverage limits; they do not clear a high-signal static YARA result.
 
-*Work-in-progress — the roadmap below is where WinRE is headed before the `v1.0.0` release tag. Items land as they are built and tested on the live lab.*
+## Safety
 
-| Item | Description |
-|------|-------------|
-| **Persistence forensics pass** | Registry Run keys / services diff in `process_snapshot_*` vs clean baseline, surfaced in `ANALYST-NEXT.md` |
-| **RevAI evidence backlink** | URL/`load_dynamic_pack()` links in published RevAI reports pointing at the WinRE artifact pack |
-| **Windows 11 support** | Deferred past v1.0: Defender cannot be fully disabled on Win11, which blocks the detonation phase |
+- Run samples only in a properly isolated analysis VM. FakeNet-NG is a network
+  sink, but it does not replace hypervisor isolation and firewall controls.
+- Restore the approved clean snapshot after every dynamic or debugger execution
+  and attest the restored state from the separate control plane.
+- Treat guest-produced files and tool output as untrusted evidence.
+- Keep API keys in the control-plane environment. Do not commit `.env` files,
+  secrets, or malware samples.
+- MCP and SQL services are intended for the isolated lab network. Do not expose
+  their ports to untrusted networks.
 
----
+## Platform and tooling
+
+Windows 10 with FlareVM is the documented execution target. Windows 11 is not
+currently established as a supported detonation platform. The standard stack
+uses Ghidra, x64dbg, FakeNet-NG, Procmon, Frida, and supporting analysis tools.
+IDA Professional and Malcat are optional commercial integrations and are
+reported as unavailable when not installed or licensed.
+
+The control plane may run on Windows or Linux and needs Python, OpenSSH client
+tools, and network access to the configured LLM provider when agentic analysis
+is used. See [Prerequisites](docs/PREREQUISITES.md) and
+[Tool Paths](docs/TOOL-PATHS.md) for version and path details.
+
+## Documentation
+
+The [documentation index](docs/README.md) links installation, operation,
+pipeline, evidence, transport, and tool-specific guides. The most relevant
+references are [Pipeline](docs/PIPELINE.md),
+[Dynamic Orchestrator](docs/DYNAMIC-ORCHESTRATOR.md), and
+[RevAI Bridge](docs/REVAI-BRIDGE.md).
+
+## Offline checks
+
+The repository includes contract tests that use fixtures and mocked tool or
+transport boundaries. Run them from the repository root:
+
+```powershell
+python -m pytest tests -q
+```
+
+These checks do not replace deployment verification or controlled runtime
+validation on a restored lab VM.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
-
-> Copyright (c) 2026 CADRE RE Team.
-
----
+WinRE is licensed under MIT; see [LICENSE](LICENSE). Third-party tools and
+integrations retain their own licenses and installation requirements.
 
 ## Acknowledgements
 
-* **idasql** — SQL interface for IDA Pro databases, by [Elias Bachaalany](https://github.com/allthingsida/idasql), used under the Human-Origin Source License v1.0.
-* **ghidrasql / LibGhidraHost** — SQL interface for Ghidra program databases, by [Elias Bachaalany](https://github.com/0xeb/ghidrasql), used under the Human-Origin Source License v1.0.
-* **x64dbg-MCP-Server** — native MCP plugin for x64dbg, by [duty1g](https://github.com/duty1g/x64dbg-mcp-server), MIT.
-* **mcp-windbg** — MCP server for WinDbg crash analysis, by [svnscha](https://github.com/svnscha/mcp-windbg), MIT.
-* **Malcat** — commercial binary analyzer (license required; binary not redistributed).
-* Derived from the **RevEng** research pipeline; the Linux-side sibling is **RevAI**.
+- [idasql](https://github.com/allthingsida/idasql), SQL interface for IDA.
+- [ghidrasql and LibGhidraHost](https://github.com/0xeb/ghidrasql), SQL
+  interface for Ghidra.
+- [x64dbg-MCP-Server](https://github.com/duty1g/x64dbg-mcp-server), debugger
+  MCP integration.
+- [mcp-windbg](https://github.com/svnscha/mcp-windbg), WinDbg MCP integration.

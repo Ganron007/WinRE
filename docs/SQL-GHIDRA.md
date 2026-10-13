@@ -1,8 +1,8 @@
-# SQL-Ghidra — Windows (FlareVM) — REAL ENGINE
+# SQL-Ghidra — Windows (FlareVM)
 
-> **Status: REAL (2026-09-15).** SQL-first Ghidra access, mirroring RevAI's
-> architecture. There is **no fallback stub** — without the engine, queries
-> fail loudly.
+> **Integration:** WinRE uses LibGhidraHost and `ghidrasql` for SQL-backed
+> Ghidra queries. There is no fallback stub; without the engine, queries fail
+> visibly. Run the health and query checks below on the deployed revision.
 > **Audience:** integrators querying Ghidra over SQL.
 
 ```

@@ -28,16 +28,21 @@ LOGS = REPO / "logs"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
-def _packs():
+def _packs(logs_dir: pathlib.Path | None = None):
     """Every genuine pack: sha, root, whether it has a manifest, its modes."""
+    logs_dir = logs_dir or LOGS
     out = []
-    for p in LOGS.rglob("dynamic"):
+    for p in logs_dir.rglob("dynamic"):
         if not p.is_dir() or (p / "deep").is_dir():
             continue
         sha = next((a.name for a in p.parents if HEX64.match(a.name)), None)
         if not sha:
             continue
-        root = LOGS / sha
+        root = logs_dir / sha
+        # Ignore orphaned nested trees (for example, interrupted test output
+        # under logs/archive/<sha>/dynamic) rather than failing collection.
+        if not root.is_dir():
+            continue
         if root in [o["root"] for o in out]:
             continue
         out.append({
@@ -58,6 +63,12 @@ WITH_MANIFEST = next((p for p in PACKS if p["manifest"]), None)
 
 requires_pack = pytest.mark.skipif(
     not PACKS, reason="no real evidence pack in logs/ to drive the UI against")
+
+
+def test_pack_discovery_skips_orphan_dynamic_tree(tmp_path):
+    orphan = tmp_path / "archive" / ("b" * 64) / "dynamic"
+    orphan.mkdir(parents=True)
+    assert _packs(tmp_path) == []
 
 
 @pytest.fixture(scope="module")

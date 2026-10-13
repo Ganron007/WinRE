@@ -53,19 +53,28 @@ def _sha256(p: Path) -> str:
 _STATIC_CONTEXT_FILES = (
     ("intake", "intake.json"),
     ("intake", "META.json"),
+    ("intake", "manifest.json"),
     ("quick", "quick.json"),
     ("quick", "META.json"),
+    ("quick", "manifest.json"),
     ("deep", "deep.json"),
     ("deep", "META.json"),
+    ("deep", "manifest.json"),
     ("yara", None),          # *.yar / *.yml / rule_report.json handled below
     ("report", "report.json"),
     ("report", "REPORT-TECHNICAL-v3.md"),
     ("report", "iocs.json"),
     ("report", "AUDIT-REPORT.md"),
     ("report", "EVIDENCE-BUNDLE.md"),
+    ("report", "manifest.json"),
+    ("yara", "manifest.json"),
     ("", "audit.json"),
+    ("", "execution_plan.json"),
+    ("", "findings.json"),
+    ("", "composite.json"),
     ("", "stage_trace.json"),
     ("", "META.json"),
+    ("", "artifact-manifest.json"),
 )
 
 
@@ -135,10 +144,28 @@ def build_case(pack_root: Path, sha: str, mode: str | None = None,
     pack_root = Path(pack_root)
     if not pack_root.is_dir():
         return {"ok": False, "error": f"pack not found: {pack_root}"}
-    mode = mode if mode in ("static", "agentic") else (pack_root.name
-                                                        if pack_root.name in
-                                                        ("static", "agentic")
-                                                        else None)
+    try:
+        pack_meta = json.loads((pack_root / "META.json").read_text("utf-8-sig"))
+        audit = json.loads((pack_root / "audit.json").read_text("utf-8-sig"))
+        dynamic_stage = json.loads((pack_root / "dynamic" / "STAGE.json")
+                                   .read_text("utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return {"ok": False,
+                "error": "case export requires finalized pack META, audit and dynamic stage"}
+    if not all(isinstance(x, dict) for x in (pack_meta, audit, dynamic_stage)):
+        return {"ok": False, "error": "case export metadata has an invalid shape"}
+    run_id = pack_meta.get("run_id")
+    if (not run_id or pack_meta.get("sha256") != sha
+            or pack_meta.get("status") != "completed"
+            or pack_meta.get("pack_mode", pack_meta.get("mode")) != pack_root.name
+            or audit.get("run_id") != run_id or audit.get("aborted")
+            or dynamic_stage.get("run_id") != run_id
+            or dynamic_stage.get("ok") is not True):
+        return {"ok": False,
+                "error": "case export refused: latest run identity/audit/dynamic stage is incomplete"}
+    mode = mode if mode in ("static", "agentic", "dbg", "dynamic") else (
+        pack_root.name if pack_root.name in ("static", "agentic", "dbg", "dynamic")
+        else None)
     dyn = pack_root / "dynamic"
     dyn_files = sorted(f for f in (dyn.rglob("*") if dyn.is_dir() else [])
                        if f.is_file())
@@ -256,7 +283,7 @@ def main() -> int:
     import argparse
     ap = argparse.ArgumentParser(description="WinRE DFIR-Nexus case pack")
     ap.add_argument("sha")
-    ap.add_argument("--mode", choices=["static", "agentic"])
+    ap.add_argument("--mode", choices=["static", "agentic", "dbg", "dynamic"])
     ap.add_argument("--logs", default=None, help="evidence root (default "
                    "WINRE_PIPELINE_LOGS or repo/logs)")
     ap.add_argument("--out", type=Path, default=None)
@@ -271,7 +298,7 @@ def main() -> int:
     if args.mode:
         roots = [sha_dir / args.mode]
     else:
-        roots = [sha_dir / m for m in ("static", "agentic")
+        roots = [sha_dir / m for m in ("static", "agentic", "dbg", "dynamic")
                  if (sha_dir / m).is_dir()] or [sha_dir]
     rc = 0
     for root in roots:

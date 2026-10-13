@@ -123,34 +123,6 @@ print(json.dumps({"ghidra_decompile": out}, default=str))
 '''
 
 
-_REMOTE_WINDBG_HELPER = r'''
-"""Remote WinDbg dump-analysis helper — runs on FlareVM via scp.
-
-Usage: python _windbg_analyze.py <b64_dynamic_dir> <b64_dump>
-Prints JSON: the windbg_post.analyze_dump result. mcp-windbg binds
-127.0.0.1 on the VM, so the analysis must run there (control-plane callers
-use this helper instead of direct HTTP).
-"""
-import base64
-import json
-import sys
-from pathlib import Path
-
-sys.path.insert(0, r"C:\WinRE")
-from winre.windbg_post import analyze_dump  # noqa: E402
-
-dyn = Path(base64.b64decode(sys.argv[1]).decode())
-dump = base64.b64decode(sys.argv[2]).decode()
-if dump in ("", "-"):
-    dump = None
-if not (dyn / "memory").is_dir():
-    alt = dyn.parent.parent / "static" / "dynamic"
-    if (alt / "memory").is_dir():
-        dyn = alt
-print(json.dumps(analyze_dump(dyn, dump), default=str))
-'''
-
-
 def _ps_py(py: str, code: str) -> str:
     """Build a `powershell -EncodedCommand` command that runs a python
     one-liner on the VM, with zero quoting hazards over SSH.
@@ -181,12 +153,12 @@ class ToolRegistry:
     """
 
     def __init__(self, sample_name: str, sha: str, cfg: dict | None = None,
-                 mode: str = "remote"):
+                 mode: str = "remote", remote_sample: str | None = None):
         self.sample_name = sample_name
         self.sha = sha
         self.cfg = cfg or remote_driver.flare_cfg()
         self.mode = mode  # "local" = VM-side subprocess; "remote" = SSH
-        self.remote_sample = rf"C:\samples\{sample_name}"
+        self.remote_sample = remote_sample or rf"C:\samples\{sample_name}"
         self._dbg_ensured = False
         self._dbg_ensure_error: dict | None = None
         self._dbg_ensure_info: dict | None = None
@@ -195,13 +167,29 @@ class ToolRegistry:
     def call(self, name: str, args: dict) -> dict:
         fn = getattr(self, name, None)
         if fn is None:
-            return {"error": f"unknown tool {name}"}
+            return {"status": "failed", "reason_code": "unknown_tool",
+                    "error": f"unknown tool {name}"}
         try:
-            return fn(**args)
+            result = fn(**args)
         except TypeError as e:
-            return {"error": f"bad args for {name}: {e}"}
+            result = {"status": "failed", "reason_code": "invalid_arguments",
+                      "error": f"bad args for {name}: {e}"}
         except Exception as e:
-            return {"error": f"{name} failed: {e}"}
+            result = {"status": "failed", "reason_code": "tool_exception",
+                      "error": f"{name} failed: {e}"}
+        from .capabilities import decorate_result
+        result = decorate_result(name, result)
+        # Applicability is based on a producer's structured format field, not
+        # on English skip text. Preserve the check itself as an explicit state.
+        if isinstance(result, dict) and name == "peepdf_analyze" \
+                and result.get("is_pdf") is False:
+            result.update(status="not_applicable",
+                          reason_code="input_not_pdf")
+        if isinstance(result, dict) and name == "olevba_analyze" \
+                and result.get("is_office_doc") is False:
+            result.update(status="not_applicable",
+                          reason_code="input_not_office_document")
+        return result
 
     # --- static tools ------------------------------------------------------
 
@@ -509,6 +497,15 @@ class ToolRegistry:
         """Ghidra decompile one function (headless post-script; address,
         FUN_ name, or 'entry'). Uses the scp'd helper pattern (same as
         _remote_sql_helper) — no inline code over SSH."""
+        function_addr = str(function_addr or "").strip()
+        # Reject control characters and quote/statement syntax before this
+        # value is embedded in the local helper source or passed to Ghidra.
+        if (not function_addr or len(function_addr) > 80
+                or any(ord(ch) < 32 for ch in function_addr)
+                or not __import__("re").fullmatch(r"[A-Za-z0-9_.$:@?+-]+", function_addr)):
+            return {"ok": False, "status": "failed",
+                    "reason_code": "invalid_function_selector",
+                    "error": "function_addr must be a short address or function name"}
         if self.mode == "local":
             import subprocess as _sp
             tools = Path(r"C:\WinRE\tools")
@@ -546,7 +543,8 @@ class ToolRegistry:
             i64 = Path(self.remote_sample).with_suffix(
                 Path(self.remote_sample).suffix + ".i64")
             if not i64.is_file():
-                return {"skipped": "no .i64 on VM yet",
+                return {"status": "unavailable", "reason_code": "ida_database_missing",
+                        "skipped": "no .i64 on VM yet",
                         "hint": "use ghidra_query / ghidra_decompile instead"}
             # HTTP transport on an existing .i64 is fast; the one-shot path
             # re-runs idat auto-analysis (10+ min on packed) — never in the
@@ -560,11 +558,13 @@ class ToolRegistry:
             try:
                 res = json.loads(p.stdout)
             except json.JSONDecodeError:
-                return {"skipped": "idasql http query failed",
+                return {"status": "unavailable", "reason_code": "ida_query_failed",
+                        "skipped": "idasql http query failed",
                         "detail": (p.stderr or p.stdout)[-200:],
                         "hint": "use ghidra_query instead"}
             if not res.get("ok"):
-                return {"skipped": "idasql server unavailable",
+                return {"status": "unavailable", "reason_code": "ida_server_unavailable",
+                        "skipped": "idasql server unavailable",
                         "detail": str(res.get("error") or "")[:200],
                         "hint": "use ghidra_query instead"}
             return res
@@ -573,7 +573,8 @@ class ToolRegistry:
                                   f"'C:\\samples\\{Path(self.remote_sample).name}.i64'\"",
                                   timeout=30)
         if "True" not in (r.stdout or ""):
-            return {"skipped": "no .i64 on VM yet (deep dive pre-step creates it)",
+            return {"status": "unavailable", "reason_code": "ida_database_missing",
+                    "skipped": "no .i64 on VM yet (deep dive pre-step creates it)",
                     "hint": "use ghidra_query / ghidra_decompile instead"}
         return self._run_remote_py("_remote_sql_helper", "ida",
                                    self.remote_sample, sql, timeout=600)
@@ -709,6 +710,22 @@ class ToolRegistry:
         except Exception as e:
             return {"error": str(e)}
 
+    def x64dbg_run_window(self) -> dict:
+        """Resume the current debug target for a bounded process-observation window."""
+        gate = self._dbg_gate()
+        if gate:
+            return {"ok": False, "status": "failed",
+                    "reason_code": "debug_gate_blocked",
+                    "error": gate.get("error")}
+        try:
+            from winre import debug_loops
+            return debug_loops.run_debug_window(
+                xc=self._dbg_client(), seconds=30)
+        except Exception as e:
+            return {"ok": False, "status": "failed",
+                    "reason_code": "debug_window_exception",
+                    "error": f"{type(e).__name__}: {str(e)[:200]}"}
+
     def x64dbg_wpm_dump(self, max_hits: int = 3) -> dict:
         """BP WriteProcessMemory, dump written buffers (bounded hits)."""
         gate = self._dbg_gate()
@@ -784,34 +801,16 @@ class ToolRegistry:
             return {"error": str(e)}
 
     def windbg_analyze_dump(self, dump: str = "") -> dict:
-        """Passive WinDbg (mcp-windbg) analysis of a captured memory dump:
-        !analyze -v triage + exception/module/stack highlights. Reads a
-        dump — never attaches to a live target, so it is NOT gated by the
-        snapshot marker. dump: optional filename inside dynamic/memory/
-        (default: newest capture). Requires a detonation to have run first.
+        """Dump interpretation runs on the control plane after evidence pull.
+
+        The agent tool must not ask the guest that ran the sample to interpret
+        its dump, even though opening a dump is passive. The post-pull analysis
+        step owns that work and records missing local cdb as unavailable.
         """
-        pipeline = self.cfg.get("remote_pipeline", r"C:\WinRE")
-        candidates = [
-            rf"{pipeline}\logs\{self.sha}\agentic\dynamic",
-            rf"{pipeline}\logs\{self.sha}\static\dynamic",
-        ]
-        if self.mode == "local":
-            try:
-                from pathlib import Path as _P
-                from winre import windbg_post
-                for c in candidates:
-                    if (_P(c) / "memory").is_dir():
-                        return windbg_post.analyze_dump(_P(c), dump or None)
-                return {"skipped": "no dynamic/memory in this pack yet",
-                        "hint": "dumps are produced by the detonation phase"}
-            except Exception as e:
-                return {"error": str(e)[:250]}
-        return self._run_remote_py("_remote_windbg_helper", candidates[0],
-                                   # "-" sentinel: an empty arg is dropped by
-                                   # the space-joined SSH command line
-                                   dump or "-",
-                                   timeout=420,
-                                   helper_src=_REMOTE_WINDBG_HELPER)
+        return {"status": "not_applicable",
+                "reason_code": "deferred_to_control_plane",
+                "skipped": "WinDbg analysis runs after the dynamic pack is pulled",
+                "requested_dump": Path(str(dump)).name if dump else None}
 
 
 # ---------------------------------------------------------------------------
@@ -843,6 +842,12 @@ class GhidraQueryArgs(BaseModel):
 
 class IdaQueryArgs(BaseModel):
     sql: str = Field(..., description="SQL against IDA tables")
+
+
+class GhidraDecompileArgs(BaseModel):
+    function_addr: str = Field(
+        ..., min_length=1, max_length=80,
+        description="Exact Ghidra function address or function name to decompile")
 
 
 class EmptyArgs(BaseModel):
@@ -901,7 +906,7 @@ _ARG_MODELS: dict[str, type[BaseModel]] = {
     "dotnet_analyze": EmptyArgs,
     "z3_solve": EmptyArgs,
     "angr_analyze": EmptyArgs,
-    "ghidra_decompile": EmptyArgs,
+    "ghidra_decompile": GhidraDecompileArgs,
     "x64dbg_oep": EmptyArgs,
     "x64dbg_wpm_dump": X64DbgHitsArgs,
     "x64dbg_crypt_dump": X64DbgHitsArgs,
@@ -1260,7 +1265,8 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
                             dynamic: bool = False,
                             available_tools: "Sequence[str] | None" = None,
                             mode: str = "remote",
-                            quick: dict | None = None) -> dict:
+                            quick: dict | None = None,
+                            remote_sample: str | None = None) -> dict:
     """Run the LangGraph ReAct agent over the static toolset.
 
     available_tools: optional subset filter (commercial-optional tools are
@@ -1282,7 +1288,8 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
     from langchain_core.messages import HumanMessage
 
     cfg = remote_driver.flare_cfg()
-    registry = ToolRegistry(sample_name, sha, cfg, mode=mode)
+    registry = ToolRegistry(sample_name, sha, cfg, mode=mode,
+                            remote_sample=remote_sample)
 
     # ---- the debugger is PART OF THE CONTRACT, not a planner's whim --------
     #
@@ -1328,6 +1335,110 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
     state = {"calls": 0, "redundant": 0, "seen": set(), "chars": 0}
     budget = max(10, int(max_steps) * 2)
     budget_chars = _ctx_budget_chars()
+    managed = _is_managed_quick(quick)
+    debug_terminal_recorded = False
+
+    # The readiness gate is a required input to verdict calibration, so it
+    # cannot depend on the planner choosing to call it. Run it once before
+    # the agent sees the sample and record its structured outcome for audit.
+    try:
+        readiness_gate = registry.call("decrypt_gate", {})
+    except Exception as e:
+        readiness_gate = {"status": "failed", "reason_code": "tool_exception",
+                          "error": f"decrypt_gate failed: {str(e)[:180]}"}
+    history.append({"step": len(history) + 1, "tool": "decrypt_gate",
+                    "args": {}, "result": readiness_gate,
+                    "reason": "mandatory deterministic analysis-readiness preflight"})
+    findings["decrypt_gate_preflight"] = readiness_gate
+    state["calls"] += 1
+    state["seen"].add(json.dumps(("decrypt_gate", {}), sort_keys=True,
+                                 default=str))
+
+    def _debug_run_record() -> dict:
+        calls = [h for h in history if h.get("tool") in {
+            "x64dbg_oep", "x64dbg_wpm_dump", "x64dbg_crypt_dump",
+            "x64dbg_unpack", "x64dbg_write_bp_trace",
+            "x64dbg_run_window"}]
+        if not dynamic:
+            return {"requested": False, "attempted": False,
+                    "status": "not_requested", "applicability": "not_requested",
+                    "target": {"sha256": sha, "sample_name": sample_name},
+                    "evidence": [], "limitations": []}
+        if managed:
+            return {"requested": True, "attempted": False,
+                    "status": "not_applicable", "applicability": "managed_dotnet",
+                    "target": {"sha256": sha, "sample_name": sample_name},
+                    "evidence": [],
+                    "limitations": ["native x64dbg debug loops do not apply to this managed sample"]}
+        evidence = []
+        successes = 0
+        for h in calls:
+            result = h.get("result") if isinstance(h.get("result"), dict) else {}
+            if result.get("ok") is True:
+                successes += 1
+            # Keep the terminal summary reviewable and bounded; the full
+            # result remains in the history entry it cites.
+            detail = {k: result.get(k) for k in (
+                "ok", "status", "oep", "oep_target", "method", "hits", "hit",
+                "dump_path", "dump_kind", "dump_source", "rebuild_hint",
+                "error", "reason_code", "requested_seconds", "observed_seconds",
+                "exit_observed", "pause_count", "stopped_after_window",
+                "final_state") if k in result}
+            evidence.append({"tool": h.get("tool"), "step": h.get("step"),
+                             "source_ref": f"deep.json#/agent/history/{h.get('step')}",
+                             "result": detail})
+        if not calls:
+            status = "failed"
+            reason = "debug was requested but no x64dbg operation was attempted"
+        elif successes:
+            status = "completed"
+            reason = None
+        else:
+            status = "failed"
+            reason = "all attempted x64dbg operations failed or were blocked"
+        target_path = (getattr(registry, "_dbg_sample_path", None)
+                       or remote_sample or sample_name)
+        return {
+            "requested": True, "attempted": bool(calls), "status": status,
+            "applicability": "applicable",
+            "target": {"sha256": sha, "sample_name": sample_name,
+                       "staged_path": target_path,
+                       "debugger": (dbg_ensure or {}).get("debugger"),
+                       "arch": (dbg_ensure or {}).get("arch")},
+            "startup": dbg_ensure, "evidence": evidence,
+            "successful_operations": successes,
+            "limitations": ([reason] if reason else []) + [
+                "zero breakpoint hits can be a valid observation; they do not prove behavior is absent",
+                "ETW records process starts and stops only; it does not cover file, registry, network, or memory activity",
+            ],
+        }
+
+    def _capability_fields() -> dict:
+        from .capabilities import census
+        nonlocal debug_terminal_recorded
+        debug_run = _debug_run_record()
+        required = None
+        if dynamic and not managed:
+            required = ("pe_parse", "decrypt_gate", "capa", "ghidra_query",
+                        "debug_run")
+        if dynamic and not debug_terminal_recorded:
+            # The synthetic terminal invocation makes a requested but skipped
+            # debug capability visible to the same capability/audit contract.
+            history.append({"step": len(history) + 1, "tool": "debug_run",
+                            "args": {"requested": True},
+                            "result": {"ok": debug_run["status"] == "completed",
+                                       "status": debug_run["status"],
+                                       "reason_code": "debug_" + debug_run["status"],
+                                       "error": (debug_run.get("limitations") or [None])[0]},
+                            "reason": "debug terminal record"})
+            debug_terminal_recorded = True
+        report = census(history,
+                        required_tools=required or ("pe_parse", "decrypt_gate",
+                                                    "capa", "ghidra_query"),
+                        budget_exhausted=state["calls"] >= budget)
+        return {"capability_census": report,
+                "tool_failures": report["required_failures"],
+                "debug_run": debug_run}
 
     def _budget_note() -> str:
         remaining = budget - state["calls"]
@@ -1370,11 +1481,12 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
                                             description=_runner.__doc__,
                                             args_schema=model)
 
-    names = list(TOOL_NAMES)
+    # decrypt_gate already ran as a mandatory preflight; do not spend a
+    # planner turn repeating it.
+    names = [name for name in TOOL_NAMES if name != "decrypt_gate"]
     if available_tools is not None:
         names = [n for n in names if n in set(available_tools)]
     tools = [_make(n) for n in names]
-    managed = _is_managed_quick(quick)
     dyn_names = list(DYNAMIC_TOOL_NAMES)
     if managed:
         # native OEP/unpack primitives do not apply to managed assemblies
@@ -1400,6 +1512,9 @@ live target).
 Debugger discipline: prefer x64dbg_unpack for packed binaries; keep hit
 counts small (<=3); every dynamic claim needs a dump/evidence field; if a
 dynamic tool errors, fall back to static — do not retry more than once.
+The pipeline performs one deterministic OEP/unpack probe, resumes the target
+for a bounded 30-second observation window, then stops it before the ETW
+process observer closes. Do not start another sample session.
 """
 
     # packer-signal routing (W1): deterministic-first — when quick evidence
@@ -1407,6 +1522,7 @@ dynamic tool errors, fall back to static — do not retry more than once.
     # hoping the LLM picks it (0/14 calls on a packed sample happened).
     packed_sig = _packer_signal(quick)
     unpack_prepass: dict | None = None
+    debug_prepass: dict | None = None
     if dynamic and packed_sig and not managed:
         try:
             r = registry.call("x64dbg_unpack", {})
@@ -1426,6 +1542,46 @@ dynamic tool errors, fall back to static — do not retry more than once.
                            "imp_modes_tried", "artifact", "fallback_trace",
                            "fallback_summary")
                           if k in r}
+    elif dynamic and not managed:
+        # `agentic-dbg` promises a debugger-assisted run. Merely starting the
+        # x64dbg MCP server left the mode silently static whenever the planner
+        # did not choose a debugger tool (observed live: x32dbg launched, zero
+        # x64dbg calls, ETW never saw the target). For an unpacker signal the
+        # full unpack prepass above is the one execution. Otherwise, make one
+        # bounded OEP probe before the planner so the target is actually
+        # loaded and run under the debugger and the concurrent ETW observer
+        # can correlate its process lifetime.
+        try:
+            r = registry.call("x64dbg_oep", {})
+        except Exception as e:
+            r = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+        debug_prepass = {k: r.get(k) for k in ("ok", "oep", "error") if k in r}
+        history.append({"step": len(history) + 1, "tool": "x64dbg_oep",
+                        "args": {}, "result": r,
+                        "reason": "agentic-dbg deterministic target-load/OEP probe"})
+        findings[f"x64dbg_oep_{len(history)}"] = r
+        state["calls"] += 1
+        state["seen"].add(json.dumps(("x64dbg_oep", {}), sort_keys=True))
+
+    if dynamic and not managed:
+        # The OEP/unpack probe normally leaves the target paused at the entry
+        # point or first unpacked instruction. Continue it for a fixed window
+        # while the independent ETW observer is active, then stop it before
+        # ETW collection closes. This makes agentic-dbg a real execution pass
+        # even when a plain, non-packed image has no later unpack OEP.
+        try:
+            r = registry.call("x64dbg_run_window", {})
+        except Exception as e:
+            r = {"ok": False, "status": "failed",
+                 "reason_code": "debug_window_exception",
+                 "error": f"{type(e).__name__}: {str(e)[:200]}"}
+        history.append({"step": len(history) + 1,
+                        "tool": "x64dbg_run_window", "args": {},
+                        "result": r,
+                        "reason": "mandatory bounded debugger observation window"})
+        findings[f"x64dbg_run_window_{len(history)}"] = r
+        state["calls"] += 1
+        state["seen"].add(json.dumps(("x64dbg_run_window", {}), sort_keys=True))
     # Which debugger actually served the unpack? x32dbg for a PE32 image,
     # x64dbg otherwise (P1-F1). Recorded so a pack is self-describing: if the
     # flavour were wrong the OEP failure would be otherwise indistinguishable
@@ -1442,6 +1598,12 @@ dynamic tool errors, fall back to static — do not retry more than once.
         dbg_ensure = None
 
     packer_note = _packer_note(packed_sig, unpack_prepass, dynamic)
+    debug_note = ""
+    if debug_prepass is not None:
+        debug_note = (
+            "\nDEBUG PREFLIGHT: deterministic x64dbg_oep already ran before "
+            f"the planner: {json.dumps(debug_prepass, default=str)[:2000]}. "
+            "Use this result as evidence and do not repeat the same OEP probe.")
     if managed:
         packer_note = ("\nPACKER SIGNAL (managed): packer/compression signals on a "
                        ".NET assembly do NOT route to native unpack - use "
@@ -1492,7 +1654,8 @@ dynamic tool errors, fall back to static — do not retry more than once.
         return {"verdict": None, "source": "deterministic_fallback",
                 "history": history, "llm_analysis": None, "dry": True,
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
-                "windbg_dump": windbg_dump, "dbg_ensure": dbg_ensure, "llm_roles": _llm_roles()}
+                "windbg_dump": windbg_dump, "dbg_ensure": dbg_ensure,
+                "llm_roles": _llm_roles(), **_capability_fields()}
 
     api_key = os.environ.get("WINRE_LLM_API_KEY", "")
     api_url = (os.environ.get("WINRE_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
@@ -1504,7 +1667,8 @@ dynamic tool errors, fall back to static — do not retry more than once.
                 "history": history,
                 "llm_analysis": "WINRE_LLM_API_KEY not set for remote endpoint",
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
-                "windbg_dump": windbg_dump, "dbg_ensure": dbg_ensure, "llm_roles": _llm_roles()}
+                "windbg_dump": windbg_dump, "dbg_ensure": dbg_ensure,
+                "llm_roles": _llm_roles(), **_capability_fields()}
 
     try:
         _max_out = int(os.environ.get("WINRE_LLM_MAX_OUTPUT_TOKENS", "32768"))
@@ -1569,6 +1733,9 @@ crypto_constants: crypto magic constants + AES S-box in exec sections ->
 decrypt_gate: analysis-readiness gate — import-stripped + sparse strings +
   packer taxonomy. status='gate' means capa/string evidence is UNRELIABLE:
   do NOT lean a malicious verdict on capa clusters when gated.
+The pipeline runs decrypt_gate deterministically before the planner and
+supplies its result in the opening evidence brief. Treat that result as
+authoritative; do not assume the gate passed if its output is missing or failed.
 string_decode_emulate: encoded-config recovery (xor/add/sub/rol 1-2-byte +
   date-seeded keys) over high-entropy blobs -> plaintext config candidates.
 rolling_xor: known-plaintext-guided rolling/date-seeded XOR keys (nested PE,
@@ -1618,14 +1785,16 @@ hit or concrete malicious artifacts (C2 config, persistence, exfil) exist.
 Kesakode/tool-tags in Malcat metadata corroborate known-tool identity.
 BUDGET DISCIPLINE: limited tool calls; when a [BUDGET] note appears, converge
 to your final answer immediately.
-{dyn_note}{packer_note}{windbg_note}"""
+{dyn_note}{packer_note}{debug_note}{windbg_note}"""
     agent = create_react_agent(llm, tools=tools, prompt=system_prompt)
     recursion_limit = max(24, int(max_steps) * 2 + 10)
     try:
         brief = _quick_brief(quick)
         result = agent.invoke(
             {"messages": [HumanMessage(content=(
-                f"Analyze sample {sha}. {brief}{packer_note}{windbg_note}Use SQL + Malcat to "
+                f"Analyze sample {sha}. Mandatory decrypt_gate preflight result: "
+                f"{json.dumps(readiness_gate, default=str)[:12000]}\n"
+                f"{brief}{packer_note}{debug_note}{windbg_note}Use SQL + Malcat to "
                 "deepen, then produce the final flat JSON verdict."))]},
             config={"recursion_limit": recursion_limit},
         )
@@ -1633,7 +1802,8 @@ to your final answer immediately.
         return {"verdict": None, "source": "deterministic_fallback",
                 "history": history, "llm_analysis": f"agent error: {e}",
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
-                "windbg_dump": windbg_dump, "dbg_ensure": dbg_ensure, "llm_roles": _llm_roles()}
+                "windbg_dump": windbg_dump, "dbg_ensure": dbg_ensure,
+                "llm_roles": _llm_roles(), **_capability_fields()}
 
     # parse final flat JSON from AI messages (newest first). Models wrap
     # verdicts in prose/fences, so try every {...} candidate, not just the
@@ -1695,14 +1865,14 @@ to your final answer immediately.
     # verdict object instead of falling back deterministically.
     fallback_reason = "no verdict JSON in agent output"
     basis = llm_text or tool_dump
+    finalized_by_judge = False
     if verdict is None and basis:
         for _attempt in (1, 2, 3):
             try:
-                from langchain_core.messages import HumanMessage as _HM
                 _extra = ("" if _attempt == 1 else
                           "\n\nSTRICT: reply with ONLY the flat JSON object, "
                           "starting with { and ending with }.")
-                fid = judge.invoke([_HM(content=(
+                fid = judge.invoke([HumanMessage(content=(
                     "Convert the following analysis into the required flat JSON "
                     "verdict object ONLY (keys: verdict (malicious/unknown/benign), "
                     "confidence (high/medium/low), summary, key_evidence (list of "
@@ -1714,10 +1884,13 @@ to your final answer immediately.
                 if fm:
                     fdata = json.loads(fm.group(0))
                     if isinstance(fdata, dict) and fdata.get("verdict"):
-                        verdict = _normalize_verdict(fdata)
-                        llm_text = (llm_text + "\n\n[finalize] " + ftext)[:250_000]
-                        fallback_reason = ""
-                        break
+                        normalized = _normalize_verdict(fdata)
+                        if normalized.get("verdict"):
+                            verdict = normalized
+                            finalized_by_judge = True
+                            llm_text = (llm_text + "\n\n[finalize] " + ftext)[:250_000]
+                            fallback_reason = ""
+                            break
                 fallback_reason = (f"finalize unparseable (attempt {_attempt}): "
                                    + repr(ftext[:120]))
                 _time.sleep(1.5)
@@ -1731,11 +1904,14 @@ to your final answer immediately.
     # authoritative verdict. Without this, deep.json / report.json / audit.json
     # all claimed the pinned judgment model produced a verdict it never saw
     # (code audit 2026-09-28, HIGH).
-    verdict_judged_by = "planner"
+    verdict_judged_by = "judgment" if finalized_by_judge else "planner"
+    judgment_pass_error = None
+    planner_draft = None
     if (verdict is not None and llm_roles.get("judgment")
             and llm_roles.get("judgment") != llm_roles.get("planner")):
+        planner_draft = dict(verdict)
         try:
-            _jv = judge.invoke([_HM(content=(
+            _jv = judge.invoke([HumanMessage(content=(
                 "Convert this DRAFT verdict into the authoritative flat JSON "
                 "verdict object ONLY (keys: verdict (malicious/unknown/benign), "
                 "confidence (high/medium/low), summary, key_evidence (list of "
@@ -1748,10 +1924,31 @@ to your final answer immediately.
             if _jm:
                 _jd = json.loads(_jm.group(0))
                 if isinstance(_jd, dict) and _jd.get("verdict"):
-                    verdict = _normalize_verdict(_jd)
-                    verdict_judged_by = "judgment"
+                    normalized = _normalize_verdict(_jd)
+                    if normalized.get("verdict"):
+                        verdict = normalized
+                        verdict_judged_by = "judgment"
+                    else:
+                        judgment_pass_error = "judgment response contained an invalid verdict label"
+                else:
+                    judgment_pass_error = "judgment response omitted a verdict"
+            else:
+                judgment_pass_error = "judgment response was not valid JSON"
         except Exception as e:
-            llm_roles.setdefault("judgment_pass_error", str(e)[:150])
+            judgment_pass_error = f"{type(e).__name__}: {str(e)[:150]}"
+    if judgment_pass_error:
+        # A planner draft is not a completed judgment when a distinct judge
+        # was configured. Preserve the draft for diagnosis, but fail the stage
+        # closed rather than publishing it under the judgment-role contract.
+        llm_roles["judgment_pass_error"] = judgment_pass_error
+        return {"verdict": None, "source": "deterministic_fallback",
+                "history": history, "llm_analysis": llm_text[:200_000],
+                "fallback_reason": "distinct judgment pass failed: " + judgment_pass_error,
+                "planner_draft": planner_draft,
+                "judgment_pass_error": judgment_pass_error,
+                "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
+                "windbg_dump": windbg_dump, "dbg_ensure": dbg_ensure,
+                "llm_roles": llm_roles, **_capability_fields()}
 
     # curated-YARA verdict floor (W2): never let a below-malicious verdict
     # contradict a family-distinctive rule match
@@ -1761,12 +1958,15 @@ to your final answer immediately.
                 "history": history, "llm_analysis": llm_text[:200_000],
                 "fallback_reason": fallback_reason,
                 "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
-                "windbg_dump": windbg_dump, "dbg_ensure": dbg_ensure, "llm_roles": _llm_roles()}
+                "windbg_dump": windbg_dump, "dbg_ensure": dbg_ensure,
+                "llm_roles": llm_roles, **_capability_fields()}
     return {"verdict": verdict, "source": "llm_judge",
             "verdict_judged_by": verdict_judged_by,
             "history": history, "llm_analysis": llm_text[:200_000],
             "packed_signal": packed_sig, "unpack_prepass": unpack_prepass,
-            "windbg_dump": windbg_dump, "dbg_ensure": dbg_ensure, "llm_roles": _llm_roles()}
+            "windbg_dump": windbg_dump, "dbg_ensure": dbg_ensure,
+            "judgment_pass_error": None,
+            "llm_roles": llm_roles, **_capability_fields()}
 
 
 if __name__ == "__main__":

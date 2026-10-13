@@ -1,145 +1,128 @@
-# Evidence Packs & Reporting — where everything lives
+# Evidence Packs and Reporting
 
-> **Scope:** the evidence-pack layout and the audit contract (`truly_green`). **Audience:** analysts and integrators.
+> **Scope:** pack layout, provenance, and the `truly_green` audit contract.
+> **Audience:** analysts, operators, and integrators.
 
-WinRE writes one **evidence pack per sample per engine**, keyed by SHA256 +
-deep-dive mode (RevAI-style sections — RevAI `scripted`/`agentic` folders).
-Both the CLI and the console read from this layout; the RevAI remote driver
-reads the same packs for corroboration.
+WinRE groups output by sample SHA-256 and producer section. The section is one
+of `static`, `agentic`, `dbg`, or `dynamic`; these names distinguish the
+deterministic engine, agentic engine, debugger capability, and detonation
+capability. The engine used for a run is recorded separately in pack metadata.
+At the pack root, `META.json.verdict` is the selected cross-mode verdict and
+`mode_verdict` is the current section's result. `selected_verdict_source`
+identifies the report's selection path. `report/report.json` also preserves
+the section verdict and composite with its named disagreements.
 
-```
-logs/<sha256>/<static|agentic>/         ← one self-contained case per engine
-├── META.json                        pack-level mode/engine/source/truly_green
-├── intake/
-│   ├── intake.json                   file facts: path, size, magic, format
-│   └── META.json                     stage wrapper (ok/error/timing)
-├── quick/                            deterministic triage
-│   ├── quick.json                    verdict + full evidence dict
-│   ├── 01-tools-raw.json             FULL untruncated tool outputs (citation target)
-│   └── META.json
-├── deep/                             deep dive — engine depends on the section
-│   ├── deep.json                     verdict + full history (+ llm_analysis in agentic)
-│   ├── 01-tools-raw.json             FULL tool-call results (untruncated)
-│   ├── x64dbg/                        unpack artifact (pe-sieve /imp escalation 1->3->4->5: ImportTable rebuilt from found IATs;
-│   │                                 PE-valid dump for RevAI static)
-│   └── META.json                     engine (langgraph|static_deterministic),
-│                                     mode, fallback flag, MCP health
-├── dynamic/                          (opt-in, segregated, runs LAST)
-│   ├── META.json / STAGE.json        run status + sample_pid + window + snapshot-gate evidence
-│   │                                 window = {requested_s, effective_s,
-│   │                                 stop_reason, gate_spec, gate_settle_s,
-│   │                                 gate{fired,kind,api,at_s}} — the
-│   │                                 behaviour-gated window (RevAI item 9):
-│   │                                 max-seconds is the cap (150s default) and
-│   │                                 the run ends EARLY once the sample does
-│   │                                 something notable and settles. stop_reason
-│   │                                 'gate:network' means it stopped on
-│   │                                 behaviour, not on the clock.
-│   │                                 x64dbg_dump carries the import-facing dump
-│   │                                 schema: dump_kind (module|heap),
-│   │                                 pe_valid (+pe_valid_known: null = NOT
-│   │                                 checked, never read as false), oep_target,
-│   │                                 ran_to_oep/payload_unpacked,
-│   │                                 imports_rebuild_applicable, rebuild_hint.
-│   │                                 + run_id (the per-run nonce the control plane
-│   │                                 issued: freshness is decided by this VALUE,
-│   │                                 never by comparing clocks; clock_skew_s
-│   │                                 rides along as a diagnostic only)
-│   │                                 (refused run: ok=false, 'blocked by snapshot gate';
-│   │                                 audit exposes dynamic_blocked=true)
-│   ├── SKIP.json                      sibling skip record (third-party ingestion:
-│   │                                 reason=not_requested | snapshot_gate_blocked,
-│   │                                 ran=false, has_detonation_evidence=false,
-│   │                                 preserved_previous, cleared_previous=false)
-│   │                                 (not requested: ran=false, skipped='not requested',
-│   │                                 preserved_previous → previous_runs/dynamic_<ts>/;
-│   │                                 cleared_previous is always false — a static-only
-│   │                                 run never destroys a dynamic pack)
-│   ├── frida_trace.jsonl / frida_summary.json
-│   ├── procmon.csv / procmon_summary.json
-│   │                               (+ persistence catalog, spoofing_suspects)
-│   ├── behavior_timeline.csv         ordered high-signal events (incident-style)
-│   ├── network.json / network_intel.json (+ beacon_analysis: cadence/UA/HTTP)
-│   │   / network_raw/*.pcap
-│   ├── memory/                       pe-sieve dumps + suspended-process dumps
-│   │   / *.dmp                       procdump -ma harvest (post-mortem)
-│   ├── post_mortem.json              memory harvest + ntdll integrity + snapshot
-│   ├── windbg_analysis.json          mcp-windbg triage of in-run dumps
-│   │                                 (!analyze -v/.ecxr/k/lm; passive)
-│   ├── x64dbg/dump/                  OEP dumps (local-mode post step)
-│   └── process_snapshot.json         PPID/cmdline snapshot (spoof correlation)
-├── previous_runs/dynamic_<ts>/       earlier dynamic packs, moved (never deleted)
-│                                     when a later static-only run reuses the section
-├── execution_plan.json               what the run intended: execution_sites,
-│                                     executions_requested / _available, gate_mode
-│                                     (written BEFORE any stage; mirrored into audit.json)
-├── case-<sha16>-<mode>.7z            DFIR-Nexus ingest pack (dynamic + static
-│                                     context + unpack dumps + manifest + timeline)
-├── yara/
-│   ├── CADRE_<sha8|family>.yar       generated YARA (deterministic, no LLM)
-│   ├── CADRE_<sha8|family>.yml       Sigma network rule
-│   └── rule_report.json              what evidence fed the rule
-├── report/
-│   ├── REPORT-TECHNICAL-v3.md        multi-section cited report (RevAI v3 layout)
-│   ├── iocs.json                     extracted IOCs (deterministic, no LLM)
-│   ├── AUDIT-REPORT.md               human audit narrative
-│   ├── EVIDENCE-BUNDLE.md            per-item provenance index
-│   └── META.json
-├── stage_trace.json                  per-stage trace across the whole run
-└── audit.json                        machine audit gate (truly_green etc.)
+```text
+logs/<sha256>/
+├── static/                       deterministic deep-analysis run
+├── agentic/                      agentic deep-analysis run
+├── dbg/                          agentic run with debugger capability
+├── dynamic/                      agentic run with detonation capability
+└── snapshot.json                 optional sample-level snapshot/HITL record
+
+logs/<sha256>/<section>/
+├── META.json                     pack mode, engine, run ID, status
+├── execution_plan.json           requested execution sites and gate budget
+├── intake/                       identity, file metadata, format
+├── quick/                        deterministic triage and raw tool outputs
+├── deep/                         checklist or agentic investigation
+├── dynamic/                      detonation evidence when requested
+├── yara/                         generated rules and rule-quality report
+├── report/                       structured reports and provenance
+├── composite.json                selected current-run findings, when present
+├── findings.json                 normalized findings, when present
+├── stage_trace.json              stage ordering and timing
+├── artifact-manifest.json        finalized pack inventory and coverage
+├── audit.json                    run-quality result
+└── case-<sha16>-<section>.7z     optional DFIR-Nexus export
 ```
 
-Same-sample/same-mode reruns overwrite their section; the other section is
-untouched. Pre-sectioning packs (flat stages directly under `logs/<sha>/`)
-are still read as legacy rows. Sanitized, mode-keyed publish copies land in
-`docs/case-studies/<mode>/<sha>/` (`--publish`; report-level artifacts only,
-lab specifics redacted, no binaries).
+Each stage directory can include a `manifest.json` with file hashes,
+producers, run identity, validation information, and source coverage. The
+pack-level `artifact-manifest.json` inventories the delivered pack after
+reports and audit are written. A source can be `complete`, `partial`,
+`failed`, `unavailable`, `not_applicable`, or `not_requested`. A missing
+capture is not treated as a successful empty capture. Files above the
+configured hash limit may have a recorded reason instead of a file hash.
 
-## What cites what
+Dynamic collection is opt-in. Its `META.json` and `STAGE.json` record the
+requested and effective time window, stop reason, execution gate, and run ID.
+The run ID, rather than clock comparison, binds the guest result to the
+control-plane request. `previous_runs/` may preserve earlier dynamic evidence
+when a later run in the same section does not request detonation.
 
-- `REPORT-TECHNICAL-v3.md` sections cite `deep/01-tools-raw.json` and
-  `quick/01-tools-raw.json` — **full raw tool outputs, never truncated**.
-- The deep verdict (`deep.json → agent.verdict`) is reproduced verbatim in
-  section 4 of the report and tagged with its source
-  (`llm_judge` / `static_deterministic` / `deterministic_fallback`).
-  Static sections have no `llm_analysis` (zero LLM calls) and show the
-  fired rules instead (`rules_fired`); calibration caps malicious→suspicious
-  when only protection signals exist (`verdict_calibrated` + reason).
-- Step-level tool errors are surfaced into the audit (`failed_tools`) — a
-  failed checklist step can never hide inside the history and still pass
-  `truly_green`.
-- `iocs.json` is deterministic extraction (no LLM). The agent narrative is
-  scanned too, and tagged in `sources` as `agent_narrative(llm_tagged)`.
-- `AUDIT-REPORT.md` renders `audit.json` — the same gate that decides
-  `truly_green`.
+Debugger-assisted runs also record `deep/debug_monitor/process.etl`, the raw
+kernel-process ETW trace, and a derived `process_events.jsonl` with process
+start/stop events and target-descendant correlation. The observer is
+run-scoped and independent of x64dbg. Its scope is process lifecycle only; it
+does not observe file, registry, network, or memory behavior. A complete ETW
+capture therefore complements the debugger evidence but does not replace the
+dynamic collection sources. `deep.json` records the debugger OEP/unpack probe
+and bounded observation window, including requested and observed seconds,
+pause count, final debugger state, and whether the target exited or was stopped.
+The mode-level `findings.json` keeps the window result, current-run ETW summary,
+and unpack result as separate fields. A completed debugger window can be
+selected in the mode composite even when no OEP dump exists; the report states
+that limitation and keeps the selected composite verdict distinct from the
+deep-stage agent assessment.
 
-## Session bridge (RevAI)
+The control-plane snapshot ledger is stored in the ignored operator state file
+`internal/_vm_state.json`; it is not a sample finding and is not part of the
+pack. A guest-local `logs/_vm_state.json` is diagnostic only. This ledger is
+separate from any optional `snapshot.json` copied into a case export.
 
-sessions/<sha256>.json is written **on the VM** by the dynamic job and handed
-to RevAI through REVENG_SESSIONS_DIR. It is a per-sample runtime record like
-logs/, deliberately gitignored: a committed fixture (sha256: 64 x a) would be
-indistinguishable from a real session to any consumer that trusted it.
+## Findings and report provenance
 
-It is not evidence and not a finding. It is a handoff descriptor - which sample,
-which path, what the intake classified it as - and the analysis plane never
-reads it.
+The reports link conclusions to structured stage evidence. Quick and deep
+stages retain raw tool results for review; generated rules record their input
+evidence and lint results; the report and audit reflect the selected run.
+When static and dynamic evidence disagree, the pack keeps the conflict visible
+and applies the documented `static_yara_wins` policy. Dynamic evidence can
+corroborate a static result but does not clear a high-signal static YARA
+finding.
 
-## Honesty contract
+The report records whether its judgment came from the configured LLM, the
+deterministic engine, or a deterministic fallback. Static mode has no LLM
+analysis. An agentic run with `--dry-llm` records `deterministic_fallback` so
+the fallback is visible to the operator and audit.
 
-- Dynamic is **opt-in** and runs LAST. A static-only pack is valid.
-- `static_yara_wins`: dynamic evidence corroborates, never clears static.
-- The snapshot gate records its evidence in `dynamic/STAGE.json → gate`
-  (mode, marker state, consume result) and in `logs/_vm_state.json` (VM-wide
-  ledger). In `enforce` mode a dynamic stage without gate evidence fails
-  the audit.
-- Dry-LLM agentic packs honestly show `deterministic_fallback` and cannot
-  be truly_green (deep fallback fails quality). Static-mode packs show
-  `static_deterministic` — a real verdict, green when the stages pass.
+## Audit contract
 
-## Dynamic reporting (reserved section)
+`audit.json → truly_green` evaluates workflow quality, not malware
+classification. It checks that required stages ran, required capabilities
+were accepted, expected verdict and composition records exist, tool failures
+and required fallbacks are absent, and the snapshot gate passed when required.
+An explicitly requested dynamic or debugger capability that fails cannot be
+counted as an optional omission. A static-only run does not require dynamic
+evidence.
 
-`REPORT-TECHNICAL-v3.md` section 7 is reserved for the detonation phase.
-When a dynamic stage exists it reports: process behavior, network sink
-activity, Frida API highlights, pe-sieve/unpacked-image findings, and the
-snapshot-gate record. Static verdicts are never overridden by dynamic
-results (see above).
+A green result does not prove that a sample is benign, that every behavior was
+observed, or that a tool had complete coverage. Consult stage manifests,
+coverage status, collector terminal records, and `audit.json` together.
+Treat all guest-produced files and tool output as untrusted input.
+
+## Case exports
+
+`--publish` creates a sanitized report-level copy under
+`docs/case-studies/<section>/<sha256>/`. It excludes sample binaries. The
+optional DFIR-Nexus case archive is written at the pack root and includes a
+file/hash manifest. The archive is named `case-<sha16>-<mode>.7z` (or `.zip`
+when 7-Zip is unavailable) and is a DFIR-Nexus ingest pack. Review its
+`case_manifest.json` and the pack's finalized artifact manifest before
+importing it into another system.
+
+Debugger dumps include `dump_kind` (`module` or `heap`), `dump_source`,
+`dump_path`, `pe_valid` and `pe_valid_known`, `imports_count`, `machine`,
+`oep_target`, `ran_to_oep`, `payload_unpacked`, `imports_rebuilt`,
+`imports_rebuild_applicable`, `imports_rebuild_reason`, and `rebuild_hint`.
+Treat `pe_valid: null` as unknown. A heap dump is a raw memory region, not a PE
+image; a module dump that did not run to OEP may still be the packed image.
+
+## Legacy packs
+
+Older packs may have flat stage directories directly under `logs/<sha256>/`
+or may lack run IDs, manifests, coverage records, and finalized composition.
+Readers retain limited compatibility for legacy layouts, but missing
+provenance cannot be reconstructed after the fact. Do not infer that an
+unrecorded collector completed or that an empty legacy artifact represents a
+valid zero-result analysis.

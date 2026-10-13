@@ -46,16 +46,22 @@ from pathlib import Path
 
 sys.path.insert(0, "/opt/scripts")
 try:
-    from v2_lib import LOGS_DIR, SESSIONS_DIR, load_session, high_signal_yara_matches
+    from v2_lib import LOGS_DIR, SESSIONS_DIR, high_signal_yara_matches
 except Exception:
     LOGS_DIR = Path(os.environ.get("REVENG_LOGS_DIR", "/opt/samples/logs"))
     SESSIONS_DIR = Path(os.environ.get("REVENG_SESSIONS_DIR", "/opt/samples/sessions"))
 
-    def load_session(sha: str) -> dict:
-        return json.loads((SESSIONS_DIR / f"{sha}.json").read_text())
-
     def high_signal_yara_matches(yara: dict | None) -> list:
         return []
+
+
+def load_session(sha: str) -> dict:
+    """Load the caller-pinned session, with the legacy SHA path as fallback."""
+    configured = os.environ.get("WINRE_SESSION_FILE", "").strip()
+    path = Path(configured) if configured else SESSIONS_DIR / f"{sha}.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"session registry not found: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 DEFAULT_APIS = (
@@ -74,15 +80,16 @@ _REPO_SCRIPTS = Path(__file__).resolve().parent
 
 
 # Emitted after every detonation. WinRE does NOT revert the VM for
-# you: restoring re-arms the one-shot clean marker, so the decision
-# that the VM is clean again has to stay with a person (operator
-# directive 2026-10-06). The run gathers everything locally FIRST,
+# you: restoring re-arms the guest marker, but only an operator on the
+# separate control plane can attest the external ledger clean again
+# (operator directive 2026-10-06). The run gathers everything locally FIRST,
 # and only then is a restore safe.
 RESTORE_NOTICE = ("RESTORE REQUIRED: this run detonated the sample, so "
                   "the VM is dirty. Everything has been pulled and "
                   "written locally. Restore your clean snapshot "
-                  "BEFORE the next run - WinRE will not revert it for "
-                  "you, and nothing may execute until you do.")
+                  "BEFORE the next run, verify the marker, then attest "
+                  "verified_clean from the separate control plane. WinRE "
+                  "will not revert the VM or clear its ledger for you.")
 
 def _utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -114,38 +121,35 @@ def _post_pull_enrich(dyn_dir: Path, sha: str,
 
     SPLIT BY TRUST (docs/internal/DESIGN.md section 2). In remote mode this
     function runs ON THE FLAREVM, so only steps that need the live VM may run
-    here - and only the ones that COLLECT evidence, never ones that interpret
-    it:
+    here - and only the memory/process collectors that emit raw artifacts,
+    never steps that interpret them:
 
-      VM-side, kept   - post_mortem (procdump of a live process +
-                         ReadProcessMemory for ntdll integrity)
-                      - windbg_dump  (mcp-windbg is localhost-bound on :9097)
+      VM-side, kept   - post_mortem memory/process collection
 
       host-side, moved - tshark pcap enrich, pcap beacon analysis, the Procmon
-                         persistence catalog, and the emulation diff. Those run
+                         persistence catalog, emulation diff, ntdll integrity
+                         interpretation and WinDbg dump analysis. Those run
                          in winre/analysis.py on the control plane, because a
                          box that has just executed the sample is not a
                          trustworthy analyst of it.
 
-    The driver sets WINRE_POST_PULL_OFF_VM=1 for remote runs. When that is set
-    the moved steps are recorded as DEFERRED rather than silently absent, so a
-    reader can tell "ran elsewhere" from "never ran".
+    This function always treats its process as an evidence producer. Moved
+    steps are recorded as DEFERRED rather than silently absent, so a reader
+    can tell "ran elsewhere" from "never ran".
     """
-    off_vm = os.environ.get("WINRE_POST_PULL_OFF_VM", "").strip() not in (
-        "", "0", "false", "no")
+    # This process is the evidence producer (the documented local path runs
+    # on Flare). Never let an environment override authorize post-run analysis
+    # on the guest that just executed the sample.
     notes: dict = {"enrich_pcap": None, "analyst_next": None,
                    "pcap_beacon": None, "procmon_post": None,
-                   "post_mortem": None, "emu_diff": None}
-    deferred = {}
-
-    if off_vm:
+                   "post_mortem": None, "emu_diff": None,
+                   "windbg_dump": None}
+    deferred = {
+        k: "deferred: runs on the control plane (winre.analysis)"
         for k in ("enrich_pcap", "pcap_beacon", "procmon_post", "emu_diff",
-                  "analyst_next"):
-            deferred[k] = "deferred: runs on the control plane (winre.analysis)"
-    else:
-        notes.update(_post_pull_enrich_local(dyn_dir))
+                  "analyst_next", "windbg_dump")}
 
-    # VM-side: live capture + localhost-bound dump triage
+    # VM-side: collect process/memory artifacts only; interpretation is deferred.
     try:
         from winre.post_mortem import run_all as _pm
         if sample_pid is None:
@@ -156,15 +160,10 @@ def _post_pull_enrich(dyn_dir: Path, sha: str,
                     sample_pid = meta_pm.get("sample_pid")
                 except Exception:
                     pass
-        notes["post_mortem"] = _pm(dyn_dir, sample_pid)
+        notes["post_mortem"] = _pm(
+            dyn_dir, sample_pid, analyze_integrity=False)
     except Exception as e:
         notes["post_mortem"] = {"error": str(e)[:200]}
-
-    try:
-        from winre.windbg_post import analyze_dump as _wb
-        notes["windbg_dump"] = _wb(dyn_dir)
-    except Exception as e:
-        notes["windbg_dump"] = {"error": str(e)[:200]}
 
     # ANALYST-NEXT moved to the control plane with the rest of the analysis.
     # It is pure enumeration over files already on disk, so there is no reason
@@ -174,51 +173,8 @@ def _post_pull_enrich(dyn_dir: Path, sha: str,
     # "analyst_next": {"error": ...}. The `except` below is what let a broken
     # import pass as a recorded failure instead of a crash; a run that
     # produced no ANALYST-NEXT read the same as one that did.
-    if off_vm:
-        deferred["analyst_next"] = (
-            "deferred: runs on the control plane (winre.analysis)")
-
-    if deferred:
-        notes["deferred_to_control_plane"] = deferred
+    notes["deferred_to_control_plane"] = deferred
     return notes
-
-
-def _post_pull_enrich_local(dyn_dir: Path) -> dict:
-    """The analysis half, used only when this runs on the analysis host
-    itself (`--driver local`). Never invoked on a remote VM."""
-    notes: dict = {}
-    enrich = _local_tool("enrich_pcap_tshark.py")
-    if enrich and (dyn_dir / "network_raw").is_dir():
-        try:
-            r = subprocess.run(
-                [sys.executable, str(enrich), str(dyn_dir)],
-                capture_output=True, text=True, timeout=300,
-                encoding="utf-8", errors="replace")
-            notes["enrich_pcap"] = {"rc": r.returncode,
-                                    "stdout": (r.stdout or "")[-300:]}
-        except Exception as e:
-            notes["enrich_pcap"] = {"error": str(e)}
-    else:
-        notes["enrich_pcap"] = {"skipped": True,
-                                "reason": "no script or no network_raw"}
-    try:
-        from winre.pcap_beacon import analyze_pcaps
-        notes["pcap_beacon"] = analyze_pcaps(dyn_dir)
-    except Exception as e:
-        notes["pcap_beacon"] = {"error": str(e)[:200]}
-    if (dyn_dir / "procmon.csv").is_file():
-        try:
-            from winre.procmon_post import build_procmon_report
-            notes["procmon_post"] = build_procmon_report(dyn_dir)
-        except Exception as e:
-            notes["procmon_post"] = {"error": str(e)[:200]}
-    try:
-        from winre.emu_diff import compare as _emu_diff
-        notes["emu_diff"] = _emu_diff(dyn_dir)
-    except Exception as e:
-        notes["emu_diff"] = {"error": str(e)[:200]}
-    return notes
-
 
 
 def _run_elf_dynamic(sha: str, sample: str, dyn_dir: Path, max_seconds: int, meta: dict) -> dict:
@@ -1130,14 +1086,19 @@ def run_dynamic(
         # dying — the caller told us where the sample lives.
         if sample_override and Path(sample_override).is_file():
             try:
-                SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-                (SESSIONS_DIR / f"{sha}.json").write_text(json.dumps({
+                session = {
                     "sha256": sha,
                     "sample_path": str(sample_override),
                     "file_type": {"format": "pe"},
-                }), encoding="utf-8")
+                }
+                # A caller-pinned session file is run-specific. Repair it in
+                # memory rather than falling back to the shared SHA registry,
+                # where concurrent attempts could select each other's sample.
+                if not os.environ.get("WINRE_SESSION_FILE", "").strip():
+                    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+                    (SESSIONS_DIR / f"{sha}.json").write_text(
+                        json.dumps(session), encoding="utf-8")
                 meta["session_repaired"] = str(sample_override)
-                session = load_session(sha)
             except Exception as e2:
                 meta["error"] = f"session repair failed: {e2}"
                 meta["finished_at"] = _utc()
@@ -1247,8 +1208,8 @@ def run_dynamic(
             # The x64dbg OEP/dump pass that used to run here executed the
             # SAME sample a second time on an already-contaminated VM
             # (LoadBinary -> analyze -> detect -> DumpModule) - exactly what
-            # the one-shot clean marker exists to prevent. That artifact
-            # belongs to --agentic-dbg, which the runbook already defines
+            # the one-shot guest marker plus control-plane ledger exist to
+            # prevent. That artifact belongs to --agentic-dbg, which the runbook already defines
             # as a SEPARATE run on a SEPARATE restore.
             meta["x64dbg_dump"] = {
                 "attempted": False, "ok": False, "status": "skipped",

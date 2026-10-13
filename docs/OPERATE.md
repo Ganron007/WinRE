@@ -8,15 +8,21 @@ Day-2 operation of the WinRE lab. Install first: [`INSTALL.md`](INSTALL.md).
 
 | Mode | Command | What runs |
 |---|---|---|
-| **Static, agentic engine (default)** | `python -m winre.pipeline C:\samples\s.exe` | intake → quick → deep (LangGraph ReAct, `llm_judge`) → yara → report → audit → `logs/<sha>/agentic/` |
-| **Static, deterministic engine** | `... --mode static` | same stages, deep = fixed 35-tool checklist (30 steps) + rules verdict + calibration gates, zero LLM (`static_deterministic`) → `logs/<sha>/static/` |
-| **Static + agentic debug** | `... --agentic-dbg` | static + the deep agent gets bounded debugger tools — x64dbg (OEP/unpack/decrypt/write-BP) + WinDbg dump analysis (mcp-windbg) — **no detonation**. Local driver supported too: `python -m winre.pipeline C:\samples\s.exe --mode agentic --agentic-dbg` |
-| **Static + dynamic** | `... --dynamic --max-seconds 45` | static first, then segregated detonation (FakeNet + Procmon + Frida [+ pe-sieve]) into the run's mode section. Add `--adaptive --idle-stop-seconds 10` for a calibrated window (`--max-seconds` = cap, stop early when quiet; effective window lands in `META.window`) |
-| **Static + dynamic + debug** | `--dynamic --agentic-dbg` in one command | **refused under `enforce` before anything runs** (exit 2). Each is a gated execution and a clean restore buys one. Run them as two runs with a restore between: `--dynamic …` → restore → `--agentic-dbg …`. Check with `python -m winre.snapshot_gate plan --dynamic --agentic-dbg` |
+| **Agentic engine (default)** | `python -m winre.pipeline "C:\samples\s.exe" --driver remote --mode agentic` | intake → quick → deep (LangGraph and configured LLM) → YARA → report → audit → `logs/<sha>/agentic/` |
+| **Deterministic engine** | add `--mode static` | same analysis stages; deep uses the fixed checklist and deterministic verdict, with no LLM calls → `logs/<sha>/static/` |
+| **Debugger execution** | add `--agentic-dbg` to an agentic run | x64dbg OEP/unpack probe, up to 30 seconds of target execution, and an independent ETW process-start/stop trace → `logs/<sha>/dbg/` |
+| **Dynamic capability** | add `--dynamic --max-seconds 150` to an agentic run | static stages first, then gated detonation → `logs/<sha>/dynamic/` |
 | **Dry LLM** | add `--dry-llm` (agentic mode) | no LLM calls; deep stays `deterministic_fallback` (honest, not green) |
-| **Publish case** | add `--publish` | sanitized case → `docs/case-studies/<mode>/<sha>/` (no binaries) |
+| **Publish case** | add `--publish` | sanitized case → `docs/case-studies/<section>/<sha>/` (no binaries) |
 
-Environment equivalents: `WINRE_ENABLE_DYNAMIC=1`, `WINRE_AGENTIC_DBG=1`.
+The deterministic `static` engine cannot be combined with `--dynamic` or
+`--agentic-dbg`. Dynamic and debugger capabilities have separate pack roots
+and are separate gated executions. Debugger-assisted analysis can launch or
+resume the target, so treat it as execution-consuming. Under the default
+`enforce` gate, restore and attest a clean snapshot between them. Inspect the execution plan with
+`python -m winre.snapshot_gate plan --dynamic --agentic-dbg` before a campaign.
+Environment equivalents are `WINRE_ENABLE_DYNAMIC=1` and
+`WINRE_AGENTIC_DBG=1`.
 The UI (`python -m winre.ui.app` → `winre\ui\start_ui.ps1`, port 5001)
 drives the same engine: a deep-mode selector on the Run page
 (agentic/static + live engine preview), dynamic opt-in with a
@@ -24,12 +30,12 @@ drives the same engine: a deep-mode selector on the Run page
 `--max-seconds` = cap, effective window lands in `META.window`), one row
 per `(sha, mode section)` in Cases with S/A badges, a section switcher on
 the pack page, manual stage control that writes into the viewed section,
-and **fire-one-tool** on the pack page (any of the 35 static tools,
+and **fire-one-tool** on the pack page (a selected deterministic static tool,
 optional raw-JSON args; result → `deep/01-manual-<tool>.json` +
 `manual_runs.json` audit trail; x64dbg_* excluded — use deep +
 agentic-dbg). Pack export zips the viewed section.
 
-**UI-only mode (single VM).** The console is self-sufficient — no CLI
+**UI operation.** The console is self-sufficient — no CLI
 needed. Put `FLARE_*` + `WINRE_LLM_*` in the console host's repo `.env`,
 start the console, open `http://127.0.0.1:5001`. From there: run the
 pipeline (agentic/static, optional agentic-dbg, optional dynamic), watch
@@ -41,7 +47,7 @@ is probed directly (`:9094` binds `0.0.0.0`, restricted by a Windows Firewall
 allow rule to `LocalSubnet` only), Malcat `:9009` and mcp-windbg `:9097` are
 localhost-bound on the VM and probed over SSH.
 
-**Invariants:** dynamic is opt-in and always LAST; `static_yara_wins` - dynamic corroborates, never clears a static verdict; every run is audited (`audit.json`, `truly_green`). The snapshot gate defaults to **`enforce`** (a detonation consumes the marker; the next dynamic run is refused until the snapshot is reverted and setup re-run). Set `WINRE_SNAPSHOT_GATE=observe` only for intentional benign test loops. A refused dynamic run writes a fresh `dynamic/STAGE.json` (`ok=false`, "blocked by snapshot gate") and the audit records `dynamic_blocked: true` - stale evidence can never masquerade as this run's detonation. A run records its intent in `execution_plan.json` (how many VM executions it asked for vs what the gate allows; mirrored into `audit.json`), and a **verdict-less run is never green** - `audit.json → unmet_expectations` names the gap (`deep verdict missing`, `report verdict missing`) and `truly_green` is false. Dynamic-pack freshness is decided by the per-run nonce (`run_id`), never by comparing clocks; `clock_skew_s` (pack `META.json`, `dynamic/STAGE.json`, `/health`) is a diagnostic, and the VM publishes its own clock facts to `C:\WinRE\vm_clock.json` (w32time Automatic + resync in setup). On an air-gapped lab box `w32tm /query /status` honestly reports `Source: Local CMOS Clock` / `not synchronized` - there is no upstream peer, which is exactly why the pipeline no longer lets any clock decide freshness.
+**Invariants:** dynamic is opt-in and always LAST; `static_yara_wins` - dynamic corroborates, never clears a static verdict; every run is audited (`audit.json`, `truly_green`). The snapshot gate defaults to **`enforce`**. It requires both the guest marker and a clean ledger on the separate control plane: a marker can be recreated by code inside the guest, so it is not sufficient alone. After every restore, verify the marker and run `python -m winre.snapshot_gate attest --action verified_clean` from the control plane. The next dynamic/debug execution marks that ledger dirty; the product never restores snapshots automatically. Set `WINRE_SNAPSHOT_GATE=observe` only for intentional benign test loops. A refused dynamic run writes a fresh `dynamic/STAGE.json` (`ok=false`, "blocked by snapshot gate") and the audit records `dynamic_blocked: true` - stale evidence can never masquerade as this run's detonation. A run records its intent in `execution_plan.json` (how many VM executions it asked for vs what the gate allows; mirrored into `audit.json`), and a **verdict-less run is never green** - `audit.json → unmet_expectations` names the gap (`deep verdict missing`, `report verdict missing`) and `truly_green` is false. Dynamic-pack freshness is decided by the per-run nonce (`run_id`), never by comparing clocks; `clock_skew_s` (pack `META.json`, `dynamic/STAGE.json`, `/health`) is a diagnostic, and the VM publishes its own clock facts to `C:\WinRE\vm_clock.json` (w32time Automatic + resync in setup). On an air-gapped lab box `w32tm /query /status` honestly reports `Source: Local CMOS Clock` / `not synchronized` - there is no upstream peer, which is exactly why the pipeline no longer lets any clock decide freshness.
 
 **Threat intel (triage):** the deterministic `threat_intel` tool identifies
 known tools (Authenticode signer, VersionInfo, security-tool markers), and
@@ -70,20 +76,19 @@ WINRE_VT_API_KEY=<virustotal-key>   # hash-only triage (optional)
 WINRE_LLM_CONTEXT_TOKENS=1000000     # model window - evidence budget (default)
 WINRE_LLM_MAX_OUTPUT_TOKENS=32768    # assistant output cap (default)
 # optional role pins (blank = use WINRE_LLM_MODEL for that role)
-#WINRE_LLM_PLANNER_MODEL=            # 35-tool ReAct loop (call/token heavy)
+#WINRE_LLM_PLANNER_MODEL=            # agent tool loop
 #WINRE_LLM_VERDICT_MODEL=            # final judge (verdict + finalize pass)
 ```
 
 **Role routing (optional).** Two pins split the LLM roles so the expensive
-model is paid for once: the **planner** runs the 35-tool ReAct loop (the
+model is paid for once: the **planner** runs the agent tool loop (the
 token- and call-heavy part) and the **judgment** model produces the verdict
 and its finalize pass. Everything else in WinRE is deterministic, so there is
 nothing else to route.
 
 - Each pin defaults to `WINRE_LLM_MODEL`; a pin **never** moves another role.
   `WINRE_LLM_MODEL` is the default for every unpinned role and is resolved
-  from that variable alone — a pin can never become the default (RevAI hit
-  exactly that bug in production on 2026-09-27 and had to undo it).
+  from that variable alone.
 - The resolved routing is recorded **per run** in `deep.json → llm_roles`,
   `report.json` and `audit.json`, so which model produced the tool loop and
   which produced the verdict is verifiable per case rather than trusted.
@@ -105,26 +110,110 @@ variable names above are contractual — never a specific model or provider.
 | Driver | LLM config lives on | VM needs |
 |---|---|---|
 | **Remote** (`--driver remote`, UI, RevAI-driven) | Driving box (host `.env`, RevAI box `.env`, or exported env). That box needs internet to the provider. | Nothing LLM-related — tools + MCP + SSH + snapshot marker only. `C:\WinRE\.env` is never read. |
-| **Local** (`pipeline.py` on the VM, `--driver local`) | `C:\WinRE\.env` on the VM (NAT phase / VM-side testing only) | Internet to the provider (conflicts with air-gap — never combine with detonation) |
+| **Local** (`--driver local`) | `.env` on the process host | On the FlareVM, the pipeline cannot pass the independent control-plane ledger gate. Use `--driver remote` for Flare analysis and detonation. |
 
-This is deliberate (2026-09-01 split: LLM needs internet, detonation
-can't have it) and it keeps API keys off the malware VM. For anything
+This keeps API keys on the control plane while the malware VM remains
+isolated. For anything
 RevAI-driven or detonation-adjacent, keys stay on the control plane.
+Direct local orchestrator execution is collection-only; trusted post-run
+analysis requires the remote driver and pulled artifacts.
 The RevAI-side mapping (its config → `WINRE_LLM_*`) is specified in
 [`REVAI-BRIDGE.md`](REVAI-BRIDGE.md).
 
 ## Evidence packs
 
-`logs/<sha256>/<static|agentic>/` per sample and engine: `intake/ quick/
-deep/ dynamic/ yara/ report/` + `audit.json` + pack-level `META.json`
-(mode/engine/source). `snapshot.json` (HITL ledger) lives at the sha root
-(VM-state, mode-independent). Browse them in the UI (Cases → pack — one row
+`logs/<sha256>/<static|agentic|dbg|dynamic>/` per sample and producer
+section: `intake/ quick/ deep/ dynamic/ yara/ report/` plus run metadata,
+manifests, composition, and `audit.json`. The evidence section identifies the
+producer; `META.json` records the engine separately. The optional
+`snapshot.json` is a sample-level HITL record, not the authoritative VM-state
+ledger. The latter lives in `internal/_vm_state.json` on the control plane.
+Browse packs in the UI (Cases → pack — one row
 per section) — verdicts, deep tool-call timeline (agentic) or checklist +
 fired rules (static), dynamic artifacts (Frida traces, Procmon summaries +
 persistence catalog + behavior timeline, beacon analysis, post-mortem
 harvest + ntdll integrity, WinDbg dump analysis, emulation-vs-detonation
 diff, pcaps, pe-sieve dumps), YARA rules, analyst-next report. The pack
 view surfaces all of those in-page (not just raw JSON downloads).
+
+## Corpus identity and staging
+
+The operator workstation may be a sample transit point. Inventory extracted
+corpora by content before staging; the registry preserves source aliases while
+deduplicating identical bytes. The inventory reads files as data and does not
+execute them. Its default output, `internal/sample-registry.json`, is local
+operator state and is gitignored.
+
+```powershell
+python -m winre.corpus_registry inventory `
+  --source-root D:\corpora\extracted `
+  --source-label extracted-corpus-2026-10
+
+python -m winre.corpus_registry stage `
+  --source D:\corpora\extracted\sample.bin `
+  --destination-root D:\WinRE-corpus-staging `
+  --source-label virussign-2026-10
+```
+
+Staging copies into `<destination-root>\<sha256>\<sanitized-name>` and verifies
+the copied bytes against SHA-256; the original filename remains an alias in the
+registry. PE format, architecture and DLL/driver
+candidates are header-derived; executability is never treated as permission to
+run. Source and destination paths are local to the machine running the command;
+this step does not transfer samples to Flare. Family remains `unknown` until an
+operator records supporting evidence:
+
+```powershell
+python -m winre.corpus_registry classify-family `
+  --sha256 "<sha256>" --family "<family>" --operator "<name>" `
+  --basis "<why-this-classification-is-supported>" --evidence-ref "<path-or-citation>"
+```
+
+Record runs only after they finish, with their mode, run ID, code revision and
+configuration digest. A repeat of the same sample and mode requires an
+explicit reason in the registry; separate modes remain valid. The registry
+currently accepts `static`, `agentic`, and `agentic-dbg` for run history; it
+does not separately encode the `--dynamic` capability yet. This registry does
+not gate the live pipeline. History attestations apply only to this registry
+and cannot establish that a sample never ran elsewhere.
+
+```powershell
+python -m winre.corpus_registry record-run `
+  --sha256 "<sha256>" --mode static --run-id "<32-hex-run-id>" `
+  --code-revision "<commit-or-build-id>" --config-digest "<config-hash>" `
+  --outcome completed
+```
+
+A history import must use the documented schema and cite the source record:
+
+```powershell
+python -m winre.corpus_registry attest-history `
+  --sha256 "<sha256>" --status no_recorded_winre_run_in_this_registry `
+  --operator "<name>" --basis "<what-was-reviewed>"
+```
+
+This attestation is limited to the current registry; it is not evidence that
+the sample never ran on another system. An imported-history record requires an
+evidence reference.
+
+```powershell
+python -m winre.corpus_registry import-history `
+  --sha256 "<sha256>" --history-file .\history.json `
+  --operator "<name>" --basis "<reviewed-source>" `
+  --evidence-ref "<path-or-citation>"
+```
+
+The history file uses `winre-corpus-run-history/v1`, carries the same `sha256`,
+and contains a `runs` array. Each run needs a supported mode and either its
+32-character `run_id` or a stable `legacy_id`; missing historical revision or
+time values stay null. The imported file's hash is stored with each imported
+record. Example shape:
+
+```json
+{"schema":"winre-corpus-run-history/v1","sha256":"<64-hex-sha256>",
+ "runs":[{"legacy_id":"<stable-record-id>","mode":"static",
+          "outcome":"unknown","recorded_at":null}]}
+```
 
 ## Sandbox realism (run BEFORE the first detonation)
 
@@ -151,23 +240,30 @@ this for host+memory+behavior correlation; full-image memory analysis is
 DFIR-Nexus-owned.
 
 ```powershell
-python -m winre.casepack <sha256> [--mode static|agentic]
+python -m winre.casepack "<sha256>" [--mode static|agentic|dbg|dynamic]
 ```
 
 ## Snapshot gate
 
-Before any execution (detonation or agent debug) the gate checks a
-clean-snapshot marker on the VM and a global run ledger
-(`logs/_vm_state.json`).
+Before any guest-tool pipeline run the gate checks a clean-snapshot marker on
+the VM and a global run ledger (`internal/_vm_state.json`) on the separate
+control plane. This ignored directory is excluded from VM sync and is
+independent of the configurable evidence root. The guest marker is writable by
+guest code; the control-plane ledger prevents a recreated marker from
+reopening a dirty VM.
 
-- `enforce` (default): execution is refused unless the marker is present (or an
-  L2 hypervisor auto-restore just re-created it). The marker is consumed on use
-  - two executions without a real restore in between are impossible. A refused
-  run writes `dynamic/STAGE.json` with `ok=false` ("blocked by snapshot gate")
-  and the audit flags `dynamic_blocked`.
+- `enforce` (default): guest analysis is refused unless the marker is present
+  and the control-plane ledger says `restored` or `verified_clean`. Dynamic or
+  debug execution consumes the marker and marks the ledger dirty. A snapshot
+  restore brings back the marker but does not reset the control-plane ledger;
+  the operator must attest `verified_clean` after checking the restored VM. A
+  refused run writes a non-green record and preserves prior evidence.
 - `observe` (`WINRE_SNAPSHOT_GATE=observe`): everything is probed and recorded,
-  **nothing is blocked** - explicit override for benign test loops only.
-- `off`: gate inert.
+  the execution-budget gate is advisory. This does not bypass the separate
+  guest-integrity check: the marker and clean control-plane ledger are still
+  required for pipeline runs.
+- `off`: disables the execution-budget gate only. The pipeline's independent
+  guest-integrity check remains active.
 
 ### After a snapshot revert (baseline recovery)
 
@@ -188,14 +284,13 @@ CLI:
 
 ```powershell
 python -m winre.snapshot_gate status
-python -m winre.snapshot_gate attest --action verified_clean   # marker-checked server-side
-python -m winre.snapshot_gate marker-create                    # one-time, before taking a snapshot
+python -m winre.snapshot_gate attest --action verified_clean   # after restore, from the separate control plane
+python -m winre.snapshot_gate marker-create                    # only when preparing a new clean baseline snapshot
 ```
 
-The UI Run page shows the live gate card (mode, marker, ledger,
-auto-restore config) with attest buttons. With `WINRE_HYPERVISOR` +
-`WINRE_VM_PATH` + `WINRE_SNAPSHOT` set, the pipeline auto-restores before
-each detonation.
+The UI Run page shows the live gate card (mode, marker and control-plane
+ledger) with attest buttons. Hypervisor variables are report-only; snapshot
+restore remains an operator action.
 
 ### Golden image (before the first sample run)
 
@@ -204,21 +299,28 @@ Prepare a reusable baseline: deploy, verify, clean, snapshot.
 1. Deploy: `ops\sync_to_flare.ps1` -> `ops\provision_tools.ps1` ->
    `ops\reapply_after_revert.ps1` (setup + verify battery). Expect
    `0 FAIL` in `verify-flarevm.ps1`.
-2. Confirm the tree is clean: `C:\samples`, `C:\WinRE\logs` and
-   `C:\WinRE\cache\ghidra` empty; no `__pycache__` under `C:\WinRE`.
-   Both `install\verify-flarevm.ps1` and `ops\smoke_flare.py` are
-   **side-effect free** (SQL probe samples/servers/caches are cleaned up; the
-   smoke helper and its bytecode live in `%TEMP%`), so they can be re-run at
-   any time without dirtying the image.
+2. Before taking the snapshot, confirm no sample-run artifacts remain under
+   `C:\samples`, `C:\WinRE\logs` or `C:\WinRE\cache`, and no
+   `__pycache__` directories remain under `C:\WinRE`. Perform this cleanup as
+   an explicit operator step so existing evidence is not removed by a
+   verification command.
+   `ops\smoke_flare.py` uses a per-run compile helper and bytecode under
+   `%TEMP%` and removes both. `install\verify-flarevm.ps1` uses benign SQL
+   probe copies, caches and logs under `%TEMP%` and stops only SQL processes it
+   started; neither command cleans existing samples or runtime state. Run
+   verification while the VM is idle.
 3. Confirm the clean marker is present (`python -m winre.snapshot_gate status`;
-   `marker-create` if missing) - the snapshot must contain it.
+   create it only while preparing a new baseline) - the snapshot must contain
+   it. From the separate control plane, attest `verified_clean` before the
+   first run and again after every restore.
 4. Shut down and snapshot. MCP servers do **not** need to be running in the
    snapshot: the `WinRE-MCP-Boot` scheduled task (AtStartup, SYSTEM) brings
    Malcat `:9009` / WinDbg `:9097` back after any reboot/restore (no logon
    required), and the x64dbg manager launches `:9094` on demand.
 
-After restore the first dynamic run is allowed (marker armed) and consumes the
-marker; revert again before the next detonation.
+After restore, re-sync and verify the VM, then attest `verified_clean` from the
+control plane. The first dynamic run consumes the marker and marks the external
+ledger dirty; restore and attest again before another run.
 
 ## MCP plane
 
@@ -232,10 +334,8 @@ Restart everything on the VM console:
 `powershell -File C:\WinRE\winre\mcp\start_servers.ps1` (idempotent).
 
 **Self-healing.** `WinRE-MCP-Boot` (scheduled task, AtStartup, SYSTEM) is the
-primary path and does **not** depend on an interactive logon (the box has no
-AutoAdminLogon, so the Startup-folder launcher alone left MCP down after a
-reboot - fixed 2026-09-20). The logon launcher is kept for interactive
-sessions. On top of both,
+primary path and does **not** depend on an interactive logon. The logon
+launcher remains available for interactive sessions. On top of both,
 `remote_driver.ensure_mcp_servers()` (quick + deep stages) and
 `windbg_post` (dynamic post-analysis) re-probe and, when a headless server
 is down, run `start_servers.ps1 -NoX64dbg -Detach`. `-Detach` re-launches
@@ -254,14 +354,15 @@ python ops\smoke_flare.py          # 9-check PASS/FAIL battery (SSH, py_compile,
 python -m winre.snapshot_gate status
 ```
 
-On the VM: `C:\WinRE\install\verify-flarevm.ps1` (read-only PASS/FAIL).
+On the VM: `C:\WinRE\install\verify-flarevm.ps1` (PASS/FAIL with isolated
+temporary SQL probes; run while the VM is idle).
 
 Common failures:
 
 | Symptom | Fix |
 |---|---|
 | deep shows `deterministic_fallback` | LLM endpoint down / `.env` keys empty (`llm_client.available()`), or `--dry-llm` on agentic mode. Static mode (`--mode static`) never needs the LLM — expect `static_deterministic` |
-| dynamic stage `snapshot gate: VM dirty` | restore the snapshot, or attest in the UI, or set auto-restore vars |
+| `snapshot gate` reports dirty or unattested | restore the known-clean snapshot, verify the marker, then attest `verified_clean` from the separate control plane |
 | MCP x64dbg down | scheduled task `WinRE-X64dbg-Once`, or let the manager ensure it on demand |
 | Malcat calls fail from host | expected — localhost-bound; the SSH bridge handles it. If the bridge fails, restart `start_servers.ps1` on the VM |
 | `orchestrator lock held` | a run is live (check writer pid in the error) or break with `--force` |
@@ -270,10 +371,12 @@ Common failures:
 ## Manual detonation (UI-free)
 
 ```powershell
-python -m winre.orchestrator <sha256-or-sample-path> --mode local --max-seconds 45 --pesieve
+python -m winre.orchestrator "C:\samples\sample.exe" --mode ssh --max-seconds 150 --pesieve
 ```
 
-Write the session file first (or pass the sample path — the CLI repairs the
-session from it). Snapshot-restore afterwards. Manual runs land in the flat
-`logs/<sha>/dynamic/`; pipeline-driven runs pin output into the mode section
-via `WINRE_DYNAMIC_DIR`.
+The pipeline-driven remote command is preferred because it records the
+requested capability, run ID, manifests, and final audit. The standalone SSH
+orchestrator is a lower-level collection path; it does not replace the full
+pipeline's run acceptance and reporting. Restore and attest the clean snapshot
+after every dynamic or debugger execution. WinRE never restores it
+automatically.

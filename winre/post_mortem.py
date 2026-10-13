@@ -4,13 +4,14 @@
 handoff boundary: WinRE harvests process-level memory, DFIR-Nexus owns
 full-image analysis).
 
-Steps (run on the VM right after detonation, BEFORE snapshot restore):
+Steps (collection on the VM right after detonation, BEFORE snapshot restore):
   1. memory_harvest  — procdump -ma of the sample process + children
                        (ephemeral malware trap; feeds DFIR-Nexus ingest)
-  2. ntdll_integrity — compare loaded ntdll .text hash (read via
-                       ReadProcessMemory) vs on-disk -> unhooking detected
-  3. process_snapshot — psutil process list (parent/pid/cmdline) for
+  2. process_snapshot — psutil process list (parent/pid/cmdline) for
                        PPID-spoof correlation with procmon_post suspects
+
+Ntdll integrity comparison is deferred: the VM must not interpret its own
+memory after detonation, and no trusted off-box extraction path is implemented.
 
 CLI: python post_mortem.py <dynamic_dir> [--sample-pid <pid>]
      (dynamic_dir = the case's dynamic/ folder; writes memory/ + files there)
@@ -266,11 +267,16 @@ def process_snapshot(dyn_dir: Path) -> dict:
         return {"ok": False, "error": str(e)[:200]}
 
 
-def run_all(dyn_dir: Path, sample_pid: int | None = None) -> dict:
+def run_all(dyn_dir: Path, sample_pid: int | None = None, *,
+            analyze_integrity: bool = False) -> dict:
     out = {
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "memory_harvest": memory_harvest(dyn_dir, sample_pid),
-        "ntdll_integrity": ntdll_integrity(dyn_dir, sample_pid),
+        "ntdll_integrity": (ntdll_integrity(dyn_dir, sample_pid)
+                            if analyze_integrity else {
+                                "status": "deferred_to_control_plane",
+                                "reason": "guest-side integrity interpretation "
+                                          "is not trusted after sample execution"}),
         "process_snapshot": process_snapshot(dyn_dir),
     }
     (dyn_dir / "post_mortem.json").write_text(

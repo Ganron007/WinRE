@@ -224,6 +224,14 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
     ni = _read(dyn_dir / "network_intel.json") or {}
     ed = _read(dyn_dir / "emu_diff.json") or {}
     pm = _read(dyn_dir / "post_mortem.json") or {}
+    ntdll = pm.get("ntdll_integrity") or {}
+    windbg = _read(dyn_dir / "windbg_analysis.json") or {}
+    if windbg:
+        used.append("windbg_analysis.json")
+    if ntdll.get("status") == "deferred_to_control_plane":
+        limitations.append(
+            "loaded ntdll integrity comparison was deferred because the VM is "
+            "not a trusted analysis host; no off-box comparison is available yet")
 
     # --- did it even run? ------------------------------------------------
     ran = bool(job.get("sample_pid"))
@@ -256,11 +264,32 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
     # path -> {"writes": bool, "reads": bool, "api": str, "access": str}
     prov: dict[str, dict] = {}
     has_provenance = False
+    _effects = fs.get("file_effects")
+    if isinstance(_effects, dict):
+        for ep, ev in _effects.items():
+            if not isinstance(ev, dict) or not isinstance(ep, str) or not ep:
+                continue
+            has_provenance = has_provenance or bool(
+                ev.get("write_attempts") or ev.get("read_attempts")
+                or ev.get("successful_writes") or ev.get("created_or_truncated")
+                or ev.get("open_or_create_ambiguous"))
+            prov[ep] = {
+                "writes": int(ev.get("successful_writes") or 0) > 0,
+                "reads": int(ev.get("read_attempts") or 0) > 0,
+                "write_attempts": int(ev.get("write_attempts") or 0),
+                "successful_writes": int(ev.get("successful_writes") or 0),
+                "created_or_truncated": int(ev.get("created_or_truncated") or 0),
+                "open_or_create_ambiguous": int(
+                    ev.get("open_or_create_ambiguous") or 0),
+                "bytes_written": int(ev.get("bytes_written") or 0),
+                "api": (ev.get("apis") or [None])[0],
+                "access": None,
+                "event_refs": ev.get("event_refs") or [],
+            }
     _events = fs.get("file_events") or []
-    if not _events:
-        # a pack pulled before provenance was summarised still has the access
-        # mask in its raw trace; recover the proof rather than discard real
-        # evidence because of a lossy intermediate summary
+    if not isinstance(_effects, dict) and not _events:
+        # Only invocation-paired raw events can establish a completed effect.
+        # Older traces remain observations because they lack return linkage.
         _events = _backfill_provenance(dyn_dir)
     for ev in _events:
         if not isinstance(ev, dict):
@@ -268,16 +297,36 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
         ep = ev.get("path")
         if not isinstance(ep, str) or not ep:
             continue
-        if ev.get("access") is not None or ev.get("writes") is not None:
+        if (ev.get("access") is not None or ev.get("write_intent") is not None
+                or ev.get("write_succeeded") is not None):
             has_provenance = True
         rec = prov.setdefault(ep, {"writes": False, "reads": False,
-                                   "api": None, "access": None})
-        if ev.get("writes"):
+                                   "write_attempts": 0,
+                                   "successful_writes": 0,
+                                   "created_or_truncated": 0,
+                                   "open_or_create_ambiguous": 0,
+                                   "bytes_written": 0,
+                                   "api": None, "access": None,
+                                   "event_refs": []})
+        if ev.get("write_intent", ev.get("writes")):
+            rec["write_attempts"] += 1
+        if ev.get("write_succeeded") is True:
             rec["writes"] = True
+            rec["successful_writes"] += 1
+            try:
+                rec["bytes_written"] += max(0, int(ev.get("bytes_written") or 0))
+            except (TypeError, ValueError):
+                pass
+        if ev.get("effect") == "created_or_truncated":
+            rec["created_or_truncated"] += 1
+        elif ev.get("effect") == "created_if_absent_or_opened":
+            rec["open_or_create_ambiguous"] += 1
         if ev.get("reads"):
             rec["reads"] = True
         rec["api"] = rec["api"] or ev.get("api")
         rec["access"] = rec["access"] or ev.get("access")
+        if ev.get("event_ref") and len(rec["event_refs"]) < 50:
+            rec["event_refs"].append(ev.get("event_ref"))
 
     # The evidence is the UNION of both sources, not one of them. A path can be
     # present in file_events and absent from decoded_paths - the summary keeps
@@ -290,16 +339,27 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
         if _p not in seen_paths:
             paths.append(_p)
 
-    drops, device_writes, system_loads = [], [], []
+    drops, created_files, device_writes, system_loads = [], [], [], []
     unverified: list[dict] = []
     for p in paths:
         kind = _classify_path(p, own)
         pv = prov.get(p)
         proven = bool(pv and pv.get("writes"))
         if kind == "drop":
+            if pv and pv.get("created_or_truncated"):
+                created_files.append({
+                    "path": p,
+                    "successful_create_or_truncate": pv["created_or_truncated"],
+                    "successful_writes": pv.get("successful_writes", 0),
+                    "bytes_written": pv.get("bytes_written", 0),
+                    "event_refs": pv.get("event_refs", []),
+                })
             if proven:
                 rec = {"path": p, "proven": True,
-                       "api": pv.get("api"), "access": pv.get("access")}
+                       "api": pv.get("api"), "access": pv.get("access"),
+                       "successful_writes": pv.get("successful_writes", 0),
+                       "bytes_written": pv.get("bytes_written", 0),
+                       "event_refs": pv.get("event_refs", [])}
                 if any(d in _norm(p) for d in ("\\startup\\", "\\start menu\\")):
                     rec["persistence_location"] = True
                 drops.append(rec)
@@ -307,9 +367,14 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
                 # observed, not attributed: recorded, never a drop
                 unverified.append({
                     "path": p,
-                    "reason": ("opened-for-read"
-                               if (pv or {}).get("reads") else
-                               "no write provenance recorded"),
+                    "reason": ("created-or-truncated-but-no-successful-write"
+                               if (pv or {}).get("created_or_truncated") else
+                               "open-or-create-outcome-does-not-prove-creation"
+                               if (pv or {}).get("open_or_create_ambiguous") else
+                               "opened-for-read" if (pv or {}).get("reads") else
+                               "write-attempted-but-completion-unproven"
+                               if (pv or {}).get("write_attempts") else
+                               "no completed-write evidence recorded"),
                     "api": (pv or {}).get("api"),
                 })
         elif kind == "device":
@@ -320,31 +385,55 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
                 else:
                     unverified.append({
                         "path": p,
-                        "reason": ("opened-for-read"
-                                   if (pv or {}).get("reads") else
-                                   "no write provenance recorded"),
+                        "reason": ("write-attempted-but-completion-unproven"
+                                   if (pv or {}).get("write_attempts") else
+                                   "no completed-write evidence recorded"),
                         "api": (pv or {}).get("api"),
                     })
         elif kind == "system-load":
             system_loads.append(p)
 
-    # only a PROVEN write earns a drop basis tag
+    # Completed file effects are cited, but do not independently establish
+    # malicious intent. File-write-only evidence is capped at suspicious.
     for d in drops:
-        basis.append("drop:" + Path(d["path"].replace("\\", "/")).stem[:24])
+        basis.append("file-write:" + Path(d["path"].replace("\\", "/")).stem[:24])
         if d.get("persistence_location"):
-            basis.append("persistence:startup-path")
+            basis.append("persistence-location-write:startup-path")
 
     if unverified:
         limitations.append(
             f"{len(unverified)} path(s) looked like a drop by shape but carry "
-            "no proof of being written: they are reported as observations, not "
-            "as drops. A read of an executable is not evidence of planting one.")
+            "no completed-write proof: they are reported as observations, not "
+            "as completed drops. A read or failed write is not evidence of "
+            "planting a file.")
     if not has_provenance and paths:
         limitations.append(
             "this pack predates file-access provenance (frida file_events), so "
             "NO path in it can be attributed to a write. Path shape alone is "
             "not sufficient to claim a drop.")
+    if fs.get("unmatched_calls"):
+        limitations.append(
+            f"{fs.get('unmatched_calls')} Frida invocation(s) have no paired "
+            "return record; their effects remain unverified.")
+    if fs.get("malformed_lines"):
+        limitations.append(
+            f"{fs.get('malformed_lines')} malformed Frida trace line(s) were "
+            "ignored during summary generation.")
+    if fs.get("file_events_truncated"):
+        limitations.append(
+            "the bounded file-event detail list is truncated; full per-path "
+            "effect counts are in file_effects and raw invocation records remain "
+            "in frida_trace.jsonl.")
     findings["drops"] = drops
+    findings["created_files"] = created_files
+    findings["file_effect_intent"] = {
+        "status": "not_assessed",
+        "note": ("A successful file creation/write is an observed effect, not "
+                 "by itself proof of malicious intent. Correlate with execution, "
+                 "persistence, payload content and sample-attributable context."),
+        "completed_write_paths": len(drops),
+        "created_or_truncated_paths": len(created_files),
+    }
     findings["unverified_opens"] = unverified[:60]
     findings["device_writes"] = device_writes
     findings["system_loads"] = len(system_loads)
@@ -352,7 +441,32 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
         "available": has_provenance,
         "events": len(prov),
         "proven_writes": sum(1 for v in prov.values() if v.get("writes")),
+        "write_attempts": sum(v.get("write_attempts", 0) for v in prov.values()),
+        "successful_writes": sum(v.get("successful_writes", 0)
+                                  for v in prov.values()),
+        "created_or_truncated": sum(v.get("created_or_truncated", 0)
+                                     for v in prov.values()),
     }
+    hook_coverage = fs.get("hook_coverage") or {"status": "unreported"}
+    findings["frida_coverage"] = hook_coverage
+    if hook_coverage.get("status") != "reported":
+        limitations.append(
+            "Frida hook installation coverage is unreported; observed-call "
+            "counts alone cannot distinguish no behavior from no active hooks.")
+    else:
+        if hook_coverage.get("unavailable") or hook_coverage.get("failures"):
+            limitations.append(
+                "one or more requested Frida hooks were unavailable or failed "
+                "to install; see frida_coverage for the exact exports/errors.")
+        if (hook_coverage.get("installed")
+                and not hook_coverage.get("apis_fired")):
+            limitations.append(
+                "Frida installed the requested hooks but observed no calls in "
+                "the capture window; this does not prove the behavior is absent.")
+        if hook_coverage.get("call_limit_reached"):
+            limitations.append(
+                "the Frida call limit was reached; later behavior may be absent "
+                "from the trace.")
 
     # --- system-wide context (NOT sample-attributable) --------------------
     cat = (ps.get("persistence") or {}) if isinstance(ps, dict) else {}
@@ -377,64 +491,76 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
     # --- network ---------------------------------------------------------
     net = {"c2": [], "leads": [], "beacons": [], "pcaps": [],
            "pcap_deep_dive": "not-run"}
+    raw_endpoints = fs.get("network_endpoints") or []
+    if isinstance(raw_endpoints, list):
+        endpoints = [e for e in raw_endpoints if isinstance(e, dict)]
+    else:
+        endpoints = []
+    # Compatibility with both the old singular key and the tracer's emitted
+    # sockaddrN keys. Keep these as endpoint observations; they do not, alone,
+    # establish process attribution or command-and-control intent.
+    if not endpoints:
+        for address in (fs.get("sockaddrs") or []):
+            if isinstance(address, str) and address:
+                endpoints.append({"address": address, "api": None,
+                                  "pid": None, "tid": None,
+                                  "event_ref": None,
+                                  "scope": "legacy-frida-endpoint"})
+    net["frida_endpoints"] = endpoints[:500]
+    net["frida_endpoint_count"] = int(
+        fs.get("network_endpoint_count") or len(endpoints))
+    net["frida_endpoints_truncated"] = bool(
+        fs.get("network_endpoints_truncated") or len(endpoints) > 500)
+    net["frida_endpoint_scope"] = (
+        "sample-process API observation; caller/module attribution and complete "
+        "network-instrumentation coverage are not established by this field")
     ba = (ni.get("beacon_analysis") or {}) if isinstance(ni, dict) else {}
+    # Beacon candidates are currently derived from VM-wide capture. Keep the
+    # observations, but do not attribute them to the sample or let them vote
+    # on the verdict until the flow-to-process contract exists (A2/A3).
     net["beacons"] = ba.get("beacons") or []
+    net["beacon_scope"] = "vm-wide capture; sample process/flow ownership unresolved"
 
     # every host the sample resolved or negotiated with, and HOW
     seen: dict[str, set[str]] = {}
-    http_hosts: set[str] = set()
-    sni_hosts: set[str] = set()
     for cap in (ni.get("captures") or []):
         for q in cap.get("dns_queries") or []:
             if isinstance(q, str) and q.strip():
                 seen.setdefault(q.strip().lower(), set()).add("dns")
         for h in cap.get("tls_sni") or []:
             if isinstance(h, str) and h.strip():
-                sni_hosts.add(h.strip().lower())
                 seen.setdefault(h.strip().lower(), set()).add("tls-sni")
         for line in cap.get("http_requests") or []:
             # tshark -T fields: host, method, uri
             host = str(line).split("\t")[0].strip().lower()
             if host:
-                http_hosts.add(host)
                 seen.setdefault(host, set()).add("http")
         net["pcaps"].extend(cap.get("pcap") and [cap["pcap"]] or [])
-
-    beaconed = set()
-    for b in net["beacons"]:
-        if isinstance(b, dict):
-            h = (b.get("host") or b.get("domain") or b.get("server") or "")
-            if isinstance(h, str) and h.strip():
-                beaconed.add(h.strip().lower())
-        elif isinstance(b, str) and b.strip():
-            beaconed.add(b.strip().lower())
 
     for host, how in sorted(seen.items()):
         if not _looks_like_c2(host):
             continue
-        promoted = _promote_to_c2(host, beaconed, http_hosts, sni_hosts)
-        if promoted:
-            kind, reason = promoted
-            net["c2"].append({"host": host, "kind": kind, "reason": reason,
-                              "observed_as": sorted(how)})
-        else:
-            net["leads"].append({
-                "host": host, "observed_as": sorted(how),
-                "status": "lead (resolution only - no communication, "
-                          "no beaconing, no independent attribution)",
-            })
+        # network_intel is tshark over the whole guest. DNS/HTTP/SNI/beacon
+        # presence has no process association, so communication semantics do
+        # not justify the phrase "the sample sent" or a C2 verdict.
+        net["leads"].append({
+            "host": host, "observed_as": sorted(how),
+            "scope": "vm-wide-pcap", "attribution": "unresolved",
+            "status": "unattributed network observation; not promoted to C2",
+        })
     net["leads"] = net["leads"][:80]
     net["lead_note"] = (
-        "A resolved host is not a C2 host. These are reported as leads: the "
-        "sample looked the name up. Promotion to c2 requires communication "
-        "semantics (an HTTP request or periodic beaconing) or independent "
-        "attribution.")
+        "The current pcap is VM-wide. These are network observations with no "
+        "process/flow owner; they are leads, not sample contacts or C2. "
+        "Promotion requires attributable process/flow evidence and intent.")
     net["pcap_deep_dive"] = _pcap_status(ni)
     findings["network"] = net
     for c in net["c2"]:
         basis.append(f"c2:{c['host']}")
     if net["beacons"]:
-        basis.append("beacon:candidate")
+        limitations.append(
+            "beacon candidates are derived from VM-wide pcap and are not "
+            "attributed to this sample; they do not raise the verdict")
 
     # --- injection / memory ops ------------------------------------------
     apis = {a: n for a, n in (fs.get("top_apis") or [])}
@@ -475,6 +601,16 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
         "bytes": sum(f.stat().st_size for f in dumps if f.is_file()),
         "harvest_ok": mh.get("ok"),
         "harvest_reason": mh.get("reason"),
+        "windbg_analysis": {
+            "status": ("completed" if windbg.get("ok") is True else
+                       "not_applicable" if "no dump" in str(
+                           windbg.get("skipped") or "").lower() else
+                       "unavailable" if windbg.get("skipped") else
+                       "failed" if windbg.get("error") else "not_run"),
+            "highlights": windbg.get("highlights") or {},
+            "analyzer": windbg.get("analyzer"),
+            "reason": windbg.get("skipped") or windbg.get("error"),
+        },
         "triage": _triage_dumps(dyn_dir, dumps),
     }
     if not dumps:
@@ -528,10 +664,12 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
     level, conf = UNKNOWN, "low"
     if not ran:
         level, conf = UNKNOWN, "low"
-    elif drops or device_writes:
+    elif device_writes:
         level, conf = MALICIOUS, "high"
-    elif net["c2"] or net["beacons"]:
+    elif net["c2"]:
         level, conf = MALICIOUS, "medium"
+    elif drops:
+        level, conf = SUSPICIOUS, "medium"
     elif findings["injection"]:
         level, conf = SUSPICIOUS, "medium"
     elif findings["process_spawns"]:
@@ -591,37 +729,6 @@ _OS_NOISE = frozenset({
     "akamaiedge.net", "cloudflare.com", "cloudflare-dns.com", "verisign.com",
 })
 
-
-
-def _promote_to_c2(host: str, beaconed: set[str], http_hosts: set[str],
-                   sni_hosts: set[str]) -> tuple[str, str] | None:
-    """Decide whether an observed host is C2, and say why. -> (kind, reason).
-
-    W2: RESOLUTION IS NOT ATTRIBUTION. A DNS answer proves the name was looked
-    up, nothing more - which is why every benign program that resolves a CDN
-    produced `c2:` and a malicious/medium verdict.
-
-    A lead is promoted only on evidence of COMMUNICATION or ATTRIBUTION:
-      * beaconed            - periodic callbacks (communication semantics)
-      * http-requested      - the sample actually sent a request to the host,
-                               which is more than resolving it
-      * tls-sni + http      - both, the strongest passive case
-
-    Returns None to leave it a lead.
-    """
-    if _is_reserved_or_noise(host):
-        return None
-    if host in beaconed:
-        return ("beacon", "periodic callbacks to this host")
-    if host in http_hosts:
-        return ("http", "the sample sent an HTTP request to this host")
-    # SNI is sent by the client during the handshake, so seeing it in a capture
-    # means the sample MOVED to that host. That is stronger than resolving a
-    # name, and it is how a plain-HTTP rule missed archive.torproject.org - the
-    # single strongest indicator in the pack was left as a mere lead.
-    if host in sni_hosts:
-        return ("tls-sni", "the sample opened a TLS handshake to this host")
-    return None
 
 
 def _pcap_status(ni) -> str:
@@ -721,9 +828,8 @@ def _looks_like_c2(host: str) -> bool:
     W2 (RevAI review 2026-10-08): this used to BE the C2 decision, which made a
     denylist the only thing standing between a DNS query and a `c2:` basis tag.
     `example.org` passed it, as would every legitimate domain not on a ten-entry
-    list. It is now only the first filter: surviving it makes a host a LEAD, and
-    a lead only becomes C2 with communication semantics or independent evidence
-    (see _promote_to_c2).
+    list. It is now only a lead filter. C2 promotion is disabled until a
+    communication observation has process/flow attribution and intent.
     """
     return not _is_reserved_or_noise(host)
 
@@ -908,8 +1014,9 @@ def _triage_dumps(dyn_dir: Path, dumps: list[Path]) -> dict:
 
 # ------------------------------------------------------------- dbg findings
 
-def dbg_findings(mode_root: Path, *, sha: str = "") -> dict:
-    """Findings from the debug loop: did it unpack, and what did it get?"""
+def dbg_findings(mode_root: Path, *, sha: str = "",
+                 run_id: str | None = None) -> dict:
+    """Findings from the debug loop: what ran, what was observed, and did it unpack?"""
     basis: list[str] = []
     limitations: list[str] = []
     used: list[str] = []
@@ -922,9 +1029,35 @@ def dbg_findings(mode_root: Path, *, sha: str = "") -> dict:
     # recorded at deep-dive START, so we can tell "the debugger was
     # never available" (a product defect) from "the agent declined"
     dbg_ensure = deep.get("dbg_ensure") or dbg
+    debug_run = agent.get("debug_run") or {}
+    debug_evidence = debug_run.get("evidence") or []
+    window = next((item.get("result") or {} for item in debug_evidence
+                   if isinstance(item, dict)
+                   and item.get("tool") == "x64dbg_run_window"
+                   and isinstance(item.get("result"), dict)), {})
+    monitor = _read(mode_root / "deep" / "debug_monitor" / "META.json") or {}
+    monitor_summary = monitor.get("summary") or {}
+    monitor_matches_run = (not run_id or monitor.get("run_id") == run_id)
+    monitor_ok = (monitor.get("ok") is True
+                  and monitor.get("status") == "collected"
+                  and monitor_matches_run)
+    debug_window_ok = (
+        debug_run.get("requested") is True
+        and debug_run.get("attempted") is True
+        and debug_run.get("status") == "completed"
+        and window.get("ok") is True
+        and window.get("status") == "completed"
+        and window.get("stopped_after_window") is True
+        and window.get("exit_observed") is True
+        and str((window.get("final_state") or {}).get("isDebugging", "")).lower()
+            == "false"
+        and (window.get("final_state") or {}).get("status") == "NO_TARGET"
+    )
     quick = _read(mode_root / "quick" / "quick.json") or {}
     if quick:
         used.append("quick.json")
+    if monitor:
+        used.append("debug_monitor/META.json")
 
     # The ROUTE is a property of the sample, not a judgement call: a .NET
     # assembly has no native OEP to find, so x64dbg's memory-execute
@@ -952,11 +1085,32 @@ def dbg_findings(mode_root: Path, *, sha: str = "") -> dict:
                      "launched": dbg.get("launched"),
                      "port": dbg.get("port"),
                      "ok": dbg.get("ok")},
+        "debug_observation": {
+            "requested": debug_run.get("requested"),
+            "attempted": debug_run.get("attempted"),
+            "window_completed": debug_window_ok,
+            "requested_seconds": window.get("requested_seconds"),
+            "observed_seconds": window.get("observed_seconds"),
+            "exit_observed": window.get("exit_observed"),
+            "stopped_after_window": window.get("stopped_after_window"),
+            "final_state": window.get("final_state"),
+            "monitor_status": monitor.get("status"),
+            "monitor_run_matches": monitor_matches_run,
+            "target_observed": (monitor_summary.get("target_observed")
+                                if monitor_ok else None),
+            "process_starts": (monitor_summary.get("process_starts")
+                               if monitor_ok else None),
+            "process_stops": (monitor_summary.get("process_stops")
+                              if monitor_ok else None),
+            "related_process_ids": (monitor_summary.get("related_process_ids")
+                                    if monitor_ok else []),
+            "scope": monitor_summary.get("scope") if monitor_ok else None,
+        },
         "unpack": {},
         "route": route,
     }
 
-    if not dbg and not up:
+    if not dbg and not up and not debug_window_ok:
         if dbg_ensure is not None:
             limitations.append(
                 "the debugger was NOT available when the deep dive started: "
@@ -988,23 +1142,29 @@ def dbg_findings(mode_root: Path, *, sha: str = "") -> dict:
                       findings=findings, evidence_used=used,
                       limitations=limitations)
 
-    ok = bool(up.get("ok"))
+    # Unpacking and observing execution are distinct outcomes. A normal,
+    # unpacked program may never hit the memory-execute breakpoint, while the
+    # bounded debug window and process observer still produce valid evidence.
+    # Keep that mode eligible in the composite and report the absent dump as a
+    # limitation instead of treating the entire producer as absent.
+    unpack_ok = bool(up.get("ok"))
+    producer_ok = bool(unpack_ok or debug_window_ok)
     oep = up.get("oep")
     dump = up.get("dump_path")
     parse = up.get("dump_parse") or {}
     findings["unpack"] = {
-        "ok": ok, "oep": oep, "method": up.get("method"),
+        "ok": unpack_ok, "oep": oep, "method": up.get("method"),
         "dump": dump, "dump_source": up.get("dump_source"),
         "parses": parse.get("parses"),
         "imports": parse.get("imports"),
         "machine": parse.get("machine"),
     }
-    if ok and oep:
+    if unpack_ok and oep:
         basis.append(f"unpack:oep:{oep}")
     if parse.get("parses"):
         basis.append(f"unpacked:parses:imports={parse.get('imports')}")
 
-    if not ok:
+    if not up.get("ok"):
         limitations.append(
             "the debugger ran but produced no usable dump: "
             f"{str(up.get('error'))[:160] if up.get('error') else 'no OEP'}")
@@ -1019,7 +1179,20 @@ def dbg_findings(mode_root: Path, *, sha: str = "") -> dict:
     if ps.get("packed_section"):
         basis.append(f"packed-section:{ps['packed_section'].get('name')}")
 
-    return _frame("dbg", sha, ok=ok,
+    if not monitor_ok:
+        reason = ("monitor run identity did not match this debug run"
+                  if monitor else "debug monitor evidence was not collected")
+        limitations.append(reason)
+    elif monitor_summary.get("target_observed") is not True:
+        limitations.append(
+            "the ETW process monitor did not observe the staged sample; "
+            "debugger execution alone does not establish process behavior")
+    else:
+        basis.append("debug:target-process-observed")
+        findings["debug_observation"]["unique_images"] = \
+            monitor_summary.get("unique_images") or []
+
+    return _frame("dbg", sha, ok=producer_ok,
                   verdict=_verdict(level, conf, basis),
                   findings=findings, evidence_used=used, limitations=limitations)
 
@@ -1048,6 +1221,27 @@ def static_findings(mode_root: Path, *, sha: str = "") -> dict:
         used.append("deep.json")
     ev = (quick.get("evidence") or {}) if isinstance(quick, dict) else {}
 
+    yara_scan = ev.get("yarascan") or {}
+    if not isinstance(yara_scan, dict):
+        yara_scan = {}
+    curated_hits = [str(x) for x in (yara_scan.get("high_signal") or [])
+                    if str(x).strip()]
+    auto_names = {str(x).split()[0].lower()
+                  for x in (yara_scan.get("auto_generated") or [])
+                  if str(x).strip()}
+    packer_markers = ("nspack", "upack", "aspack", "mpress", "fsg",
+                      "pecompact", "petite", "upx", "themida", "enigm",
+                      "vmprotect", "packman", "kkrunchy", "mew", "packed",
+                      "packer", "compressor")
+    curated_hits = [name for name in curated_hits
+                    if name.split()[0].lower() not in auto_names
+                    and not any(marker in name.lower() for marker in packer_markers)]
+    findings["curated_yara_floor"] = {
+        "applied": bool(curated_hits), "level": "malicious" if curated_hits else None,
+        "rules": curated_hits[:10],
+        "policy": "family-distinctive curated YARA cannot be cleared by dynamic evidence",
+    }
+
     # --- capa, with ATTACK mapping ----------------------------------------
     capa = (ev.get("capa") or {})
     caps = []
@@ -1066,7 +1260,7 @@ def static_findings(mode_root: Path, *, sha: str = "") -> dict:
         limitations.append("capa returned no capabilities")
 
     # --- yara, weighted by reliability ------------------------------------
-    yara = (ev.get("yara") or {})
+    yara = (ev.get("yarascan") or ev.get("yara") or {})
     hits = []
     if isinstance(yara, dict):
         for h in yara.get("hits") or []:
@@ -1079,6 +1273,8 @@ def static_findings(mode_root: Path, *, sha: str = "") -> dict:
     for h in hits:
         if isinstance(h.get("reliability"), int) and h["reliability"] >= 60:
             basis.append(f"yara:{h.get('id')}")
+    for name in curated_hits:
+        basis.append(f"curated-yara:{name.split()[0]}")
 
     # --- malcat anomalies --------------------------------------------------
     mc = (ev.get("malcat") or {}) or {}
@@ -1137,7 +1333,7 @@ def static_findings(mode_root: Path, *, sha: str = "") -> dict:
     high_lvl = [a for a in anomalies if isinstance(a.get("level"), int) and a["level"] >= 3]
 
     level, conf = UNKNOWN, "low"
-    if dv == MALICIOUS or (strong and high_lvl):
+    if curated_hits or dv == MALICIOUS or (strong and high_lvl):
         level, conf = MALICIOUS, "high"
     elif dv == SUSPICIOUS:
         level, conf = SUSPICIOUS, "medium"
@@ -1156,9 +1352,14 @@ def static_findings(mode_root: Path, *, sha: str = "") -> dict:
         limitations.append("yara not on the analysis host; rule hits come from "
                            "the VM's yara run")
 
+    verdict = _verdict(level, conf, basis)
+    if curated_hits:
+        verdict["floor"] = {"source": "curated-yara",
+                            "rules": curated_hits[:10],
+                            "minimum_level": "malicious"}
     return _frame(("static" if mode_root.name == "static" else "agentic"),
                   sha, ok=bool(quick or deep),
-                  verdict=_verdict(level, conf, basis), findings=findings,
+                  verdict=verdict, findings=findings,
                   evidence_used=used, limitations=limitations)
 
 
@@ -1173,7 +1374,8 @@ _DISPATCH = {
 
 
 def build(mode: str, pack_root: Path, *, sha: str = "",
-          evidence_dir: Path | None = None) -> dict:
+          evidence_dir: Path | None = None,
+          run_id: str | None = None) -> dict:
     """Extract findings for one mode and write <pack_root>/findings.json.
 
     `pack_root` is the MODE root (logs/<sha>/<mode>/): that is where the pack
@@ -1194,12 +1396,26 @@ def build(mode: str, pack_root: Path, *, sha: str = "",
                       findings={}, evidence_used=[],
                       limitations=[f"no findings extractor for mode {mode!r}"])
     try:
-        out = _DISPATCH[mode](pack_root, sha=sha)
+        if mode == "dbg":
+            out = dbg_findings(pack_root, sha=sha, run_id=run_id)
+        else:
+            out = _DISPATCH[mode](pack_root, sha=sha)
         # The mode is THIS function's parameter, authoritative. The extractors
         # used to infer it from the directory name, which worked while they
         # received the mode root - but they receive the evidence dir, so
         # static_findings would mislabel itself "agentic".
         out["mode"] = mode
+        out["run_id"] = run_id
+        try:
+            from .correlation import build as _build_correlation
+            out["correlation"] = _build_correlation(pack_root, run_id=run_id)
+        except Exception as e:
+            out["correlation"] = {
+                "schema": "winre-correlation/v1", "run_id": run_id,
+                "status": "unverifiable", "hypotheses": [],
+                "observations": [], "relationships": [],
+                "limitations": [f"correlation build failed: {type(e).__name__}: {str(e)[:160]}"],
+            }
     except Exception as e:
         out = _frame(mode, sha, ok=False,
                      verdict=_verdict(UNKNOWN, "low", []), findings={},

@@ -1,7 +1,7 @@
 # RevAI ↔ WinRE remote-driver bridge
 
-> **Status:** verified live - the remote driver is the tested entry point for
-> non-Windows control planes.
+> **Status:** integration guide for the remote-driver contract. Validate the
+> toolchain and evidence behavior on the revision deployed in your lab.
 
 > **Audience:** operators and integrators running RevAI (Remnux/Linux) or any
 > other control plane that drives WinRE (FlareVM) remotely. This document is
@@ -79,12 +79,12 @@ WINRE_LLM_API_KEY=<key>
 WINRE_LLM_REASONING=high          # low|medium|high|max — optional
 ```
 
-Two **optional** role pins (RevAI handoff 2026-09-27, item 7) split the two
+Two **optional** role pins split the two
 LLM roles WinRE actually has. Each defaults to `WINRE_LLM_MODEL`, and a pin
 never moves the other role:
 
 ```
-#WINRE_LLM_PLANNER_MODEL=         # 35-tool ReAct loop (call/token heavy)
+#WINRE_LLM_PLANNER_MODEL=         # agent tool loop
 #WINRE_LLM_VERDICT_MODEL=         # final judge (verdict + finalize pass)
 ```
 
@@ -212,10 +212,12 @@ Notes:
 | `--mode static` | not needed (zero LLM calls) | not needed | no |
 | `--mode agentic` | **required** | **required** (to the endpoint) | no |
 | `--mode agentic --agentic-dbg` | **required** | **required** | no (debug tools run on VM) |
-| `--dynamic` (detonation, any engine) | not needed (deterministic job) | not needed | no (air-gap enforced) |
+| `--mode agentic --dynamic` | **required** for the agentic deep stage | **required** for that stage | no (detonation job does not call the LLM) |
 
-A detonation with `--mode agentic --dynamic` therefore needs the LLM only
-for the deep stage; the detonation itself never calls it.
+A deterministic `--mode static` run cannot request `--dynamic` or
+`--agentic-dbg`. Agentic debug and dynamic runs write to separate `dbg/` and
+`dynamic/` evidence sections. Each capability is a distinct gated execution;
+restore and attest the clean snapshot between them.
 
 ## 7. Verify the wiring (on the driver box)
 
@@ -259,10 +261,11 @@ Three WinRE outputs are part of the contract:
   `frida_trace.jsonl.run.json`, and the verdict is mirrored at
   `META.json → window_gate` / `window_stop_reason`).
 
-  **The window is no longer a fixed guess.** RevAI's 2026-09-11 measurement
-  found a 45 s window produced 497 Frida events and no DGA, while 150 s produced
-  694,692 events and live HTTP POST C2 — so the interesting part of a run was a
-  coin flip on the sample's sleep schedule. Now:
+  **The window is configurable and recorded.** A historical measurement on
+  one test sample found that a 45 s window produced 497 Frida events and no
+  DGA, while 150 s produced 694,692 events and live HTTP POST C2. This is an
+  example of sample-specific timing, not a guarantee for other samples. The
+  current defaults are:
 
   - `--max-seconds` is the **cap** and defaults to **150**.
   - `--stop-on` is the **mechanism** (default `network,file`): the run keeps
@@ -310,16 +313,16 @@ Three WinRE outputs are part of the contract:
 
 | Fact | Where | Meaning |
 |---|---|---|
-| `execution_plan` | `execution_plan.json` → `audit.json` | how many VM executions the run intended (`execution_sites`, `executions_requested`) and whether the snapshot gate could honor it. `gate_mode=enforce` without hypervisor auto-restore allows **1 execution per clean restore** — a run asking for `--dynamic` + `--agentic-dbg` is refused before anything executes. |
+| `execution_plan` | `execution_plan.json` → `audit.json` | how many VM executions the run intended (`execution_sites`, `executions_requested`) and whether the snapshot gate could honor it. `gate_mode=enforce` allows **1 execution per operator-verified restore** — a run asking for `--dynamic` + `--agentic-dbg` is refused before anything executes. |
 | `run_id` | `dynamic/META.json` + `dynamic/STAGE.json → nonce` | the per-run nonce the control plane issued. Pack freshness is decided by this **value** (a VM `META.json` without it is not trusted); timestamps are for humans only. |
 | `clock_skew_s` | `dynamic/STAGE.json`, pack `META.json`, `/health` | VM-vs-control-plane clock difference, seconds. **Diagnostic only** — freshness never depends on it (a 5h-fast control plane can no longer make a run look `not-run`). VM-side facts live in `C:\WinRE\vm_clock.json`. |
 | `unmet_expectations` | `audit.json` | named gaps that block `truly_green` (e.g. `deep verdict missing`, `report verdict missing`). An empty list is part of the green contract. |
 | `no_verdict` / `verdict` | `deep/deep.json` (top level **and** `agent`), `report/report.json` | the deep verdict is mirrored at the top level of `deep.json` (`verdict`, `verdict_obj`, `source`, `confidence`, `key_evidence`, `tool_failures`) so a consumer does not need to know it lives under `agent`. |
 
-Evidence is append-only per mode section: a later static-only run never
-deletes an earlier dynamic pack — the previous pack is moved to
-`previous_runs/dynamic_<ts>/` and the fresh `dynamic/STAGE.json` points at it
-(`preserved_previous`, `cleared_previous: false`).
+When a run does not request detonation, prior dynamic evidence may be preserved
+under `previous_runs/`; it must not be interpreted as evidence from the current
+run. Same-section reruns can update current artifacts. Consumers should bind
+evidence to `run_id`, sample identity, pack section, and audit status.
 
 **`dynamic/SKIP.json` — the one file to read for "did this detonate?".** It is
 written whenever a run produced no detonation evidence, and it separates the
@@ -328,8 +331,7 @@ two reasons a consumer must not confuse:
 ```json
 {"schema": "winre-dynamic-skip/v1", "ran": false, "skipped": true,
  "reason": "not_requested", "has_detonation_evidence": false,
- "cleared_previous": false, "preserved_previous": "previous_runs/dynamic_<ts>",
- "preserved_artifacts": 71}
+ "cleared_previous": false, "preserved_previous": "previous_runs/dynamic_<ts>"}
 ```
 
 - `reason: "not_requested"` — the run never asked to detonate.

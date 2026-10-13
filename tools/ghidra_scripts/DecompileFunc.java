@@ -26,8 +26,9 @@ public class DecompileFunc extends GhidraScript {
             Address ep = currentProgram.getImageBase();
             FunctionIterator it = currentProgram.getFunctionManager().getFunctions(true);
             if (it.hasNext()) { f = it.next(); }
-        } else if (want.startsWith("FUN_") || want.matches("(?i)0x[0-9a-f]+")) {
-            String hex = want.startsWith("FUN_") ? want.substring(4) : want.replace("0x", "");
+        } else if (want.startsWith("FUN_") || want.matches("(?i)(?:0x)?[0-9a-f]+")) {
+            String hex = want.startsWith("FUN_") ? want.substring(4)
+                    : want.replaceFirst("(?i)^0x", "");
             Address a = currentProgram.getAddressFactory().getDefaultAddressSpace()
                     .getAddress(Long.parseLong(hex, 16));
             f = currentProgram.getFunctionManager().getFunctionAt(a);

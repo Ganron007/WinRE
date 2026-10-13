@@ -76,8 +76,13 @@ class EvidencePack:
         A single authority, used by the driver and the pipeline alike, so the
         two can never disagree about where a run's evidence lands.
         """
+        if mode not in ("static", "agentic"):
+            raise ValueError(f"unsupported analysis engine {mode!r}")
+        if dynamic and agentic_dbg:
+            raise ValueError("dynamic detonation and agentic debugging are separate producers; run them separately")
         if mode == "static":
-            # static has no debug/detonation variants
+            if dynamic or agentic_dbg:
+                raise ValueError("the static engine does not support dynamic or debugger capabilities")
             return "static"
         if dynamic:
             return cls.MODE_DYNAMIC
@@ -350,6 +355,10 @@ def archive_stage_for_fresh_run(pack, stage: str = "dynamic") -> dict:
             return out
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         dest = pack.root / "previous_runs" / f"{stage}_{stamp}"
+        suffix = 1
+        while dest.exists():
+            dest = pack.root / "previous_runs" / f"{stage}_{stamp}-{suffix}"
+            suffix += 1
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             shutil.move(str(d), str(dest))
@@ -435,9 +444,12 @@ def mark_dynamic_not_requested(pack: "EvidencePack") -> dict:
     return out
 
 
-def write_execution_plan(pack: "EvidencePack", plan: dict) -> Path:
+def write_execution_plan(pack: "EvidencePack", plan: dict, *,
+                         run_id: str | None = None) -> Path:
     """Record the run-level execution plan in the pack (audit reads it)."""
     payload = dict(plan)
+    if run_id:
+        payload["run_id"] = run_id
     payload["recorded_at"] = utcnow()
     p = pack.root / "execution_plan.json"
     p.write_text(json.dumps(payload, indent=2, default=str) + "\n",

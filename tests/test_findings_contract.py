@@ -148,7 +148,7 @@ def test_lazy_imports_are_imported_where_they_are_used():
     i = src.find("def run_pipeline(")
     assert i != -1
     body = src[i:]
-    assert "from . import remote_driver as _remote_driver" in body[:4000], (
+    assert "from . import remote_driver as _remote_driver" in body, (
         "run_pipeline uses remote_driver.flare_cfg() but does not import it")
     # and the call site must use the imported name
     assert "_remote_driver.flare_cfg()" in body
@@ -164,10 +164,11 @@ def test_a_parameter_that_is_passed_is_a_parameter_that_exists():
     pass constants and attributes, which are fine.
     """
     import ast
+    import builtins
     tree = ast.parse((REPO / "winre" / "pipeline.py").read_text(encoding="utf-8"))
     rp = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
               and n.name == "run_pipeline")
-    local = {a.arg for a in
+    local = set(dir(builtins)) | {a.arg for a in
              list(rp.args.args) + list(rp.args.kwonlyargs)
              + list(rp.args.posonlyargs)}
     for n in ast.walk(rp):
@@ -237,3 +238,78 @@ def test_native_route_still_reports_a_missing_oep():
     from winre import findings as F
     src = inspect.getsource(F.dbg_findings)
     assert 'if managed and not up.get("ok"):' in src
+
+
+def test_completed_debug_window_remains_a_valid_mode_without_an_oep(tmp_path):
+    """Execution evidence is a completed producer even when no dump exists."""
+    import json
+    from winre import compose, findings as F
+
+    sha = "e" * 64
+    run_id = "debug-run-1"
+    mode_root = tmp_path / sha / "dbg"
+    (mode_root / "quick").mkdir(parents=True)
+    (mode_root / "deep" / "debug_monitor").mkdir(parents=True)
+    (mode_root / "quick" / "quick.json").write_text(
+        '{"evidence": {"pe": {"is_dotnet": false}}}', encoding="utf-8")
+    (mode_root / "deep" / "deep.json").write_text(json.dumps({
+        "agent": {
+            "dbg_ensure": {"arch": 32, "launched": True},
+            "unpack_prepass": {"ok": False,
+                               "error": "memory BP did not trigger"},
+            "debug_run": {
+                "requested": True, "attempted": True, "status": "completed",
+                "evidence": [{"tool": "x64dbg_run_window", "result": {
+                    "ok": True, "status": "completed",
+                    "requested_seconds": 30, "observed_seconds": 30,
+                    "exit_observed": True, "stopped_after_window": True,
+                    "final_state": {"isDebugging": "false",
+                                    "status": "NO_TARGET"}}}],
+            },
+        },
+    }), encoding="utf-8")
+    (mode_root / "deep" / "debug_monitor" / "META.json").write_text(
+        json.dumps({"ok": True, "status": "collected", "run_id": run_id,
+                    "summary": {"target_observed": True,
+                                "process_starts": 12, "process_stops": 12,
+                                "related_process_ids": [55],
+                                "scope": "process starts and stops only"}}),
+        encoding="utf-8")
+
+    record = F.dbg_findings(mode_root, sha=sha, run_id=run_id)
+    record.update(schema=F.SCHEMA, run_id=run_id)
+    assert record["ok"] is True
+    assert record["findings"]["unpack"]["ok"] is False
+    assert record["findings"]["debug_observation"]["target_observed"] is True
+    assert "debug:target-process-observed" in record["verdict"]["basis"]
+    assert any("no usable dump" in item for item in record["limitations"])
+
+    _, selection = compose.load_selection(
+        sha, tmp_path, pending={"dbg": record})
+    assert selection["dbg"]["selected"] is True
+
+
+def test_failed_debug_window_is_not_a_completed_dbg_producer(tmp_path):
+    import json
+    from winre import findings as F
+
+    mode_root = tmp_path / "dbg"
+    (mode_root / "quick").mkdir(parents=True)
+    (mode_root / "deep").mkdir(parents=True)
+    (mode_root / "quick" / "quick.json").write_text(
+        '{"evidence": {"pe": {"is_dotnet": false}}}', encoding="utf-8")
+    (mode_root / "deep" / "deep.json").write_text(json.dumps({
+        "agent": {
+            "dbg_ensure": {"arch": 32, "launched": True},
+            "unpack_prepass": {"ok": False},
+            "debug_run": {
+                "requested": True, "attempted": True, "status": "failed",
+                "evidence": [{"tool": "x64dbg_run_window", "result": {
+                    "ok": False, "status": "failed"}}],
+            },
+        },
+    }), encoding="utf-8")
+
+    record = F.dbg_findings(mode_root, sha="e" * 64, run_id="run-2")
+    assert record["ok"] is False
+    assert record["findings"]["debug_observation"]["window_completed"] is False

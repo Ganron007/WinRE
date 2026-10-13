@@ -5,8 +5,9 @@
 > one-line fix from `tools/x64dbg-mcp-winre.patch` (surfacing hardware-BP
 > failures as errors instead of success text).
 > **Binary:** Zig single-file plugin `x64dbg-MCP-Server.dp64/.dp32` (`build.zig:5`); setup-flarevm.ps1 auto-provisions the toolchain from `C:\Tools-staged\zig-*.zip` (zig 0.14+, `build.zig.zon` minimum) and builds from `C:\WinRE\integrations\x64dbg-mcp-server*`.
-> **Status:** implemented - build/deploy is automated by `install/setup-flarevm.ps1`
-> (both arches) and `:9094` is scoped to `LocalSubnet` by a firewall rule.
+> **Setup:** setup automates the build/deploy flow for both architectures and
+> installs a firewall rule scoped to `LocalSubnet`. Verify the plugin and
+> exposed tool list on the revision and guest where it will run.
 > **Audience:** integrators and agent authors using the debugger MCP.
 
 ## 1. What it is
@@ -15,7 +16,7 @@ Native MCP plugin living inside `x64dbg.exe` (`src/core/bridge.zig:338` resolves
 
 Default ports `README.md:53`: `0.0.0.0:9094` (x64) / `9095` (x32). Config dialog `Plugins > x64dbg-MCP Server > Configure` (`src/core/config.zig` persists `mcp_config.json`).
 
-## 2. 71 tools (`src/mcp/tools.zig:30`)
+## 2. Tool catalog
 
 | Category | Tools |
 |----------|-------|
@@ -50,7 +51,7 @@ Verify:
 
 ```powershell
 curl http://127.0.0.1:9094/ -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq
-# expect 71 tools
+# inspect the tool list returned by the installed plugin
 
 # MCP client (.mcp.json)
 # {"mcpServers":{"x64dbg":{"type":"http","url":"http://<FLARE_HOST>:9094/"}}}

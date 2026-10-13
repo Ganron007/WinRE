@@ -15,10 +15,10 @@ The rule is: THE VM IS AN EVIDENCE PRODUCER AND NOTHING ELSE.
 Split:
   * host-side (this module) - pcap enrich, beacon analysis, Procmon catalog,
     emulation diff. Pure Python over pulled files plus tshark on the host.
-  * VM-side (stays in orchestrator) - the live-process capture
-    (post_mortem: procdump + ReadProcessMemory) and the cdb dump triage
-    (windbg_post: mcp-windbg is localhost-bound on :9097). These COLLECT
-    evidence; they do not interpret it.
+  * VM-side (stays in orchestrator) - process snapshots and memory capture
+    only. WinDbg dump triage runs here against pulled files. Ntdll integrity
+    interpretation remains deferred until its reference can be collected and
+    checked off-box.
 
 The orchestrator records what it deferred so a reader can see the analysis ran
 elsewhere rather than never ran.
@@ -70,7 +70,19 @@ def enrich_pcap(dyn_dir: Path) -> dict:
         r = subprocess.run([sys.executable, str(script), str(dyn_dir)],
                            capture_output=True, text=True, timeout=300,
                            encoding="utf-8", errors="replace")
-        return {"rc": r.returncode, "stdout": (r.stdout or "")[-400:],
+        try:
+            intel = json.loads((dyn_dir / "network_intel.json").read_text(
+                encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            intel = {}
+        return {"ok": bool(r.returncode == 0 and intel.get("ok")),
+                "status": intel.get("status") or
+                         ("failed" if r.returncode else "unknown"),
+                "reason_code": intel.get("reason_code"),
+                "error": intel.get("error") or
+                         ((r.stderr or r.stdout or "tshark enrichment failed")[-400:]
+                          if r.returncode else None),
+                "rc": r.returncode, "stdout": (r.stdout or "")[-400:],
                 "host": "control-plane"}
     except Exception as e:
         return {"error": str(e)[:200]}
@@ -125,6 +137,15 @@ def analyst_next(dyn_dir: Path) -> dict:
         return {"error": f"{type(e).__name__}: {str(e)[:160]}"}
 
 
+def windbg_dump(dyn_dir: Path) -> dict:
+    """Analyze a pulled dump here; never fall back to a guest debugger."""
+    try:
+        from winre.windbg_post import analyze_dump
+        return analyze_dump(dyn_dir)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {str(e)[:160]}"}
+
+
 def run(dyn_dir: Path) -> dict:
     """Every host-side analysis step, best-effort and individually reported.
 
@@ -136,7 +157,8 @@ def run(dyn_dir: Path) -> dict:
     for name, fn in (("enrich_pcap", enrich_pcap), ("pcap_beacon", beacon),
                      ("procmon_post", procmon_catalog),
                      ("emu_diff", emulation_diff),
-                     ("analyst_next", analyst_next)):
+                     ("analyst_next", analyst_next),
+                     ("windbg_dump", windbg_dump)):
         try:
             out["steps"][name] = fn(dyn_dir)
         except Exception as e:                      # pragma: no cover

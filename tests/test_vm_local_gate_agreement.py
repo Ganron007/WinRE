@@ -1,19 +1,15 @@
-"""A VM-local run must not be blocked by its own gate.
+"""Marker operations need correct VM-local routing, but the guest cannot
+serve as its own independent control plane in enforce mode.
 
-snapshot_gate.marker_exists() / consume_marker() / create_marker() all reached
-the VM by SSH unconditionally. Run ON the VM - the orchestrator and `--driver
-local` paths - that is an SSH hop to itself with an empty hostname: it times out,
-marker_exists() returns None, and gate_status() reports "VM unreachable" and
-blocks a run on a VM whose marker file is sitting right there.
+snapshot_gate.marker_exists() / consume_marker() / create_marker() need local
+file routing when run inside the VM; otherwise they SSH to themselves with an
+empty hostname. Correct local marker routing is diagnostic/collection plumbing,
+not permission for the guest to attest itself clean.
 
-winre/vm_gate.py fixed this exact class for the VM gate (`_probe` reads the
-marker locally when `on_vm_repo_root()` says we are on the VM). snapshot_gate
-never got the same treatment, so the two gates disagreed about whether a VM was
-clean - the worst of the three possible outcomes, because one of them said
-"unreachable" and the other said "clean".
-
-These tests pin the fix in BOTH gates and, more importantly, pin that they
-agree - a control that checks only one gate is what let this ship.
+Both gates read the marker locally when `on_vm_repo_root()` says this process
+is inside Flare. Enforce mode still refuses guest-local execution/attestation
+because the ledger must live on the separate control plane. These tests pin
+local routing, agreement and the trust boundary.
 """
 import pathlib
 
@@ -26,7 +22,7 @@ from winre import vm_gate
 HERE = pathlib.Path(__file__).resolve().parents[1]
 
 
-def test_snapshot_gate_short_circuits_when_run_on_the_vm(tmp_path, monkeypatch):
+def test_marker_probe_short_circuits_when_run_on_the_vm(tmp_path, monkeypatch):
     monkeypatch.setattr(sg, "_VM_REPO_ROOT", HERE)
     # MARKER defaults to the absolute VM path, so an absolute local stand-in is
     # the branch a real VM-local run takes
@@ -108,3 +104,67 @@ def test_a_relative_marker_is_resolved_against_the_repo_root(tmp_path, monkeypat
     monkeypatch.setattr(sg, "MARKER", "clean_marker")
     (tmp_path / "clean_marker").write_text("created=probe", encoding="ascii")
     assert sg._local_marker_path(tmp_path) == tmp_path / "clean_marker"
+
+
+def test_guest_local_process_cannot_attest_its_own_clean_state(monkeypatch):
+    monkeypatch.setattr(sg, "_VM_REPO_ROOT", HERE)
+    result = sg.attest("verified_clean")
+    assert result["ok"] is False
+    assert "separate control plane" in result["error"]
+
+
+def test_guest_local_enforce_preflight_requires_remote_control_plane(
+        monkeypatch):
+    monkeypatch.setattr(sg, "_VM_REPO_ROOT", HERE)
+    monkeypatch.setattr(sg, "mode", lambda: "enforce")
+    result = sg.preflight("dynamic", sha="c" * 64, cfg={"host": "flare"})
+    assert result["allowed"] is False
+    assert "independent control-plane ledger" in result["error"]
+
+
+def test_control_plane_ledger_is_outside_sync_and_evidence_roots():
+    from winre import remote_driver
+    assert sg.LEDGER == remote_driver.REPO / "internal" / "_vm_state.json"
+    assert sg.LEDGER.parent != remote_driver.LOCAL_LOGS
+    sync_script = (HERE / "ops" / "sync_to_flare.ps1").read_text(
+        encoding="utf-8")
+    assert '"internal"' in sync_script
+
+
+def test_marker_alone_does_not_override_dirty_control_plane_ledger(monkeypatch):
+    """A sample can recreate the guest marker; only operator attestation
+    resets the independent control-plane ledger.
+    """
+    monkeypatch.setattr(sg, "mode", lambda: "enforce")
+    monkeypatch.setattr(sg, "hypervisor_cfg", lambda: None)
+    monkeypatch.setattr(sg, "marker_exists", lambda *a, **k: True)
+    monkeypatch.setattr(sg, "vm_state", lambda: {
+        "last_action": "detonated", "sha": "a" * 64})
+    status = sg.gate_status()
+    assert status["blocked"] is True
+    assert status["marker"] is True
+    assert status["ledger_clean"] is False
+    assert "ledger is not attested clean" in status["reason"]
+
+
+def test_missing_control_plane_ledger_is_not_clean(monkeypatch):
+    monkeypatch.setattr(sg, "mode", lambda: "enforce")
+    monkeypatch.setattr(sg, "hypervisor_cfg", lambda: None)
+    monkeypatch.setattr(sg, "marker_exists", lambda *a, **k: True)
+    monkeypatch.setattr(sg, "vm_state", lambda: {"ledger_error": "missing"})
+    status = sg.gate_status()
+    assert status["blocked"] is True
+    assert status["ledger_clean"] is False
+
+
+def test_enforce_refuses_if_dirty_ledger_cannot_be_persisted(monkeypatch):
+    monkeypatch.setattr(sg, "mode", lambda: "enforce")
+    monkeypatch.setattr(sg, "hypervisor_cfg", lambda: None)
+    monkeypatch.setattr(sg, "marker_exists", lambda *a, **k: True)
+    monkeypatch.setattr(sg, "consume_marker", lambda *a, **k: True)
+    monkeypatch.setattr(sg, "vm_state", lambda: {"last_action": "verified_clean"})
+    monkeypatch.setattr(sg, "record", lambda *a, **k: {
+        "last_action": "detonated", "persisted": False})
+    result = sg.preflight("dynamic", sha="b" * 64)
+    assert result["allowed"] is False
+    assert "ledger could not be persisted" in result["error"]

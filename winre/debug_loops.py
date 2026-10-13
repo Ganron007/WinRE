@@ -354,6 +354,111 @@ def ep_break(sample: str, xc: X64DbgClient | None = None,
             "module": _parse_state(xc.get_state()).get("currentModule")}
 
 
+def run_debug_window(xc: X64DbgClient | None = None, *, seconds: int = 30,
+                     poll_s: float = 1.0, max_pauses: int = 5) -> dict:
+    """Continue the current target for a bounded observation window.
+
+    The agentic-dbg pipeline starts at an x64dbg pause (the original entry
+    point or an unpack OEP), while run-scoped ETW is already collecting
+    process starts/stops. Clear the entry/OEP breakpoints, resume the target,
+    service a small number of later pauses, then stop it before the observer
+    is closed. This captures target and child-process lifetimes without
+    pretending ETW covers file, registry, network, or memory behavior.
+    """
+    xc = xc or X64DbgClient()
+    try:
+        requested = max(1, min(int(seconds), 60))
+        poll = max(0.1, min(float(poll_s), 5.0))
+        pause_limit = max(0, min(int(max_pauses), 10))
+    except (TypeError, ValueError):
+        return {"ok": False, "status": "failed",
+                "reason_code": "invalid_window", "error": "invalid debug-window bounds"}
+
+    initial = _parse_state(xc.get_state())
+    if (not initial or initial.get("isDebugging") == "false"
+            or (initial.get("status") or "").upper() == "NO_TARGET"):
+        return {"ok": False, "status": "failed",
+                "reason_code": "no_debug_target",
+                "error": "x64dbg has no active target to resume",
+                "initial_state": initial}
+
+    cleared = xc.call("DeleteAllBreakpoints")
+    if not cleared.get("ok"):
+        return {"ok": False, "status": "failed",
+                "reason_code": "breakpoint_cleanup_failed",
+                "error": str(cleared.get("error") or "could not clear entry breakpoints")[:240],
+                "initial_state": initial}
+
+    run = {"ok": True}
+    if initial.get("isRunning") != "true":
+        run = xc.run()
+        if not run.get("ok"):
+            return {"ok": False, "status": "failed",
+                    "reason_code": "resume_failed",
+                    "error": str(run.get("error") or "x64dbg did not resume the target")[:240],
+                    "initial_state": initial}
+
+    started = time.monotonic()
+    deadline = started + requested
+    pauses: list[dict] = []
+    exited = False
+    last_state = initial
+    while time.monotonic() < deadline:
+        time.sleep(min(poll, max(0.0, deadline - time.monotonic())))
+        last_state = _parse_state(xc.get_state())
+        status = (last_state.get("status") or "").upper()
+        if (last_state.get("isDebugging") == "false" or status == "NO_TARGET"):
+            exited = True
+            break
+        if last_state.get("isRunning") == "false":
+            pauses.append({"address": last_state.get("currentAddress"),
+                           "module": last_state.get("currentModule"),
+                           "status": last_state.get("status")})
+            if len(pauses) > pause_limit:
+                break
+            run = xc.run()
+            if not run.get("ok"):
+                return {"ok": False, "status": "failed",
+                        "reason_code": "resume_after_pause_failed",
+                        "error": str(run.get("error") or "x64dbg did not continue after a pause")[:240],
+                        "initial_state": initial, "pause_count": len(pauses),
+                        "pauses": pauses}
+
+    observed_s = round(min(float(requested), max(0.0, time.monotonic() - started)), 2)
+    final = _parse_state(xc.get_state())
+    final_status = (final.get("status") or "").upper()
+    target_alive = (final.get("isDebugging") != "false"
+                    and final_status != "NO_TARGET")
+    stop: dict | None = None
+    if target_alive:
+        stop = xc.stop_debug()
+        # StopDebug may acknowledge before Windows publishes the process-stop
+        # event. Poll briefly so collection does not close too early.
+        for _ in range(5):
+            time.sleep(0.5)
+            final = _parse_state(xc.get_state())
+            final_status = (final.get("status") or "").upper()
+            target_alive = (final.get("isDebugging") != "false"
+                            and final_status != "NO_TARGET")
+            if not target_alive:
+                exited = True
+                break
+    if target_alive:
+        return {"ok": False, "status": "failed",
+                "reason_code": "target_stop_unconfirmed",
+                "error": "debug window ended but x64dbg still reports an active target",
+                "requested_seconds": requested, "observed_seconds": observed_s,
+                "pause_count": len(pauses), "pauses": pauses,
+                "initial_state": initial, "final_state": final,
+                "stop": stop}
+    return {"ok": True, "status": "completed",
+            "reason_code": "completed", "requested_seconds": requested,
+            "observed_seconds": observed_s, "exit_observed": bool(exited),
+            "pause_count": len(pauses), "pauses": pauses,
+            "initial_state": initial, "final_state": final,
+            "stopped_after_window": bool(stop and stop.get("ok"))}
+
+
 # ---------------------------------------------------------------------------
 # Scenario 2/3 — OEP via execute-BP on the original .text region (UPX etc)
 # ---------------------------------------------------------------------------

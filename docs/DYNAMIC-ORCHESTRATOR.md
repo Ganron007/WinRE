@@ -1,102 +1,100 @@
-# Dynamic Orchestrator — FlareVM
+# Dynamic Orchestrator
 
-> **Status:** implemented (local-first) — `winre/orchestrator.py` drives `winre/flare_dynamic_job.ps1`, which stages Frida + Procmon + FakeNet-NG + pe-sieve.
-> **Audience:** operators (detonation) and integrators.
+> **Scope:** dynamic collection on the FlareVM and the standalone orchestrator
+> interface. **Audience:** operators and integrators.
 
-## 1. Flow
-
-```
-host: scp sample → C:\samples\foo.exe + C:\WinRE\orchestrator.py --sample C:\samples\foo.exe --max-seconds 45 [--pesieve]
-  → orchestrator.py (Flare local)
-     ├─ detect fmt: PE vs ELF vs doc (via lief/magic)
-     ├─ if REVENG_DYNAMIC_SKIP=1 → write META.json {skipped:true} + exit 0
-     ├─ start FakeNet-NG → C:\WinRE\logs\<sha>\network_raw\fakenet.log
-     ├─ start Procmon → procmon.exe /BackingFile C:\WinRE\logs\<sha>\procmon.pcap
-     ├─ spawn frida_api_trace.py --target C:\samples\foo.exe --apis <hooklist> → frida_trace.jsonl
-     ├─ wait --max-seconds (default 45; with --adaptive this is the CAP and
-     │   the Frida trace stops early after --idle-stop-seconds without new
-     │   events — effective window recorded in META.window), optional
-     │   PE-sieve mid-run if --pesieve
-     ├─ stop Procmon → procmon.csv, tshark enrich → procmon_summary.json + network_intel.json
-     ├─ post-analysis (KB 2026-09-07): procmon_post (persistence catalog +
-     │   behavior_timeline.csv + spoof suspects), pcap_beacon (cadence/UA/
-     │   HTTP schema), post_mortem (procdump -ma harvest + ntdll integrity +
-     │   process snapshot), windbg_post (mcp-windbg !analyze -v/.ecxr/k/lm
-     │   over in-run dumps) → procmon_summary.json extended, network_intel.json
-     │   +beacon_analysis, post_mortem.json, windbg_analysis.json
-     ├─ suspended-process monitor: pe-sieve dump of every new sample process
-     │   instance (Early-Bird/APC capture incl. CREATE_SUSPENDED children)
-     ├─ input jiggle: synthetic mouse movement during the run (interaction gates)
-     ├─ optional x64dbg-MCP DumpModule → x64dbg/dump/
-     ├─ Mallcat triage → malcat-triage.json (if Malcat installed)
-     └─ emit ANALYST-NEXT.md (emit_analyst_next.py) + META.json
-  → SMB copy → \\<remnux-host>\opt\samples\corpus\<sha>\logs\<sha>\dynamic\
-```
-
-ELF on Flare is rare — `elf_dynamic_job.sh` handles `readelf/objdump` + local strace; Windows path is default.
-
-## 2. CLI
+The pipeline is the preferred entry point for dynamic analysis. It binds the
+detonation request to a sample hash, run ID, execution plan, evidence section,
+and final audit. Dynamic analysis is opt-in and requires the separate remote
+driver so that post-run interpretation stays on the control plane.
 
 ```powershell
-python C:\WinRE\winre\orchestrator.py C:\samples\foo.exe --max-seconds 45
-python C:\WinRE\winre\orchestrator.py C:\samples\foo.exe --max-seconds 60 --pesieve
-# adaptive window: 150s cap, stop 10s after the last Frida event
-python C:\WinRE\winre\orchestrator.py C:\samples\foo.exe --max-seconds 150 --adaptive --idle-stop-seconds 10
-python C:\WinRE\winre\orchestrator.py C:\samples\foo.exe --skip  # writes META skipped
-
-# local mode (run on Flare, no SSH hop — preferred, Phase 7)
-python C:\WinRE\winre\orchestrator.py C:\samples\foo.exe --max-seconds 45 --mode local
-# or via env:
-$env:WINRE_ORCHESTRATOR_MODE = "local"
-python C:\WinRE\winre\orchestrator.py C:\samples\foo.exe --max-seconds 45
-
-# direct job (inside VM only):
-powershell -ExecutionPolicy Bypass -File C:\WinRE\winre\flare_dynamic_job.ps1 -Sample C:\samples\foo.exe -OutDir C:\WinRE\logs\<sha>\dynamic -MaxSeconds 45
+python -m winre.pipeline "C:\samples\sample.exe" `
+  --driver remote --mode agentic --dynamic --max-seconds 150
 ```
 
-Env flags (same as `dynamic_run_v2.py:317`):
+The dynamic pass runs after static analysis and writes to
+`logs/<sha256>/dynamic/dynamic/`. The outer `dynamic/` is the pack section; the
+inner `dynamic/` contains the collection-stage evidence. See
+[Pipeline](PIPELINE.md) for run separation and
+[Evidence Packs](EVIDENCE.md) for the full layout.
 
-| Flag | Effect |
-|------|--------|
-| `REVENG_DYNAMIC_SKIP=1` | write META skipped, exit 0 |
-| `REVENG_DYNAMIC_PESIEVE=1` | run pe-sieve mid-detonation |
-| `WINRE_ORCHESTRATOR_MODE={ssh,local}` | default orchestrator mode (Phase 7) |
-| `REVENG_DYNAMIC_X64DBG=0` | skip x64dbg MCP OEP/dump pass |
+## Collection flow
 
-## 3. Artifacts
+The orchestrator stages the requested sample and job configuration on the
+guest, runs the PowerShell collection job, and returns the results to the
+control plane. Collection may include FakeNet-NG, Procmon, Frida, and optional
+memory or debugger tooling. Deterministic host-side helpers summarize and
+validate returned artifacts. A collector that fails or produces incomplete
+output is recorded as such; an empty output is not proof that no behavior
+occurred.
 
-See the dynamic artifact contract in [`EVIDENCE.md`](EVIDENCE.md). Key:
+The run records the requested and effective collection window, stop reason,
+run ID, sample identity, and source coverage. The default maximum window is
+150 seconds. `--stop-on` defaults to `network,file`; `--stop-on-settle` keeps
+collection active after the gate fires. `--adaptive` enables the additional
+idle-based stop and should be used with care because delayed behavior can look
+idle.
 
-| File | Source |
-|------|--------|
-| `frida_trace.jsonl` | `tools/frida_api_trace.py` hook set (CreateFileW, VirtualAlloc, etc. `dynamic/README.md:20`) |
-| `procmon.csv` | `C:\tools\sysinternals\Procmon64.exe /Quiet /Minimized /BackingFile` |
-| `procmon_summary.json` | `winre/summarize_dynamic.py` (filters to process `foo.exe`) + `winre/procmon_post.py` (persistence families, spoofing_suspects, behavior timeline) |
-| `network_intel.json` | `winre/enrich_pcap_tshark.py` over `network_raw/*.pcap` |
-| `memory/pe_sieve_report.json` | `C:\ProgramData\chocolatey\bin\pe-sieve.exe /pid <pid> /json` |
-| `malcat-triage.json` | `tools/malcat_win.py` (if licensed) |
-| `x64dbg/dump/*.dmp` | `DumpModule` via `http://127.0.0.1:9094/` |
-| `META.json` → `x64dbg_dump` | terminal OEP/dump record `{attempted, ok, reason, dump_path?, oep?, module?, detect_ok?, analyze_ok?}` — always present, so a missing dump is never silent (the pre-run META carries `running=true` if the orchestrator died mid-run) |
-| `META.json` → `window` | detonation-window telemetry `{requested_s, effective_s, adaptive, idle_stop_s, stop_reason}` (also in `META.job.json`; Frida writes `frida_trace.jsonl.run.json`) |
-| `windbg_analysis.json` | `winre/windbg_post.py` via mcp-windbg (`http://127.0.0.1:9097/mcp/`) over `memory/*.dmp`; passive, honest skip when no dump/server |
+## Standalone interface
 
-## 4. Helpers (vendored `winre/`)
+The lower-level `winre.orchestrator` entry point supports `ssh` and `local`
+collection modes. The standalone path is useful for orchestrator development
+and recovery; use the pipeline for normal analysis and audited runs.
 
-| Script | Purpose |
-|--------|---------|
-| `summarize_dynamic.py` | Procmon CSV → `procmon_summary.json` (file/reg/proc/net groups) |
-| `procmon_post.py` | Procmon CSV → persistence catalog (Run key/service/task/WMI/sideload/drop), `behavior_timeline.csv`, spoofing suspects |
-| `pcap_beacon.py` | pcaps → `network_intel.json.beacon_analysis` (beacon cadence/jitter, HTTP URIs/UAs, DNS) |
-| `post_mortem.py` | procdump -ma harvest + ntdll-integrity (unhooking) + process snapshot → `post_mortem.json`, `memory/*.dmp` |
-| `windbg_post.py` | mcp-windbg dump triage (`!analyze -v`, `.ecxr`, `k`, `lm`, `vertarget` + exception/module highlights) → `windbg_analysis.json`; also exposed to the agent as `windbg_analyze_dump` |
-| `enrich_pcap_tshark.py` | `tshark -r packets.pcap -T json` → `network_intel.json` |
-| `emit_analyst_next.py` | `ANALYST-NEXT.md` template (next BPs, strings to chase) |
-| `doc_triage_v2.py` | Office doc triage (OLE/Macro) — not detonation |
+```powershell
+# From the control plane; inspect the plan without starting collection.
+python -m winre.orchestrator "C:\samples\sample.exe" --mode ssh --dry-run
 
-## 5. Snapshot
+# Standalone remote collection (requires Flare SSH configuration).
+python -m winre.orchestrator "C:\samples\sample.exe" `
+  --mode ssh --max-seconds 150 --pesieve
+```
 
-Orchestrator does NOT auto-revert — operator runs `Restore-VMSnapshot clean-*` after `META.json` + SMB copy (see [`OPERATE.md`](OPERATE.md) - snapshot gate / baseline recovery).
+The standalone CLI accepts a SHA-256 with `--sample <path>` when the source
+file is not supplied positionally. Its default mode is `ssh` unless
+`WINRE_ORCHESTRATOR_MODE` overrides it. Other options include `--apis`,
+`--dll-entry`, `--adaptive`, `--idle-stop-seconds`, `--stop-on`,
+`--stop-on-settle`, `--no-deploy`, `--force`, and `--run-id`. Check
+`python -m winre.orchestrator --help` for the exact interface at your pinned
+revision.
 
-## References
+`--mode local` runs collection on the Windows guest. The guest is not a
+trusted analysis plane after sample execution; retrieve the output and perform
+interpretation on the control plane. A guest-local process cannot attest its
+own clean state in the independent control-plane ledger.
 
-- `winre/orchestrator.py`, `winre/flare_dynamic_job.ps1`, `winre/orchestrator.py` (emit_analyst_next).
+## Outputs and safety
+
+The collection job produces source artifacts such as Frida traces, Procmon
+logs, network captures, process snapshots, and memory dumps when those sources
+are requested and available. The pipeline places returned files under the
+run's pack section and writes stage and pack manifests. Manifests distinguish
+complete, partial, failed, unavailable, not-applicable, and not-requested
+sources. See [Evidence Packs](EVIDENCE.md) for details.
+
+WinRE does not restore hypervisor snapshots. After a detonation, restore the
+approved clean snapshot, verify the guest marker, and attest the clean state
+from the separate control plane before another run. Keep the VM on an isolated
+lab network; FakeNet-NG does not replace hypervisor isolation or firewall
+controls.
+
+The standard Windows job starts FakeNet-NG in the guest. Its configuration
+temporarily points DNS at the guest-side sink and writes guest-side PCAPs,
+which the remote driver returns with the run pack. The job does not start an
+external DNS or capture service on the control plane. Pointing the guest's DNS
+at the control plane alone will not capture all network flows; an external
+capture path needs a simulator bound to the private analysis interface, a
+verified route through that interface, and a benign packet-visibility check.
+Keep the execution guest on its private analysis network after provisioning.
+The remote control plane may have LLM or Internet access, but that does not
+make it a gateway for the guest. Changing only the guest DNS address changes
+where lookups go; it does not route subsequent TCP or UDP traffic through the
+control plane. Keep FakeNet-NG guest-side unless an explicit, tested gateway
+or mirrored-capture design is deployed.
+
+## Related documentation
+
+- [Operate](OPERATE.md): snapshot gate, recovery, UI, and troubleshooting.
+- [SSH Contract](SSH-CONTRACT.md): transport behavior and remote tool calls.
+- [Pipeline](PIPELINE.md): normal audited execution path.

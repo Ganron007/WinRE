@@ -73,21 +73,24 @@ def test_only_create_apis_reach_the_access_mask_branch():
         f"arguments")
 
 
-def test_a_real_write_family_call_is_still_accepted():
+def test_a_write_family_call_without_return_is_only_an_attempt():
     f = F.dynamic_findings(pack([
         {"type": "call", "api": "WriteFile",
          "args": ["0xafc", "0x1000", "0x200"], "decoded": {"path": DROP}},
     ]), sha=SHA)
-    assert f["findings"]["drops"], "the write-family proof stopped working"
-    assert f["findings"]["drops"][0]["path"] == DROP
+    assert f["findings"]["drops"] == [], (
+        "a call without a return was reported as a completed file effect")
+    assert any(e["path"] == DROP for e in f["findings"]["unverified_opens"])
 
 
-def test_a_real_access_mask_is_still_accepted():
+def test_an_access_mask_without_effect_is_only_write_intent():
     f = F.dynamic_findings(pack([
         {"type": "call", "api": "CreateFileW",
          "args": ["0x1", "0x40000000"], "decoded": {"arg0": DROP}},
     ]), sha=SHA)
-    assert f["findings"]["drops"], "the access-mask proof stopped working"
+    assert f["findings"]["drops"] == [], (
+        "write access intent was reported as a completed file effect")
+    assert any(e["path"] == DROP for e in f["findings"]["unverified_opens"])
 
 
 def test_the_two_families_are_separate_sets():

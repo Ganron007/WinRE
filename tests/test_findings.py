@@ -104,19 +104,24 @@ def _is_link_local(host: str) -> bool:
 
 @needs_real
 def test_the_real_packs_now_carry_the_evidence_they_always_had():
-    """The defect: b108 dropped b.wnry/taskdl.exe and the report said nothing."""
+    """Legacy write intents remain visible, without claiming completed drops."""
     f = findings.dynamic_findings(LOGS / B108 / "agentic", sha=B108)
     assert f["ok"] is True
-    assert f["verdict"]["level"] == findings.MALICIOUS
-    drops = [d["path"].lower() for d in f["findings"]["drops"]]
-    assert any("taskdl" in p or "taskse" in p for p in drops)
+    assert f["verdict"]["level"] != findings.MALICIOUS
+    observed = [d["path"].lower() for d in f["findings"]["unverified_opens"]]
+    assert any("taskdl" in p or "taskse" in p for p in observed)
+    assert not any("taskdl" in d["path"].lower() or "taskse" in d["path"].lower()
+                   for d in f["findings"]["drops"])
 
 
 @needs_real
 def test_persistence_in_the_startup_folder_is_named():
     f = findings.dynamic_findings(LOGS / B106 / "agentic", sha=B106)
-    assert "persistence:startup-path" in f["verdict"]["basis"]
-    assert any(d.get("persistence_location") for d in f["findings"]["drops"])
+    startup = "\\startup\\"
+    observed = [d["path"].lower() for d in f["findings"]["unverified_opens"]]
+    assert any(startup in p for p in observed)
+    assert "persistence:startup-path" not in f["verdict"]["basis"]
+    assert not any(d.get("persistence_location") for d in f["findings"]["drops"])
 
 
 @needs_real
@@ -144,16 +149,14 @@ def test_c2_hosts_are_found_and_os_noise_is_not():
 
 
 @needs_real
-def test_real_c2_is_still_found_after_the_exclusions():
-    """The paired control: excluding CA/CDN and multicast must not blind the
-    engine. b109's capture contains a DGA domain - an algorithmically generated
-    name with no legitimate registrant - which is C2 by construction.
-    """
+def test_real_dga_from_vm_wide_capture_stays_an_unattributed_lead():
+    """A suspicious domain still needs process/flow attribution to become C2."""
     f = findings.dynamic_findings(LOGS / B109 / "agentic", sha=B109)
     hosts = {c["host"] for c in f["findings"]["network"]["c2"]}
-    assert any("iuqerfsodp9ifjaposdfjhgosurijfaewrwergwea" in h for h in hosts), (
-        f"a DGA domain was lost by the exclusions: {hosts}")
-    assert f["verdict"]["level"] in (findings.MALICIOUS, findings.SUSPICIOUS)
+    leads = {c["host"] for c in f["findings"]["network"]["leads"]}
+    assert not hosts
+    assert any("iuqerfsodp9ifjaposdfjhgosurijfaewrwergwea" in h for h in leads), (
+        f"a DGA lead was lost: {leads}")
 
 
 @needs_real
@@ -198,7 +201,8 @@ def test_build_for_sample_returns_one_entry_per_mode(tmp_path):
 def test_compose_reads_the_mode_root():
     """compose must read <mode>/findings.json, not the stage subdir."""
     src = pathlib.Path("winre/compose.py").read_text(encoding="utf-8")
-    assert 'Path(logs_dir) / sha / m / "findings.json"' in src
+    assert "root = Path(logs_dir) / sha / m" in src
+    assert 'f = root / "findings.json"' in src
 
 
 def test_host_tools_are_consulted_and_absent_ones_become_limitations():

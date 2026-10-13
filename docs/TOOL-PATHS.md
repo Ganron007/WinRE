@@ -21,9 +21,7 @@ the air-gapped VM.
 - **`[ours]` = everything else**: either the FlareVM base ships it or
   `setup-flarevm.ps1` installs and configures it. **Nothing is skipped.** A
   missing tool we own is a `FAIL`, not a warning. The table above tags every
-  row; the rows that used to say `[user]` for a tool the census requires (Ghidra,
-  goresym, ILSpy CLI) were corrected on 2026-09-28 after the code audit found
-  the doc contradicting the census.
+  row according to the current setup and verification contract.
 - **The SQL and MCP wiring around the user's binaries is ours too.** If IDA Pro
   is installed, `idasql.exe` must be discoverable and the live SQL gate must
   pass. If Malcat is installed, its MCP must answer an `initialize` request on
@@ -75,7 +73,7 @@ lare-floss pip module (installed offline from staged wheels) or C:\\Tools\\FLOSS
 | Wireshark/tshark `[base]` | `C:\Program Files\Wireshark\tshark.exe` | — | pcap enrich + beacon analysis | network intel degrades |
 | 7-Zip `[base]` | `C:\Program Files\7-Zip\7z.exe` (or PATH) | `WINRE_7Z` | DFIR-Nexus case packs | case pack falls back to .zip |
 | WinDbg (Store/classic) `[base]` | — | — | mcp-windbg dump analysis (`windbg_analysis.json` + `windbg_analyze_dump` agent tool) | windbg step skips honestly |
-| VMWare Tools / hypervisor `[user]` | — | `WINRE_HYPERVISOR`, `WINRE_VM_PATH`, `WINRE_SNAPSHOT` | L2 snapshot auto-restore | manual snapshot discipline (gate `enforce` default; `observe` override) |
+| VMWare Tools / hypervisor `[user]` | — | `WINRE_HYPERVISOR`, `WINRE_VM_PATH`, `WINRE_SNAPSHOT` | reported snapshot identity only; restore is operator-owned | manual snapshot restore plus control-plane attestation (gate `enforce` default; `observe` override) |
 
 ## Python deps (VM, `C:\Python313`)
 

@@ -16,12 +16,15 @@ condition this whole redesign exists to prevent, so it has to be a gate:
     do (revert, then confirm);
   * the refusal is recorded in the pack as a non-green audit, never by deleting
     the previous run's evidence;
-  * a *non*-executing mode (static / agentic) may still run on a dirty VM
-    without executing anything: it reads files and calls no debugger. That is
-    safe, and forbidding it would make every static run require a revert.
+  * every pipeline mode requires a guest marker plus a separate
+    control-plane ledger attestation. Static and agentic modes still invoke
+    guest tools; read-only use does not prove those tools survived a prior
+    sample intact.
 
-Boundary, stated plainly: static-on-dirty is safe *because it does not execute
-the sample*. Debug and dynamic both execute. Those are what the gate blocks.
+Boundary, stated plainly: enforce mode requires the guest marker and a
+separate control-plane ledger attestation. The marker is guest-writable, so it
+cannot prove cleanliness by itself. The product never restores a hypervisor
+snapshot, and a guest-local process cannot supply the independent attestation.
 """
 from __future__ import annotations
 
@@ -37,11 +40,7 @@ CLEAN_MARKER = ".clean_snapshot"
 
 
 def vm_is_clean(cfg: dict) -> bool:
-    """Is the VM's clean marker present?
-
-    Presence-only: the marker's content is audit-only, so an empty marker
-    created by hand is still valid.
-    """
+    """Is the VM's clean marker present? This is only one gate input."""
     try:
         p = _probe(cfg)
         return bool(getattr(p, "returncode", None) == 0
@@ -81,13 +80,13 @@ def _probe(cfg: dict):
     it because they stub ssh_run and so validated my own mistake.
     """
     # Running ON the VM (the orchestrator / `--driver local` path), the marker
-    # is a local file and an SSH hop would be ssh-to-self with an empty
-    # hostname - which times out, and vm_is_clean() fails closed, so EVERY
-    # VM-local run was blocked by its own gate. Read it directly there.
+    # is a local file and an SSH hop would be ssh-to-self. Read it directly for
+    # accurate diagnostics, but dirty_blocker still refuses because the local
+    # ledger cannot act as an independent control-plane attestation.
     local = on_vm_repo_root()
     if local is not None:
-        # This process is the VM control plane, so the marker is a local file
-        # and no hop is needed.
+        # This process is running inside the guest, so the marker is local and
+        # no SSH hop is needed for this diagnostic probe.
         class _Local:
             returncode = 0
             stdout = "True" if (local / CLEAN_MARKER).is_file() else "False"
@@ -102,27 +101,54 @@ def _probe(cfg: dict):
 def dirty_blocker(cfg: dict) -> dict | None:
     """Why this run cannot start, or None when the VM is clean.
 
+    Enforce requires a guest marker plus the independent control-plane ledger.
+    A process running inside Flare cannot use its own guest-local ledger as an
+    independent trust anchor, so it must hand execution to the remote driver.
     Returns a record with `reason`, `last_action` and `how_to_clear` so the CLI
     can print one clear message rather than "it broke".
     """
-    if vm_is_clean(cfg):
-        return None
+    local = on_vm_repo_root()
     last = None
+    state = {}
     try:
         from winre import snapshot_gate
-        last = (snapshot_gate.vm_state() or {}).get("last_action")
+        state = snapshot_gate.vm_state() or {}
+        last = state.get("last_action")
     except Exception:
-        last = None
+        state = {"ledger_error": "control-plane ledger could not be read"}
+    marker = vm_is_clean(cfg)
+    if local is not None:
+        reason = ("WinRE is running inside the Flare guest, so its local "
+                  "ledger cannot independently attest that the guest is "
+                  "clean. Run this pipeline from the separate control plane "
+                  "with --driver remote.")
+    elif marker and last in ("restored", "verified_clean"):
+        return None
+    elif marker:
+        reason = ("The guest clean marker is present, but the independent "
+                  "control-plane ledger is not attested clean "
+                  f"(last_action={last!r}, ledger={state.get('ledger_error')!r}). "
+                  "A guest process can recreate its marker; restore the "
+                  "snapshot and attest from the control plane.")
+    else:
+        reason = ("The analysis VM has no verifiable clean marker. Its state "
+                  "or analysis tools may have been modified by a previous "
+                  "sample, so no guest-side tool may run until the operator "
+                  "restores and attests a verified clean snapshot.")
     return {
-        "reason": "VM is dirty: a previous run executed a sample on it and the "
-                  "clean marker is gone. Nothing may run on it until it is "
-                  "reverted.",
+        "reason": reason,
         "last_action": last,
+        "marker_present": marker,
+        "ledger_clean": last in ("restored", "verified_clean"),
+        "ledger_error": state.get("ledger_error"),
         "how_to_clear": [
-            "revert the FlareVM to the GOLD snapshot in VMware, then confirm",
+            "revert the FlareVM to the GOLD snapshot in VMware",
             "WinRE does not revert the VM itself - that is deliberately not a "
             "product feature",
-            "re-arm the marker: python -m winre.snapshot_gate marker-create",
+            "from the separate control plane, verify the restored marker and "
+            "attest it: python -m winre.snapshot_gate attest --action verified_clean",
+            "use --driver remote; a guest-local ledger is not an independent "
+            "trust boundary",
         ],
     }
 
@@ -131,14 +157,13 @@ def require_clean_vm(cfg: dict, *, mode: str, agentic_dbg: bool = False,
                      dynamic: bool = False) -> tuple[bool, dict | None]:
     """Gate a run. (ok, blocker).
 
-    Static and agentic do NOT execute the sample, so they may run on a dirty VM
-    - requiring a revert for them would mean a revert before every read-only
-    analysis. Debug and dynamic execute, so they may not.
+    Every pipeline mode invokes guest-side analysis tools. Read-only use does
+    not protect those tools from prior sample tampering, so static and agentic
+    are gated too. Enforce requires both the guest marker and a clean ledger
+    on the separate control plane; this function never restores a snapshot.
     """
-    executes = dynamic or agentic_dbg
-    if not executes:
-        return True, None
-    return (not dirty_blocker(cfg)), dirty_blocker(cfg)
+    blocker = dirty_blocker(cfg)
+    return blocker is None, blocker
 
 
 def record_refusal(pack, blocker: dict | None) -> None:

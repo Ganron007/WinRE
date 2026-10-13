@@ -7,14 +7,17 @@ FlareVM. Read together with [`INSTALL.md`](INSTALL.md).
 
 ## Lab topology
 
-WinRE uses a two-plane split: an **operator host** (internet, LLM, UI,
-reporting) drives an **isolated FlareVM** (sample execution, no internet)
-over SSH. The VM reaches nothing outside the lab; network traffic is sunk
-by FakeNet-NG during detonation.
+WinRE uses a two-plane split: a **control plane** (LLM connection, UI,
+reporting, and remote driver) drives a **FlareVM** (Windows tooling and sample
+execution) over SSH. After initial deployment, keep Flare on a private,
+non-routed analysis network. The standard Windows dynamic job starts
+FakeNet-NG inside Flare; FakeNet supplies its DNS sink and guest-side packet
+captures. FakeNet does not replace hypervisor isolation or prove that every
+route is contained.
 
 ```
 +--------------------------+         SSH / HTTP          +---------------------------+
-|  control plane (host)    |  -------------------------> |  FlareVM (Windows 10/11)  |
+|  control plane (host)    |  -------------------------> |  FlareVM (Windows 10)    |
 |  - winre/ pipeline code  |   OpenSSH (22)              |  - C:\WinRE (repo copy)   |
 |  - .env (LLM keys)       |   MCP HTTP (see below)      |  - Ghidra / IDA / Malcat  |
 |  - UI :5001              |                             |  - x64dbg + MCP plugin    |
@@ -30,8 +33,8 @@ binds all interfaces.
 
 ## Control plane (operator host)
 
-- **Windows 10/11** with OpenSSH client (`ssh`, `scp`) and Python **3.10+**
-  (3.13 tested)
+- **Windows 10/11 or Linux** with OpenSSH client (`ssh`, `scp`) and Python
+  **3.10+** (3.13 tested)
 - Python packages: `langchain-openai`, `langgraph`, `langchain-core`,
   `pydantic` (see `.env.template` for LLM config)
 - An **OpenAI-compatible LLM endpoint** (model, base URL, API key) for the
@@ -42,7 +45,9 @@ binds all interfaces.
 
 ## FlareVM (execution VM)
 
-Start from a **Windows 10/11 VM on an isolated/host-only network**.
+Start from a **Windows 10 VM on an isolated/host-only network**. Windows 10
+is the documented execution target; Windows 11 detonation support has not
+been established.
 
 ### Install order matters (the VM is air-gapped in operation)
 
@@ -50,13 +55,11 @@ Start from a **Windows 10/11 VM on an isolated/host-only network**.
    installer** (`install.ps1`) — it brings most required free tools
    (x64dbg, FakeNet-NG, Sysinternals, pe-sieve/hollows_hunter, Python).
    Install Ghidra now too, and let pip pull the Python deps.
-   > **Recommended:** use the WinRE-patched installer in
-   > [`install/flarevm/`](../install/flarevm/README.md) with the fixture
-   > `config.xml` — a real default install (Sep 2026) finished with ~60/193
-   > packages failed (pinned-dependency cascades + dead upstream URLs) and
-   > FlareVM now ships the *Store* WinDbg (no classic `cdb.exe`, which WinRE
-   > needs). Vanilla FLARE-VM works too: run `flarevm-postfix.ps1` from the
-   > same folder afterwards, or just let step 3 report what is missing.
+   > **Recommended:** use the WinRE-patched installer and fixture in
+   > [`install/flarevm/`](../install/flarevm/README.md), then run the WinRE
+   > verification script. Vanilla FLARE-VM can also be used; apply
+   > `flarevm-postfix.ps1` if the required Windows debugging components are
+   > missing.
 2. **Air-gap**: switch the VM to host-only networking.
 3. **Run `install/setup-flarevm.ps1`** on the VM: it *ensures* the complete
    required set exists (verifies every tool, builds the x64dbg MCP plugin
@@ -127,10 +130,19 @@ choco install temurin21 -y
 
 ## Safety requirements
 
-- The FlareVM must be **isolated** (host-only or firewalled NAT). Detonation
-  traffic is sunk by FakeNet; nothing should reach real infrastructure.
+- After provisioning, attach Flare to a private, non-routed network and verify
+  that it has no path to the public Internet. Do not rely on FakeNet-NG to
+  contain egress; enforce the boundary at the hypervisor and network layer.
+- The normal Windows detonation path runs FakeNet-NG inside Flare and collects
+  its guest-side PCAPs. It does not configure a DNS service or start a packet
+  capture worker on the control plane. Pointing Flare's DNS at the control
+  plane alone does not make all sample traffic visible there; an external
+  simulator/capture path needs an explicit route, interface binding, and a
+  benign visibility test before detonation.
 - **Snapshot discipline**: after setup creates `C:\WinRE\.clean_snapshot`,
-  take/update the VM snapshot. Restores re-create the marker, which is what
-  the snapshot gate consumes before any execution.
+  take/update the VM snapshot. After restoring it, verify the guest and attest
+  the clean state from the separate control plane with
+  `python -m winre.snapshot_gate attest --action verified_clean`. The guest
+  marker alone is not sufficient for the snapshot gate.
 - Samples live under `C:\samples\` on the VM and are **never executed on
   the control plane**.

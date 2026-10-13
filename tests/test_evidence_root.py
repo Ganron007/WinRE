@@ -19,6 +19,29 @@ BAD = "  D:" + chr(92) + "Has Space" + chr(92) + "logs  "
 GOOD = "D:" + chr(92) + "evidence" + chr(92) + "logs"
 
 
+@pytest.fixture(autouse=True)
+def _restore_import_state_after_each_test():
+    """The import-order probe must not replace the suite's shared modules.
+
+    `_fresh()` deliberately removes `winre` from sys.modules to exercise
+    import-time configuration. Leaving those replacements installed made
+    later tests patch one `snapshot_gate` module while `vm_gate` imported a
+    second copy, so the full suite behaved differently from an isolated run.
+    """
+    prior_modules = {name: module for name, module in sys.modules.items()
+                     if name == "winre" or name.startswith("winre.")}
+    prior_env = os.environ.get("WINRE_PIPELINE_LOGS")
+    yield
+    for name in [name for name in sys.modules
+                 if name == "winre" or name.startswith("winre.")]:
+        del sys.modules[name]
+    sys.modules.update(prior_modules)
+    if prior_env is None:
+        os.environ.pop("WINRE_PIPELINE_LOGS", None)
+    else:
+        os.environ["WINRE_PIPELINE_LOGS"] = prior_env
+
+
 def _fresh(root=None):
     """Reload the winre modules with a clean env, so import-time resolution
     is re-exercised (the quiet instance of this bug was an import-order one:

@@ -1,193 +1,167 @@
-# Pipeline — WinRE static + dynamic RE workflow
+# Pipeline
 
-> **Status:** LIVE (2026-09-07) — `winre/pipeline.py` with SEGREGATED static/dynamic phases,
-> `--mode static|agentic` deep-dive engines, and RevAI-style mode sections
-> (`logs/<sha>/<static|agentic>/`).
-> WinRE is the Windows FlareVM pipeline: static AND dynamic AND interactive
-> debugger on one host, all local, LLM interprets evidence only.
-> **Audience:** operators and integrators (stages, modes, CLI).
+> **Scope:** execution modes, stage order, driver boundaries, and CLI behavior.
+> **Audience:** operators and integrators. WinRE is pre-v1.0; pin a revision
+> when relying on these interfaces.
 
-## Static-first, dynamic opt-in + segregated (design)
+WinRE uses deterministic tools to produce evidence. The agentic engine can
+interpret that evidence through an OpenAI-compatible LLM. It does not ask the
+LLM to execute samples or replace deterministic collection.
 
-**Static is the default and mirrors the RevAI static contract exactly.** Dynamic is a
-SEPARATE, opt-in phase that runs LAST from a restored (clean) VM — never in
-the middle of static (detonation would contaminate the VM the deep static
-agent runs on). `static_yara_wins`: dynamic corroborates, never clears.
+## Engines and evidence sections
 
-```
-DEFAULT (no env):   pipeline.py <sample> [--mode agentic|static]  → STATIC ONLY
-                    intake → quick → deep → yara → report → audit
-                    (deep engine: agentic = LangGraph ReAct, llm_judge;
-                     static = deterministic checklist, zero LLM calls)
-                    Never detonates. Clean on any host.
-                    Pack lands in logs/<sha>/<agentic|static>/
-                    (mode sections — RevAI scripted/agentic style; same-mode
-                    reruns overwrite their section, cross-mode coexists).
+The analysis engine and the requested execution capability are separate
+choices. The pack section names the producer so that one run does not silently
+overwrite evidence produced by another capability.
 
-OPT-IN DYNAMIC:     WINRE_ENABLE_DYNAMIC=1 pipeline.py <sample> --dynamic
-                    (or a remote caller triggers the legacy SSH orchestrator)
-                    static completes FIRST → detonation on restored VM →
-                    FakeNet+Procmon+Frida+pe-sieve → dynamic pack pulled into
-                    the run's mode section → static_yara_wins →
-                    snapshot revert (mandatory)
-```
+| CLI selection | Deep-analysis engine | Additional execution | Pack section |
+|---|---|---|---|
+| `--mode static` | Fixed deterministic checklist; zero LLM calls | None | `static/` |
+| `--mode agentic` | LangGraph tool loop and configured judgment role | None | `agentic/` |
+| `--mode agentic --agentic-dbg` | Agentic | x64dbg OEP/unpack probe, followed by a bounded 30-second target run with ETW process observation | `dbg/` |
+| `--mode agentic --dynamic` | Agentic | Gated detonation after the static stages | `dynamic/` |
 
-Why: a detonation dirties the VM (Run keys, dropped files, hooks). Running
-the deep static agent after detonation would analyze on contaminated ground.
-RevAI (Linux static) can drive WinRE SQL over SSH; WinRE owns dynamic.
+The engine defaults to `agentic`; detonation and debugger execution are
+opt-in. The deterministic `static` engine cannot be combined with either
+execution capabilities. Dynamic and debugger work are separate producers and
+cannot be combined in one pipeline invocation. Under the default `enforce`
+snapshot gate, one verified restore permits one gated sample execution, so
+restore and attest between them.
 
-## Why WinRE beats static-only pipelines
+## Stage order
 
-RevAI runs static tools on Linux and hands the evidence to an LLM. They
-cannot: detonate on Windows, hook APIs with Frida, capture Procmon/network,
-drive x64dbg/WinDbg/Malcat over MCP, or unpack interactively. WinRE does all
-of it on one host — static SQL, dynamic detonation (gated), and agentic
-debugger control — then applies the same honest gates.
+The normal evidence sequence is intake, quick triage, deep analysis, YARA,
+reporting, and audit. When requested, dynamic collection runs after static
+analysis and is recorded in its own `dynamic/` section. The execution plan is
+written before stages begin; finalization writes the selected findings,
+correlation/composition records, reports, audit, and artifact inventory for
+that run.
 
-## Spine
+The evidence root is `logs/<sha256>/<section>/`. The four section names are
+`static`, `agentic`, `dbg`, and `dynamic`. Each section includes stage
+directories and run metadata. See [Evidence Packs](EVIDENCE.md) for the
+artifact and manifest layout.
 
-```
-python -m winre.pipeline <sample> [--mode agentic|static] [--dynamic] [--max-seconds 45]
-                   [--pesieve] [--adaptive] [--idle-stop-seconds 10]
-                   [--dry-llm] [--agentic-dbg] [--driver remote] [--publish]
-   │
-   ├─ 1. intake   hash, format, magic            → logs/<sha>/<mode>/intake/
-   ├─ 2. quick    deterministic triage           → logs/<sha>/<mode>/quick/
-   │             Malcat MCP views + IDA/Ghidra SQL + static-tools layer
-   │             (capa/floss/lief/diec/yarascan/strings/import-signals/xor)
-   ├─ 3. deep     engine selected by --mode      → logs/<sha>/<mode>/deep/
-   │             agentic: LangGraph ReAct over the 35-tool set (llm_judge)
-   │             static:  fixed 35-tool checklist (30 steps) + rules verdict,
-   │                      zero LLM (static_deterministic — RevAI scripted)
-   ├─ 4. yara     YARA + Sigma from evidence      → logs/<sha>/<mode>/yara/    (deterministic, no LLM in rules)
-   ├─ 5. report   source-tagged report + next     → logs/<sha>/<mode>/report/
-   │             source ∈ {llm_judge, static_deterministic, deterministic_fallback}
-   └─ audit       truly_green gate (dynamic optional) → logs/<sha>/<mode>/audit.json
-          │
-          └─ [--dynamic] detonation runs here, LAST, segregated:
-             orchestrator --mode local → logs/<sha>/<mode>/dynamic/ (pulled via scp)
-             (WINRE_DYNAMIC_DIR pins the orchestrator output into the section)
+The report and pack-level `META.json` expose two verdict fields: `verdict` is
+the selected composite across current, identity-validated mode findings;
+`mode_verdict` is the current section's result. The CLI summary prints both.
+Definite detonation evidence has the highest weight, debugger evidence follows,
+and static-only findings provide context. Disagreements are named in
+`composite.json`; two static modes with definite but different results use the
+more conservative label until execution evidence is available. An unknown
+dynamic or debugger result does not erase a definite static result.
 
-   [--publish] sanitized case → docs/case-studies/<mode>/<sha>/ (no binaries)
-```
+Dynamic collection uses Frida, Procmon, FakeNet-NG, and optional memory and
+debugger tooling. The default detonation cap is 150 seconds. `--stop-on`
+controls the behavior gate and `--stop-on-settle` controls how long collection
+continues after it fires. `--adaptive` enables an idle-based stop; because a
+sleeping sample can appear idle, it is off by default. Requested and effective
+windows and the stop reason are recorded in the run evidence.
 
-- **Deterministic-first**: tools produce evidence; the LLM only interprets.
-- **`static_yara_wins`**: dynamic evidence corroborates but never clears a
-  static malicious verdict (policy in `audit.json`).
-- **Honest gate**: `truly_green = all required stages ran + zero failed tools
-  + no fallback + no dynamic-vs-static conflict`. Dynamic is NOT required for
-  green (optional corroboration) unless it ran and conflicted.
+## Driver and trust boundary
 
-## Stage detail
-
-| Stage | Tools | Key artifacts |
-|-------|-------|---------------|
-| intake | file magic, sha256 | `intake.json` (+ filename-policy note) |
-| quick | Malcat MCP (:9009) anomalies/yara/strings, IDA SQL funcs (if .i64), Ghidra SQL funcs, static-tools layer (capa/floss/lief/diec/yarascan/strings/import-signals/xor/api-hash-resolver/crypto/mitigations/iocs) | `quick.json` + `verdict` |
-| dynamic | FakeNet-NG, Procmon→CSV, Frida trace, pe-sieve (opt) + suspended-process dump monitor, hollows_hunter, input jiggle, x64dbg OEP/dump; post-analysis: procmon persistence catalog + behavior timeline + spoof suspects, pcap beacon/HTTP-schema, post-mortem (procdump -ma harvest, ntdll integrity, process snapshot), WinDbg dump analysis (`!analyze -v`/.ecxr/k/lm via mcp-windbg); **adaptive window** (`--adaptive --idle-stop-seconds`: `--max-seconds` is the CAP, the trace stops early after the idle cutoff — effective window recorded in `META.window`) | `META.json` (ok, frida_events, sample_pid, `window`), `STAGE.json` (audit wrapper + gate evidence), `frida_trace.jsonl`, `procmon.csv`, `procmon_summary.json` (+persistence/timeline/spoof), `behavior_timeline.csv`, `network_intel.json` (+beacon_analysis), `post_mortem.json`, `memory/*.dmp`, `windbg_analysis.json`, `process_snapshot.json` |
-| deep | engine by `--mode`: `agentic` = LangGraph ReAct (x64dbg-MCP LoadBinary/DetectOEP/DumpModule + write-BP trace, Malcat-MCP fns/decompile, WinDbg-MCP dump analysis, 35 static tools), with **packer-signal routing** (quick-evidence diec/entropy → deterministic `x64dbg_unpack` prepass when `--agentic-dbg`; OEP fallback chain section→ESP, heap-OEP gate (DumpMemory of the OEP region), one fresh-session restart retry, debugger-state diagnostics + write-BP trace fallback on failure; **pe-sieve `/imp` IAT rebuild at OEP** produces the preferred PE-valid dump — savedata DumpModule is the fallback — and parse/imports are checked (`rebuild_hint` only when neither parses); the dump is pulled into the pack `deep/x64dbg/`) and a **curated-YARA verdict floor** (family-distinctive `yarascan.high_signal` hits can never be contradicted by a below-malicious verdict; **WinDbg applicability is recorded deterministically** — `windbg_dump` in `deep.json` runs the analysis when a memory dump exists and otherwise states why it does not apply); `static` = fixed 35-tool checklist (30 steps), no LLM | `deep.json` + verdict (`llm_judge` / `static_deterministic`), full history, `llm_analysis` (null in static mode), `packed_signal`/`unpack_prepass`/`unpack_artifact` (+`artifact.comparison_conclusive`, `dump_source`), step-level `tool_failures` surfaced into audit |
-| yara | deterministic YARA (`CADRE_<sha8>.yar`) + Sigma (`CADRE_<sha8>.yml`), curation lint (soundness/dupes/noise warnings in rule_report) | `rule_report.json` |
-| report | source-tagged `report.json` + `ANALYST-NEXT.md`; sections incl. behavior-context (kill-switch/CLI/artifact catalog) + crypto-identified tags | — |
-
-## Local-only
-
-No SSH, no remote agent, no external LLM host. The LLM endpoint is whatever
-runs on/near the FlareVM (OpenAI-compatible):
+Use the remote driver to run the pipeline from the separate control plane:
 
 ```powershell
-$env:WINRE_LLM_BASE_URL = "http://127.0.0.1:8000/v1"   # local model or API
-$env:WINRE_LLM_API_KEY  = ""
-$env:WINRE_LLM_MODEL    = "local"
+python -m winre.pipeline "C:\samples\sample.exe" --driver remote --mode static
+python -m winre.pipeline "C:\samples\sample.exe" --driver remote --mode agentic
 ```
 
-MCP servers run on the VM console (`winre/mcp/start_servers.ps1`) — Malcat
-:9009, WinDbg :9097, x64dbg :9094 when open.
+The control plane holds the LLM configuration and trusted analysis outputs;
+the FlareVM provides Windows tooling and sample execution. Every pipeline mode
+that invokes guest tools requires both the guest clean-state marker and an
+independent clean attestation in the control-plane ledger. A guest-local
+process cannot provide that independent attestation. `--driver local` does
+not permit dynamic or debugger execution; on the FlareVM it cannot pass the
+independent-ledger trust boundary.
 
-## Run
+The pipeline never restores a VM snapshot. After restoring the approved
+snapshot, verify the guest state and attest from the control plane:
 
 ```powershell
-# Run all commands below as modules from C:\WinRE (WinRE is a package;
-# direct script paths like python winre\pipeline.py fail).
-
-# STATIC — deterministic engine, zero LLM calls (RevAI scripted)
-python -m winre.pipeline C:\samples\foo.exe --mode static
-
-# STATIC — agentic engine (default; needs the LLM endpoint for llm_judge)
-python -m winre.pipeline C:\samples\foo.exe --mode agentic
-# ... --dry-llm forces the honest deterministic_fallback (no LLM)
-
-# STATIC + SEGREGATED DYNAMIC (opt-in; needs restored VM, then snapshot revert)
-python -m winre.pipeline C:\samples\foo.exe --mode static --dynamic --max-seconds 45
-# or env: $env:WINRE_ENABLE_DYNAMIC = "1"
-
-# control-plane driver (run from operator host, SSH to FlareVM)
-python -m winre.pipeline C:\samples\foo.exe --driver remote --mode static
-
-# publish a sanitized, mode-keyed case (report-level artifacts only, no binaries)
-python -m winre.pipeline C:\samples\foo.exe --mode static --publish
-#    → docs/case-studies/static/<sha>/
-
-# env
-$env:GHIDRA_HEADLESS_MAXMEM = "8G"     # 16GB host
-$env:WINRE_PIPELINE_LOGS = "C:\WinRE\logs"
-$env:WINRE_LLM_BASE_URL / WINRE_LLM_API_KEY / WINRE_LLM_MODEL  (in .env)
+python -m winre.snapshot_gate attest --action verified_clean
 ```
 
-Exit code 0 only when `truly_green` (audit gate passed). Dynamic is not
-required for green — it is optional corroboration.
+The command records the attestation; it does not inspect or restore the
+hypervisor snapshot for you. Follow [Operate](OPERATE.md) for the full gate and
+recovery procedure.
 
-## Evidence contract with RevAI
+## Common runs
 
-`logs/<sha>/<mode>/dynamic/` keeps the exact schema RevAI reads
-(`load_dynamic_pack()`) — WinRE is now also the writer for the full pack;
-RevAI can read any stage. The pipeline layout mirrors RevAI's
-`{intake,quick,deep,publish}` naming so reports are portable.
+Run the deterministic engine without LLM calls:
 
-## RevAI-driven runs (remote driver) — measured 4-mode approach
-
-All four modes can be driven from the Linux control plane (or any host with the
-WinRE package): `python3 -m winre.pipeline <sample> --driver remote --mode
-static|agentic [--agentic-dbg] [--dynamic]`. The driver hosts the LLM config;
-the FlareVM stays tools-only and air-gapped.
-
-**Per-sample snapshot cadence** (one gated execution per clean restore):
-
-```
-restore → static + agentic          (same boot; neither executes the sample)
-restore → dynamic detonation        (--dynamic; pull the pack, then restore)
-restore → agentic-dbg               (debugger pass; pull any dumps)
-restore → VM clean
+```powershell
+python -m winre.pipeline "C:\samples\sample.exe" --driver remote --mode static
 ```
 
-**Mode 4 is TWO runs, never one command.** `--dynamic` and `--agentic-dbg`
-are each a gated execution, and under `enforce` a clean restore buys exactly
-one. Run them as `--dynamic …` then restore then `--agentic-dbg …`. Passing
-both in a single invocation is refused **before any stage runs** (fail fast,
-exit code 2, nothing executed, nothing written to the ledger) with one clear
-message; the intended plan is still recorded in `execution_plan.json` so the
-refusal is auditable. Two ways to legitimately need two executions in one
-command: `WINRE_SNAPSHOT_GATE=observe` (advisory; deliberate benign test
-loops only) or hypervisor auto-restore (`WINRE_HYPERVISOR` /
-`WINRE_VM_PATH` / `WINRE_SNAPSHOT`), which re-arms the marker per execution.
-Check the plan any time:
+Run the agentic engine:
 
-```bash
-python -m winre.snapshot_gate plan --dynamic --agentic-dbg   # exits 1 if over budget
+```powershell
+python -m winre.pipeline "C:\samples\sample.exe" --driver remote --mode agentic
 ```
 
-Order rationale: detonation runs on the freshest VM (a resident debugger can
-alter behavior); the debugger pass is last because unpack results are
-independent of runtime observation.
+Run a detonation as a separate, gated pass. This uses the agentic engine and
+writes to the `dynamic/` section:
 
-Notes:
+```powershell
+python -m winre.pipeline "C:\samples\sample.exe" --driver remote --mode agentic --dynamic --max-seconds 150
+```
 
-- `--agentic-dbg` writes into the same `agentic/` mode section — back up an
-  earlier agentic pack first if both are needed for comparison. Evidence is
-  append-only: a previous `dynamic/` pack in that section is moved to
-  `previous_runs/dynamic_<ts>/`, never deleted.
-- Dynamic packs are large (hundreds of MB with full dumps); the driver pulls
-  them recursively.
-- Freshness of a pulled dynamic pack is decided by the per-run **nonce**
-  (`dynamic/META.json → run_id`, echoed in `dynamic/STAGE.json → nonce`), not
-  by comparing the VM clock with the control plane's clock. `clock_skew_s`
-  (same stage file, plus `/health`) is a diagnostic only.
+Run debugger-assisted analysis from its own verified restore. The agent can
+launch or resume the target under x64dbg. WinRE probes the entry point or
+unpack OEP, continues the target for up to 30 seconds, then stops it before
+closing the independent ETW process-start/stop trace. This is an
+execution-consuming pass. The observer can correlate the target and its child
+processes but does not cover file, registry, network, or memory activity:
+
+```powershell
+python -m winre.pipeline "C:\samples\sample.exe" --driver remote --mode agentic --agentic-dbg
+```
+
+A completed debugger window remains a valid debugger finding when an ordinary
+unpacked program never hits the OEP breakpoint. The mode records the missing
+dump as a limitation, keeps the debugger result in the composite, and reports
+the ETW observation separately. A failed or incomplete debugger window is not
+treated as completed evidence.
+
+Do not combine `--dynamic` and `--agentic-dbg` in one pipeline invocation;
+they have separate pack roots and execution paths. Each execution-consuming
+pass requires a fresh verified restore and attestation. To inspect the
+execution budget without running a sample:
+
+```powershell
+python -m winre.snapshot_gate plan --dynamic --agentic-dbg
+```
+
+`--dry-llm` disables LLM calls. An agentic run then records
+`deterministic_fallback`; the audit treats a required fallback as a quality
+failure. `--publish` writes a sanitized report-level copy to
+`docs/case-studies/<section>/<sha256>/` and does not include sample binaries.
+
+## Audit meaning
+
+`audit.json → truly_green` is a run-quality gate. It checks required stages,
+the requested dynamic/debug capability, required tool outcomes, fallback
+status, expected verdict/composition records, and snapshot-gate evidence. A
+green audit means the requested workflow produced acceptable evidence under
+its declared contract. It does not establish that the sample is benign, that
+all behavior was observed, or that the analysis is complete.
+
+Dynamic evidence can corroborate static analysis. The `static_yara_wins`
+policy prevents dynamic output from clearing a high-signal static YARA result;
+unresolved conflicts and coverage gaps remain visible in the audit and pack.
+
+## Standalone dynamic orchestrator
+
+`winre.orchestrator` is a lower-level collection entry point with `ssh` and
+`local` modes. Pipeline-driven runs are preferred because they bind the
+collection to a run ID, evidence section, capability plan, and final audit.
+See [Dynamic Orchestrator](DYNAMIC-ORCHESTRATOR.md) and
+[SSH Contract](SSH-CONTRACT.md) before using the standalone command.
+
+## Related documentation
+
+- [Operate](OPERATE.md): restore cadence, ledger, UI, troubleshooting.
+- [Evidence Packs](EVIDENCE.md): file layout, provenance, and manifest status.
+- [Install](INSTALL.md): host, guest, and LLM setup.
+- [RevAI Bridge](REVAI-BRIDGE.md): remote-driver configuration and handoff.

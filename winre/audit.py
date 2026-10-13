@@ -77,11 +77,35 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
     It is honoured now. The default is unchanged, so no existing static-only
     green verdict moves.
     """
-    required = tuple(stages if require_dynamic
+    # The persisted execution plan is authoritative for what this run asked
+    # the system to do. A caller/UI that forgets the argument must not turn an
+    # explicitly requested but failed detonation into optional evidence.
+    execution_plan = None
+    ep = evidence / "execution_plan.json"
+    if ep.is_file():
+        try:
+            execution_plan = json.loads(ep.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            execution_plan = {"error": "execution_plan.json unreadable"}
+    dynamic_requested = bool(
+        require_dynamic or
+        (isinstance(execution_plan, dict)
+         and "dynamic" in (execution_plan.get("execution_sites") or [])))
+    run_id = (execution_plan.get("run_id")
+              if isinstance(execution_plan, dict) else None)
+    composition = None
+    composition_path = evidence / "composite.json"
+    if composition_path.is_file():
+        try:
+            composition = json.loads(composition_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            composition = {"error": "composite.json unreadable"}
+    required = tuple(stages if dynamic_requested
                      else (s for s in stages if s != "dynamic"))
     checks = [_stage_ok(evidence, s) for s in stages]
     req_checks = [c for c in checks if c["stage"] in required]
     all_green = all(c["ran"] for c in req_checks)
+    deep_check = next((c for c in checks if c["stage"] == "deep"), {})
     failed_tools = [t for c in checks for t in (c.get("tool_failures") or [])]
     fallbacks = [c["stage"] for c in checks if c.get("fallback")]
 
@@ -140,8 +164,9 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
         dynamic_conflict = True
 
     # snapshot-gate honesty: when the gate is in enforce mode, a dynamic
-    # stage that ran must carry gate evidence (auto-restore or attestation
-    # pass). observe mode is advisory — recorded, never penalizes.
+    # stage that ran must carry proof that the guest marker and independent
+    # control-plane ledger passed. observe mode is advisory — recorded,
+    # never penalizes.
     # Fail CLOSED: if the gate mode cannot be resolved at all, enforce
     # posture is assumed (missing evidence then fails the audit).
     gate = None
@@ -180,8 +205,124 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
     # sat next to a missing verdict. These are named, recorded, and they DO
     # consume truly_green.
     unmet: list[str] = []
+    if deep_check.get("ran"):
+        if not isinstance(composition, dict) or composition.get("error"):
+            unmet.append("current-run composite selection missing or unreadable")
+        elif run_id and composition.get("run_id") != run_id:
+            unmet.append("composite selection is not pinned to this pipeline run")
+        else:
+            pack_meta_path = evidence / "META.json"
+            try:
+                pack_meta = json.loads(pack_meta_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                pack_meta = {}
+            pack_mode = (pack_meta.get("pack_mode") or pack_meta.get("mode")
+                         if isinstance(pack_meta, dict) else None)
+            current_selection = ((composition.get("selection") or {})
+                                 .get(str(pack_mode)) or {})
+            if (pack_mode and current_selection.get("selected") is not True
+                    and not current_selection.get("reason", "").startswith("current run candidate")):
+                unmet.append("current mode is absent from composite selection")
+    floor = ((composition or {}).get("curated_yara_floor") or {}) \
+        if isinstance(composition, dict) else {}
+    static_yara_wins = (not floor.get("applied")
+                        or (composition or {}).get("level") == "malicious")
+    if not static_yara_wins:
+        unmet.append("composite verdict fell below the curated-YARA malicious floor")
+    capability_census = None
+    capability_failures: list[str] = []
+    quick_json = evidence / "quick" / "quick.json"
+    if quick_json.is_file():
+        try:
+            quick_record = json.loads(quick_json.read_text(encoding="utf-8"))
+            quick_census = quick_record.get("capability_census")
+        except json.JSONDecodeError:
+            quick_census = None
+            capability_failures.append("quick/quick.json unreadable")
+        quick_check = next((c for c in checks if c["stage"] == "quick"), {})
+        if quick_check.get("ran"):
+            if not isinstance(quick_census, dict) or \
+                    quick_census.get("schema") != "winre-quick-capability-census/v1":
+                capability_failures.append("quick capability census missing or invalid")
+            else:
+                quick_required = set(quick_census.get("required") or [])
+                quick_rows = {str(row.get("tool")): row
+                              for row in quick_census.get("capabilities") or []
+                              if isinstance(row, dict) and row.get("tool")}
+                for tool in sorted(quick_required):
+                    status = (quick_rows.get(tool) or {}).get("status", "not_attempted")
+                    if status != "completed":
+                        capability_failures.append(
+                            f"required quick capability {tool} status={status}")
+    deep_json = evidence / "deep" / "deep.json"
+    if deep_json.is_file():
+        try:
+            deep_record = json.loads(deep_json.read_text(encoding="utf-8"))
+            capability_census = deep_record.get("capability_census")
+        except json.JSONDecodeError:
+            capability_failures.append("deep/deep.json unreadable")
+    if deep_check.get("ran"):
+        from winre.capabilities import CORE_REQUIRED_TOOLS
+        if not isinstance(capability_census, dict) or \
+                capability_census.get("schema") != "winre-capability-census/v1":
+            capability_failures.append("deep capability census missing or invalid")
+        else:
+            declared = set(capability_census.get("required") or [])
+            summary = {str(row.get("tool")): row
+                       for row in capability_census.get("summary") or []
+                       if isinstance(row, dict) and row.get("tool")}
+            undeclared = sorted(set(CORE_REQUIRED_TOOLS) - declared)
+            if undeclared:
+                capability_failures.append(
+                    "required capabilities omitted from declaration: "
+                    + ", ".join(undeclared))
+            for tool in CORE_REQUIRED_TOOLS:
+                status = (summary.get(tool) or {}).get("status", "not_attempted")
+                if status != "completed":
+                    capability_failures.append(
+                        f"required capability {tool} status={status}")
+    unmet.extend(capability_failures)
+
+    # Collection coverage is a separate contract from tool exit status. Stage
+    # manifests pin the collector terminal record and primary artifact format
+    # to this run; a present file alone is never enough to mark it complete.
+    artifact_coverage: dict[str, dict] = {}
+    coverage_failures: list[str] = []
+    try:
+        from .manifest import read_manifest
+        coverage_stages = ["intake", "quick", "deep", "yara", "report"]
+        if dynamic_requested:
+            coverage_stages.append("dynamic")
+        for stage_name in coverage_stages:
+            stage_manifest = read_manifest(evidence / stage_name)
+            artifact_coverage[stage_name] = stage_manifest.get("coverage") or {}
+            if not stage_manifest:
+                coverage_failures.append(f"{stage_name} artifact manifest missing")
+                continue
+            if run_id and stage_manifest.get("run_id") != run_id:
+                coverage_failures.append(
+                    f"{stage_name} artifact manifest is not pinned to this run")
+            for source, row in artifact_coverage[stage_name].items():
+                if (row.get("requested") and row.get("required")
+                        and row.get("status") != "complete"):
+                    coverage_failures.append(
+                        f"required artifact source {stage_name}/{source} "
+                        f"status={row.get('status')}: {row.get('reason')}")
+    except Exception as e:
+        coverage_failures.append(f"artifact coverage could not be audited: {e}")
+    unmet.extend(coverage_failures)
+
+    if dynamic_requested:
+        dynamic_stage_file = evidence / "dynamic" / "STAGE.json"
+        try:
+            dynamic_stage_meta = json.loads(
+                dynamic_stage_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            dynamic_stage_meta = {}
+        if not run_id or dynamic_stage_meta.get("run_id") != run_id:
+            unmet.append("requested dynamic stage is not pinned to this pipeline run")
+
     deep_v = pack_verdict(evidence)
-    deep_check = next((c for c in checks if c["stage"] == "deep"), {})
     if deep_check.get("ran") and not deep_v["present"]:
         unmet.append("deep verdict missing (deep stage produced no verdict)")
     # report stage: source says a judge produced it, but no verdict in it
@@ -214,17 +355,6 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
     except (OSError, json.JSONDecodeError):
         pass
 
-    # run-level execution plan (written by the driver BEFORE any stage; see
-    # snapshot_gate.execution_plan) — a third party can read how many VM
-    # executions the run intended and whether the gate could honor it.
-    execution_plan = None
-    ep = evidence / "execution_plan.json"
-    if ep.is_file():
-        try:
-            execution_plan = json.loads(ep.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            execution_plan = {"error": "execution_plan.json unreadable"}
-
     return {
         "truly_green": truly_green,
         "all_green": all_green,
@@ -232,16 +362,25 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
         "checks": checks,
         "fallback_stages": fallbacks,
         "failed_tools": failed_tools,
+        "capability_census": capability_census,
+        "capability_failures": capability_failures,
+        "artifact_coverage": artifact_coverage,
+        "artifact_coverage_failures": coverage_failures,
         "unmet_expectations": unmet,
         "dynamic_conflict": dynamic_conflict,
         "dynamic_blocked": dynamic_blocked,
-        "static_yara_wins": True,
+        "static_yara_wins": static_yara_wins,
         "static_verdict": static_verdict,
         "deep_verdict": deep_v["verdict"],
         "deep_verdict_source": deep_v["source"],
         "llm_roles": deep_v.get("llm_roles"),
         "dynamic_verdict": dynamic_verdict,
         "execution_plan": execution_plan,
+        "dynamic_requested": dynamic_requested,
+        "run_id": run_id,
+        "composite": composition,
+        "selected_verdict": ((composition or {}).get("level")
+                             if isinstance(composition, dict) else None),
         "snapshot_gate": {"mode": gm, "ok": gate_ok, "detail": gate},
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }

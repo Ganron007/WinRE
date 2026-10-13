@@ -24,8 +24,9 @@
       - rules\    : yara-rules\ + capa-rules\ backups pulled from the VM
 
     Post-steps NOT automated here (by design):
-      - Re-stage samples from the RevAI box per
-        internal\campaign\samples-manifest.json (samples never touch this host)
+      - Re-stage selected samples per internal\campaign\samples-manifest.json.
+        The operator workstation may be a transit point; record the source and
+        SHA-256-verified staging hops in the local corpus registry.
       - Confirm C:\WinRE\.env is absent (it must never exist on the VM)
       - Confirm C:\WinRE\.clean_snapshot, then take the NEW snapshot
 

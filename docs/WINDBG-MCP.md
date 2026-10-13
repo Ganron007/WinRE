@@ -1,6 +1,9 @@
 # WinDbg-MCP — Windows (FlareVM)
 
-> **Status:** REWIRED (2026-09-01) — official **`mcp-windbg`** (svnscha/mcp-windbg, MIT, PyPI) replaces the homemade 12-tool bridge. 10 tools over MCP streamable-http on :9097. Crash-dump analysis + remote + kernel debugging, driven by `cdb.exe`/`kd.exe` (auto-detected from the Store WinDbg or Windows Kits).
+> **Integration:** WinRE uses the third-party **`mcp-windbg`** package for
+> dump analysis over MCP streamable HTTP on port `9097`. Its tool catalog and
+> CLI can vary by installed package version; inspect `tools/list` on the
+> deployed server.
 > **Audience:** integrators and agent authors using dump analysis.
 
 ## 1. Why this changed
@@ -16,7 +19,6 @@ The old `winre/mcp/windbg_bridge.py` (12-tool per-process `windbg -c` fallback) 
 
 ```powershell
 C:\Python313\python.exe -m pip install mcp-windbg
-# → mcp-windbg 1.2.1 + mcp 2.1.1 (streamable-http support)
 ```
 
 Prereq: WinDbg classic (Windows Kits Debuggers) **or** Store WinDbg — both ship `cdb.exe`/`kd.exe` (auto-detected). Classic was added on FlareVM via `winsdksetup.exe /features OptionId.WindowsDesktopDebuggers /quiet`.
@@ -31,7 +33,7 @@ C:\Python313\python.exe -m mcp_windbg --transport streamable-http --host 127.0.0
 
 Options: `--cdb-path`, `--kd-path`, `--symbols-path`, `--filter-script`, `--timeout`, `--transport {stdio,streamable-http}`.
 
-## 4. 10 tools (verified on FlareVM)
+## 4. Tool catalog
 
 | Tool | Purpose |
 |------|---------|

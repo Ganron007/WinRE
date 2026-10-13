@@ -181,6 +181,8 @@ def test_dry_and_fallback_paths_still_record_roles(monkeypatch):
     returns = _re.findall(r'return \{\s*"verdict"', src)
     assert returns, "no verdict return paths found - the probe is stale"
     for m in _re.finditer(r'return \{(?:[^{}]|\{[^{}]*\})*\}', src):
+        if '"verdict"' not in m.group(0):
+            continue  # helper results are not the deep-dive return contract
         assert '"llm_roles"' in m.group(0), (
             "a verdict return path does not record the resolved routing: "
             + m.group(0)[:120])

@@ -1,15 +1,15 @@
 """Phase 5: a detonated VM is not a trustworthy analysis host.
 
-Verified live before this file was written: on the VM left dirty by the
-10-sample campaign, `require_clean_vm` blocks `--agentic-dbg` and `--dynamic`,
-allows `--mode static` and `--mode agentic`, and an unreachable VM is treated
-as NOT clean (unknown is not an invitation to execute).
+The gate requires a guest marker and a separate control-plane ledger
+attestation for every mode because static and agentic runs also invoke
+guest-side tools that may have been tampered with by a prior sample. An
+unreachable VM or missing ledger is not clean.
 """
 import pathlib
 
 import pytest
 
-from winre import vm_gate
+from winre import snapshot_gate, vm_gate
 
 
 class _FakeSSH:
@@ -42,6 +42,10 @@ def ssh(monkeypatch):
             return fake(cfg, cmd, timeout)
         monkeypatch.setattr(vm_gate.remote_driver, "ssh_run", _run,
                             raising=False)
+        # The control-plane ledger is independent from the guest marker.
+        monkeypatch.setattr(vm_gate, "on_vm_repo_root", lambda: None)
+        monkeypatch.setattr(snapshot_gate, "vm_state",
+                            lambda: {"last_action": "verified_clean"})
         return fake
     return _mk
 
@@ -55,12 +59,12 @@ def test_clean_vm_allows_an_executing_mode(ssh):
     assert ok and blocker is None
 
 
-def test_dirty_vm_blocks_an_executing_mode(ssh):
+def test_dirty_vm_blocks_all_guest_tool_modes(ssh):
     ssh(marker=False)
     ok, blocker = vm_gate.require_clean_vm({}, mode="agentic",
                                            agentic_dbg=True)
     assert ok is False and blocker
-    assert "VM is dirty" in blocker["reason"]
+    assert "no verifiable clean marker" in blocker["reason"]
 
 
 def test_dynamic_is_blocked_too(ssh):
@@ -69,12 +73,44 @@ def test_dynamic_is_blocked_too(ssh):
     assert ok is False
 
 
-def test_read_only_modes_run_on_a_dirty_vm(ssh):
-    """A read-only analysis executes nothing, so it must not need a revert."""
+def test_static_and_agentic_require_a_clean_marker(ssh):
+    """Read-only use cannot establish integrity of guest analysis tools."""
     ssh(marker=False)
     for mode in ("static", "agentic"):
         ok, blocker = vm_gate.require_clean_vm({}, mode=mode)
-        assert ok and blocker is None, mode
+        assert not ok and blocker, mode
+
+
+def test_guest_recreated_marker_does_not_override_dirty_control_plane_ledger(
+        ssh, monkeypatch):
+    """The guest marker is mutable by sample code; the separate ledger wins."""
+    ssh(marker=True)
+    monkeypatch.setattr(snapshot_gate, "vm_state",
+                        lambda: {"last_action": "detonated", "sha": "a" * 64})
+    ok, blocker = vm_gate.require_clean_vm({}, mode="static")
+    assert not ok and blocker
+    assert "marker is present" in blocker["reason"]
+    assert blocker["last_action"] == "detonated"
+
+
+def test_missing_control_plane_ledger_fails_closed_even_with_marker(
+        ssh, monkeypatch):
+    ssh(marker=True)
+    monkeypatch.setattr(snapshot_gate, "vm_state",
+                        lambda: {"ledger_error": "missing"})
+    ok, blocker = vm_gate.require_clean_vm({}, mode="static")
+    assert not ok and blocker
+    assert blocker["ledger_error"] == "missing"
+
+
+def test_guest_local_pipeline_has_no_independent_clean_state_authority(
+        monkeypatch):
+    monkeypatch.setattr(vm_gate, "on_vm_repo_root",
+                        lambda: pathlib.Path("C:/WinRE"))
+    monkeypatch.setattr(vm_gate, "vm_is_clean", lambda cfg: True)
+    ok, blocker = vm_gate.require_clean_vm({}, mode="static")
+    assert not ok and blocker
+    assert "separate control plane" in blocker["reason"]
 
 
 def test_an_unreachable_vm_fails_closed(ssh):
@@ -159,7 +195,7 @@ def test_a_refusal_is_recorded_and_the_prior_pack_is_kept(tmp_path, ssh):
     # the previous run's evidence is untouched
     assert (pack.stages["intake"] / "intake.json").is_file()
     rec = pack.read("intake", "REFUSED.json")
-    assert rec["ok"] is False and "VM is dirty" in rec["error"]
+    assert rec["ok"] is False and "no verifiable clean marker" in rec["error"]
     assert rec["note"] == "the pack from the previous run is left in place"
 
 

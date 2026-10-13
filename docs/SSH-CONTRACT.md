@@ -2,7 +2,9 @@
 
 > **Audience:** remote pipelines (e.g. RevAI) invoking WinRE
 > (FlareVM) over SSH for static + dynamic analysis.
-> **Status:** verified live; the SSH-exec path is the most-tested surface.
+> **Status:** transport and remote-tool contract. Behavior depends on the
+> pinned WinRE revision and installed guest tool versions; validate before a
+> production campaign.
 > **LLM / remote-driver wiring:** if the driver runs on a RevAI (Remnux)
 > box, the LLM variables and the `WINRE_LLM_*` → RevAI config mapping are
 > specified in [`REVAI-BRIDGE.md`](REVAI-BRIDGE.md).
@@ -34,17 +36,23 @@ Conventions used below (no lab specifics committed — set these per lab):
 - Assume no TTY, no profile, no interactive desktop for CLI tools. GUI apps
   (x64dbg) only run in the autologon console session.
 
-## 1. Dynamic detonation (primary use case)
+## 1. Dynamic detonation
 
-Two equivalent entry points. Both write `logs/<sha>/dynamic/` (+ `META.json`).
+For an audited run, use the pipeline's remote driver. It binds the sample,
+requested capability, run ID, evidence section, transfer result, and final
+audit together:
 
-> **Sections note (2026-09-07):** standalone orchestrator runs land in the
-> flat path above (no `WINRE_DYNAMIC_DIR` set). Pipeline-driven runs
-> (`pipeline.py` / `remote_driver.py` / UI, `--mode static|agentic`) pin
-> detonation into the run's mode section instead:
-> `logs/<sha>/<static|agentic>/dynamic/`. Same schema, sectioned address.
+```bash
+python3 -m winre.pipeline /path/to/sample.exe \
+  --driver remote --mode agentic --dynamic --max-seconds 150
+```
 
-### Option A — orchestrator `--mode ssh` (recommended)
+This writes the pack under `logs/<sha>/dynamic/`; dynamic-stage artifacts are
+inside its `dynamic/` directory. The `static` engine cannot be combined with
+dynamic or debugger execution. Debugger runs use the separate `dbg/` pack
+section and a separate clean restore.
+
+### Standalone orchestrator (lower-level)
 
 Run **on the caller** host. The orchestrator scps the sample
 to Flare, runs the job remotely, pulls `artifacts.zip` back and unzips it.
@@ -61,13 +69,13 @@ Caller-side prerequisites:
 
 ```bash
 # on the caller host
-export FLARE_HOST=<FLARE_HOST> FLARE_USER=<FLARE_USER>
-export FLARE_SSH_KEY=$KEY
+export FLARE_HOST="<FLARE_HOST>" FLARE_USER="<FLARE_USER>"
+export FLARE_SSH_KEY="$KEY"
 export REVENG_LOGS_DIR=/opt/samples/logs
 export REVENG_SESSIONS_DIR=/opt/samples/sessions
-python3 winre/orchestrator.py <sha256> --mode ssh --max-seconds 60
-python3 winre/orchestrator.py <sha256> --mode ssh --max-seconds 60 --pesieve
-python3 winre/orchestrator.py <sha256> --mode ssh --dry-run   # plan only
+python3 -m winre.orchestrator "<sha256>" --mode ssh --max-seconds 150
+python3 -m winre.orchestrator "<sha256>" --mode ssh --max-seconds 150 --pesieve
+python3 -m winre.orchestrator "<sha256>" --mode ssh --dry-run   # plan only
 ```
 
 - Exit `0` = `ok:true` or `skipped:true`; exit `1` = failed (see `META.json:error`).
@@ -81,15 +89,20 @@ python3 winre/orchestrator.py <sha256> --mode ssh --dry-run   # plan only
 
 ### Option B — direct job (caller drives each step)
 
+This path is for transport troubleshooting and development. It does not
+produce the pipeline's run-bound capability plan, complete audit, or trusted
+control-plane acceptance record. Use the pipeline command above for analysis
+results that will be treated as an audited WinRE run.
+
 ```bash
 # 1. upload sample
-scp -i $KEY sample.exe <FLARE_USER>@<FLARE_HOST>:C:/samples/<sha>/sample.exe
+scp -i "$KEY" sample.exe "<FLARE_USER>@<FLARE_HOST>:C:/samples/<sha>/sample.exe"
 # 2. run the job (writes C:\samples\<sha>\out\* + artifacts.zip on Flare)
 ssh -i $KEY <FLARE_USER>@<FLARE_HOST> \
   "powershell -NoProfile -ExecutionPolicy Bypass -File C:/WinRE/winre/flare_dynamic_job.ps1 \
    -Sha256 <sha> -SamplePath C:/samples/<sha>/sample.exe -MaxSeconds 60 [-EnablePeSieve]"
 # 3. pull artifacts
-scp -i $KEY <FLARE_USER>@<FLARE_HOST>:C:/samples/<sha>/artifacts.zip ./logs/<sha>/dynamic/
+scp -i "$KEY" "<FLARE_USER>@<FLARE_HOST>:C:/samples/<sha>/artifacts.zip" ./logs/<sha>/dynamic/
 ```
 
 ## 2. Artifact contract (`logs/<sha>/dynamic/`)
@@ -139,7 +152,7 @@ Notes:
 - Ghidra SQL **must** go through `flare_ghidra_sql.py` (it passes SQL via
   `GHIDRA_SQL_QUERY` env; bare `-postScript` argv mangles `(`, `*`, `FROM`).
 - `scp` remote paths must use **forward slashes** (`C:/samples/...`): Windows
-  OpenSSH accepts them, but a Linux scp client (e.g. RevAI on .43) mangles
+  OpenSSH accepts them, but a Linux scp client can mangle
   backslashes in the remote path → "No such file or directory".
   `remote_driver.scp_from()` normalizes centrally (downloads); pass forward
   slashes at new call sites anyway.

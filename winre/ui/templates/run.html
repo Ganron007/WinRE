@@ -92,7 +92,7 @@
   </script>
   {% else %}
 
-  <!-- Snapshot gate card: L1 marker · L2 hypervisor auto-restore · L3 ledger -->
+  <!-- Snapshot gate card: guest marker + independent control-plane ledger -->
   <div class="board" style="max-width:760px; margin-bottom:14px">
     <div class="board-head">
       <h3>Snapshot gate</h3>
@@ -101,7 +101,7 @@
     </div>
     <div class="board-body" style="font-size:var(--tx-sm)">
       <div id="gateDetail" class="muted" style="font-size:var(--tx-xs)">
-        Checking VM clean-marker, hypervisor config and run ledger…
+        Checking VM marker and control-plane run ledger…
       </div>
       <div id="gateActions" style="margin-top:8px; display:none; gap:8px">
         <button class="btn ghost" style="font-size:var(--tx-xs); padding:3px 10px"
@@ -109,7 +109,7 @@
         <button class="btn ghost" style="font-size:var(--tx-xs); padding:3px 10px"
                 onclick="gateAttest('verified_clean')">I verified the VM clean</button>
         <span class="muted" style="font-size:var(--tx-xs)">
-          verified-clean is marker-checked server-side; attestations are single-use
+          marker checked here; attestation is stored on this control plane
         </span>
       </div>
     </div>
@@ -249,7 +249,9 @@
         modeEl.className = 'badge ' + (enforce ? 'warn' : 'flat');
         let state, cls;
         if (g.blocked) { state = 'BLOCKED'; cls = 'down'; }
-        else if (g.marker === true || g.ledger_clean) { state = 'armed'; cls = 'up'; }
+        else if (g.mode === 'off') { state = 'off'; cls = 'flat'; }
+        else if (g.marker === true && g.ledger_clean) { state = 'armed'; cls = 'up'; }
+        else if (g.mode === 'observe') { state = 'advisory'; cls = 'flat'; }
         else { state = 'dirty'; cls = 'warn'; }
         stateEl.textContent = state;
         stateEl.className = 'badge ' + cls;
@@ -258,10 +260,11 @@
           `marker <b>${g.marker === null ? 'unknown' : (g.marker ? 'clean' : 'absent')}</b>` +
           ` · ledger <b>${st.last_action || 'none'}</b>` +
           `${st.ts ? ' <span class=muted>(' + st.ts + ')</span>' : ''}` +
-          ` · auto-restore <b>${g.hypervisor ? g.hypervisor.hypervisor + ' / ' + g.hypervisor.snapshot : 'not configured'}</b>` +
+          ` · hypervisor (report-only) <b>${g.hypervisor ? g.hypervisor.hypervisor + ' / ' + g.hypervisor.snapshot : 'not configured'}</b>` +
           `<br><span class=muted>${g.reason || ''}</span>`;
-        // attest buttons only matter when there's no hypervisor automation
-        actEl.style.display = (!g.hypervisor && g.mode !== 'off') ? 'flex' : 'none';
+        // Restoring is operator-owned; hypervisor configuration never changes
+        // whether the control-plane attestation buttons are available.
+        actEl.style.display = (g.mode !== 'off') ? 'flex' : 'none';
         // enforce (default) locks the detonation checkbox while blocked;
         // observe is the explicit benign-test override and never blocks.
         if (chk) {

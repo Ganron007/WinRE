@@ -60,10 +60,56 @@ def test_a_source_that_produced_nothing_is_not_complete(tmp_path):
     m = M.build_manifest(_stage(tmp_path, [("procmon.csv", "x")]),
                          run_id="r", sha256=SHA,
                          requested={"procmon": True, "frida": True})
-    assert m["coverage"]["procmon"]["status"] == "complete"
+    assert m["coverage"]["procmon"]["status"] == "partial"
+    assert "completion is unverified" in m["coverage"]["procmon"]["reason"]
     # frida was requested and produced nothing
     assert m["coverage"]["frida"]["status"] == "partial"
-    assert "no files" in m["coverage"]["frida"]["reason"]
+    assert "frida_trace.jsonl" in m["coverage"]["frida"]["reason"]
+
+    (tmp_path / "stage" / "META.job.json").write_text(
+        '{"procmon_csv": true}', encoding="utf-8")
+    completed = M.build_manifest(tmp_path / "stage", run_id="r", sha256=SHA,
+                                 requested={"procmon": True})
+    assert completed["coverage"]["procmon"]["status"] == "complete"
+
+
+def test_debug_monitor_coverage_is_run_pinned_and_required(tmp_path):
+    root = tmp_path / "sample" / "agentic-dbg"
+    for stage in ("intake", "quick", "deep", "yara", "report", "dynamic"):
+        (root / stage).mkdir(parents=True, exist_ok=True)
+    deep = root / "deep"
+    (deep / "deep.json").write_text("{}", encoding="utf-8")
+    (deep / "META.json").write_text('{"ok": true}', encoding="utf-8")
+    monitor = deep / "debug_monitor"
+    monitor.mkdir()
+    (monitor / "process.etl").write_bytes(b"ETW-native-trace")
+    (monitor / "process_events.jsonl").write_text(
+        '{"event":"process_start","process_id":123,"image_name":"sample.exe"}\n',
+        encoding="utf-8")
+    (monitor / "process_summary.json").write_text(
+        '{"events":1,"target_observed":true}', encoding="utf-8")
+    (monitor / "META.json").write_text(
+        '{"run_id":"r1","status":"collected"}', encoding="utf-8")
+    # Required sources are independently assessed by the deep stage manifest.
+    requests = {"deep_analysis": {"requested": True, "required": True},
+                "debug_monitor": {"requested": True, "required": True}}
+    m = M.write_manifest(deep, run_id="r1", sha256=SHA, mode="agentic-dbg",
+                         requested=requests, meta={"ok": True})
+    assert m["coverage"]["debug_monitor"]["status"] == "complete"
+    assert m["coverage"]["debug_monitor"]["required"] is True
+
+    (monitor / "META.json").write_text(
+        '{"run_id":"other","status":"collected"}', encoding="utf-8")
+    stale = M.build_manifest(deep, run_id="r1", sha256=SHA,
+                             mode="agentic-dbg", requested=requests,
+                             meta={"ok": True})
+    assert stale["coverage"]["debug_monitor"]["status"] == "failed"
+
+
+def test_debug_monitor_paths_keep_their_own_source():
+    assert M.classify("debug_monitor/process.etl", "deep")[0] == "debug_monitor"
+    assert M.classify("deep/debug_monitor/process_events.jsonl")[0] == "debug_monitor"
+    assert M.classify("debug_monitor/process_events.jsonl", "deep")[1] == M.DERIVED
 
 
 def test_a_source_that_was_never_requested_is_not_requested(tmp_path):
@@ -92,10 +138,15 @@ def test_a_source_missing_its_primary_output_is_partial(tmp_path):
 
 
 def test_files_from_a_source_imply_it_was_requested(tmp_path):
-    """A source whose output is plainly there must never read not_requested."""
+    """An artifact implies requested, not that the source completed."""
     m = M.build_manifest(_stage(tmp_path, [("windbg_analysis.json", "{}")]),
                          run_id="r", sha256=SHA, requested={})
-    assert m["coverage"]["windbg"]["status"] == "complete"
+    assert m["coverage"]["windbg"]["status"] == "partial"
+    (tmp_path / "stage" / "windbg_analysis.json").write_text(
+        '{"ok": true}', encoding="utf-8")
+    completed = M.build_manifest(tmp_path / "stage", run_id="r", sha256=SHA,
+                                 requested={})
+    assert completed["coverage"]["windbg"]["status"] == "complete"
 
 
 def test_incomplete_sources_names_every_gap(tmp_path):
@@ -105,21 +156,26 @@ def test_incomplete_sources_names_every_gap(tmp_path):
     gaps = dict(M.incomplete_sources(d))
     assert "network" in gaps, gaps
     assert gaps["network"].startswith("partial")
-    assert "procmon" not in gaps, "a source that ran must not be a gap"
+    assert gaps["procmon"].startswith("partial"), (
+        "an output without a terminal collector record is still a gap")
+    (d / "META.job.json").write_text('{"procmon_csv": true}', encoding="utf-8")
+    M.write_manifest(d, run_id="r", sha256=SHA,
+                     requested={"procmon": True, "network": True})
+    assert "procmon" not in dict(M.incomplete_sources(d))
 
 
 # ------------------------------------------------------- classification
 
 @pytest.mark.parametrize("rel,source,domain", [
     ("frida_trace.jsonl", "frida", M.IN_GUEST),
-    ("frida_summary.json", "frida", M.DERIVED),
+    ("frida_summary.json", "frida", M.IN_GUEST),
     ("procmon.csv", "procmon", M.IN_GUEST),
-    ("behavior_timeline.csv", "procmon", M.DERIVED),
+    ("behavior_timeline.csv", "procmon", M.IN_GUEST),
     ("memory/sample_early.dmp", "memory", M.IN_GUEST),
     ("post_mortem.json", "memory", M.IN_GUEST),
     ("network_raw/a.pcap", "network", M.IN_GUEST),
-    ("network_intel.json", "network", M.DERIVED),
-    ("windbg_analysis.json", "windbg", M.IN_GUEST),
+    ("network_intel.json", "network_enrichment", M.DERIVED),
+    ("windbg_analysis.json", "windbg", M.DERIVED),
     ("x64dbg/dump/probe.dmp", "x64dbg", M.IN_GUEST),
     ("malcat-triage.json", "malcat", M.IN_GUEST),
     ("off_box/guest.pcapng", "external_capture", M.OFF_BOX),

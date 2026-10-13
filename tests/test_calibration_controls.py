@@ -68,14 +68,17 @@ def test_a_read_of_an_executable_is_not_a_drop():
     assert f["findings"]["unverified_opens"], "the read vanished entirely"
 
 
-def test_a_proven_write_is_still_a_drop():
-    """Paired control: the fix must not blind the engine to real drops."""
-    f = F.dynamic_findings(pack({"decoded_paths": [PROVEN_DROP]},
-                                trace=[createfile(PROVEN_DROP, "0x40000000")]),
-                           sha=SHA)
+def test_a_successful_write_is_still_a_drop_but_not_intent_alone():
+    """A successful file effect is retained, while intent remains separate."""
+    f = F.dynamic_findings(pack({
+        "decoded_paths": [PROVEN_DROP],
+        "file_events": [{"path": PROVEN_DROP, "api": "WriteFile",
+                         "write_intent": True, "write_succeeded": True,
+                         "bytes_written": 128, "event_ref": "write-1"}],
+    }), sha=SHA)
     assert f["findings"]["drops"], "a PROVEN write was lost"
-    assert f["verdict"]["level"] == F.MALICIOUS
-    assert any(b.startswith("drop:") for b in f["verdict"]["basis"])
+    assert f["verdict"]["level"] == F.SUSPICIOUS
+    assert any(b.startswith("file-write:") for b in f["verdict"]["basis"])
 
 
 def test_an_unprovable_open_fails_closed_and_says_so():
@@ -142,22 +145,21 @@ def test_dns_resolution_alone_is_a_lead_not_c2():
         "the resolved host must remain visible as a lead")
 
 
-def test_an_http_request_promotes_the_lead_to_c2():
-    """Paired control: real communication must still be detected."""
+def test_an_http_request_from_vm_wide_capture_remains_an_unattributed_lead():
+    """A VM-wide request does not establish which process sent it."""
     n = net({"captures": [{"dns_queries": [HOST], "tls_sni": [],
                            "http_requests": [f"{HOST}\tGET\t/index"]}]})
-    assert [c["host"] for c in n["c2"]] == [HOST]
-    assert n["leads"] == []
-    assert n["c2"][0]["reason"], "a promotion must state why"
+    assert n["c2"] == []
+    assert [l["host"] for l in n["leads"]] == [HOST]
 
 
-def test_beaconing_promotes_the_lead_to_c2():
+def test_vm_wide_beacon_candidate_does_not_promote_to_c2():
     n = net({"captures": [{"dns_queries": [HOST], "tls_sni": [],
                            "http_requests": []}],
              "beacon_analysis": {"ok": True,
                                  "beacons": [{"host": HOST, "period_s": 60}]}})
-    assert [c["host"] for c in n["c2"]] == [HOST]
-    assert n["c2"][0]["kind"] == "beacon"
+    assert n["c2"] == []
+    assert [b["host"] for b in n["beacons"]] == [HOST]
 
 
 @pytest.mark.parametrize("host", ["example.org", "example.com", "example.net"])
@@ -195,7 +197,7 @@ def test_a_lead_alone_cannot_make_the_sample_malicious():
 def test_the_lead_note_states_the_rule():
     n = net({"captures": [{"dns_queries": [HOST], "tls_sni": [],
                            "http_requests": []}]})
-    assert "not a C2 host" in n["lead_note"]
+    assert "not sample contacts or C2" in n["lead_note"]
 
 
 # ------------------------------------------------------------------ W5

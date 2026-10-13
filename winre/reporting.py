@@ -62,6 +62,11 @@ def write_tools_raw(pack_root: Path) -> dict:
                         "reason": h.get("reason")})
     out["deep"] = {"source": agent.get("source"),
                    "verdict": agent.get("verdict"),
+                   "verdict_judged_by": agent.get("verdict_judged_by"),
+                   "judgment_pass_error": agent.get("judgment_pass_error"),
+                   "planner_draft": agent.get("planner_draft"),
+                   "debug_run": agent.get("debug_run"),
+                   "llm_roles": agent.get("llm_roles"),
                    "llm_analysis": agent.get("llm_analysis"),
                    "tool_calls": agent.get("tool_calls"),
                    "history": history,
@@ -194,11 +199,26 @@ def build_report_v3(pack_root: Path) -> dict:
     verdict = agent.get("verdict") or {}
     if not isinstance(verdict, dict):
         verdict = {"verdict": verdict or "unknown"}
+    src = agent.get("source") or "deterministic_fallback"
     audit = _load(pack_root / "audit.json") or {}
     iocs = _load(pack_root / "report" / "iocs.json") or {}
     yara_rep = _load(pack_root / "yara" / "rule_report.json") or {}
     dyn = _load(pack_root / "dynamic" / "META.json")
-    has_dynamic = bool(dyn)
+    dyn_stage = _load(pack_root / "dynamic" / "STAGE.json") or {}
+    has_dynamic = bool(
+        dyn_stage.get("detonation_ran") is True
+        or (dyn or {}).get("detonation_ran") is True
+        or (dyn or {}).get("sample_pid"))
+    pack_mode = pack_root.name
+    finding_record = _load(pack_root / "findings.json") or {}
+    composition = _load(pack_root / "composite.json") or {}
+    selected_level = (composition.get("level")
+                      or audit.get("selected_verdict")
+                      or verdict.get("verdict"))
+    selected_confidence = (composition.get("confidence")
+                           or verdict.get("confidence"))
+    selected_source = ("mode-composite" if composition.get("level")
+                       else src)
     raw = pack_root / "deep" / "01-tools-raw.json"
 
     L = []
@@ -209,8 +229,7 @@ def build_report_v3(pack_root: Path) -> dict:
     A(f"- **Sample:** `{intake.get('file', '?')}`  |  size {intake.get('size', '?')}  |  "
       f"format {intake.get('format', '?')}")
     A(f"- **Generated:** {_utc()}  |  **Phase:** "
-      f"{'static+dynamic' if has_dynamic else 'static'}")
-    src = agent.get("source") or "deterministic_fallback"
+      f"{'static+dynamic' if has_dynamic else 'static+debugger' if pack_mode == 'dbg' else 'static'}")
     A(f"- **Analysis source:** `{src}`  |  "
       f"**Audit:** truly_green={audit.get('truly_green')} "
       f"quality_green={audit.get('quality_green')}")
@@ -218,12 +237,18 @@ def build_report_v3(pack_root: Path) -> dict:
 
     A("## 1. Verdict")
     A("")
-    v = verdict.get("verdict") if isinstance(verdict, dict) else None
-    conf = verdict.get("confidence") if isinstance(verdict, dict) else None
-    A(f"**{str(v or 'unknown').upper()}** (confidence: {conf or 'n/a'}) — source `{src}`")
+    A(f"**{str(selected_level or 'unknown').upper()}** "
+      f"(confidence: {selected_confidence or 'n/a'}) — "
+      f"source `{selected_source}`")
+    if composition.get("deciding_mode"):
+        A(f"- Deciding mode: `{composition['deciding_mode']}`")
+    if composition.get("basis"):
+        A("- Composite basis: " + ", ".join(
+            f"`{item}`" for item in composition["basis"][:10]))
     A("")
     if isinstance(verdict, dict) and verdict.get("summary"):
-        A(f"> {verdict['summary']}")
+        A(f"> Deep-stage assessment ({str(verdict.get('verdict') or 'unknown').upper()}, "
+          f"source `{src}`): {verdict['summary']}")
         A("")
 
     A("## 2. File overview")
@@ -391,8 +416,54 @@ def build_report_v3(pack_root: Path) -> dict:
         A(f"- Curation warnings: {'; '.join(cur['warnings'])}")
     A("")
 
-    A("## 8. Dynamic analysis")
+    A("## 8. Execution evidence")
     A("")
+
+    if pack_mode == "dbg":
+        A("### Debugger-assisted observation")
+        A("")
+        dbg_findings = finding_record.get("findings") or {}
+        observation = dbg_findings.get("debug_observation") or {}
+        unpack = dbg_findings.get("unpack") or {}
+        if observation:
+            A(f"- Bounded debugger window: completed={observation.get('window_completed')}; "
+              f"observed={observation.get('observed_seconds')}s / "
+              f"requested={observation.get('requested_seconds')}s; "
+              f"target exit observed={observation.get('exit_observed')}.")
+            A(f"- ETW process monitor: status=`{observation.get('monitor_status')}`; "
+              f"target observed={observation.get('target_observed')}; "
+              f"starts={observation.get('process_starts')}; "
+              f"stops={observation.get('process_stops')}.")
+            if observation.get("scope"):
+                A(f"- Observer scope: {observation['scope']}.")
+            if observation.get("unique_images"):
+                A("- Process images observed: " + ", ".join(
+                    f"`{str(name)[:100]}`"
+                    for name in observation["unique_images"][:12]))
+        else:
+            A("- No debugger observation record was produced for this run.")
+        if unpack.get("ok"):
+            A(f"- Unpack result: OEP `{unpack.get('oep')}`; "
+              f"dump parses={unpack.get('parses')}; imports={unpack.get('imports')}.")
+        else:
+            A("- Unpack result: no usable OEP dump was recovered; this does not "
+              "invalidate a completed debugger observation.")
+        for limitation in (finding_record.get("limitations") or [])[:5]:
+            A(f"- Limitation: {limitation}")
+        A("")
+
+    A("### Dynamic detonation")
+    A("")
+
+    inventory = _load(pack_root / "artifact-manifest.json") or {}
+    coverage = inventory.get("coverage") or {}
+    requested_gaps = [(name, row) for name, row in coverage.items()
+                      if isinstance(row, dict) and row.get("requested")
+                      and row.get("status") != "complete"]
+    A(f"- Artifact inventory: {inventory.get('artifact_count', 0)} files; "
+      f"coverage gaps={len(requested_gaps)}.")
+    for name, row in requested_gaps[:8]:
+        A(f"  - `{name}`: {row.get('status')} — {row.get('reason')}")
 
     if has_dynamic:
         # W3 (RevAI review 2026-10-08): read the MODE ROOT.
@@ -428,6 +499,13 @@ def build_report_v3(pack_root: Path) -> dict:
                     flag = (" *(persistence location)*"
                             if d.get("persistence_location") else "")
                     A(f"    - `{d['path']}`{flag}")
+            if fd.get("created_files"):
+                A(f"  - successful create/truncate effects without a confirmed "
+                  f"write: {len(fd['created_files'])}; these are not counted as drops")
+            effect_intent = fd.get("file_effect_intent") or {}
+            if effect_intent:
+                A(f"  - file-effect intent: {effect_intent.get('status')} — "
+                  f"{effect_intent.get('note')}")
             if fd.get("device_writes"):
                 A("  - **raw-device writes:** "
                   + ", ".join(f"`{x}`" for x in fd["device_writes"][:4])
@@ -439,6 +517,16 @@ def build_report_v3(pack_root: Path) -> dict:
                     A(f"    - `{c.get('host')}` ({c.get('kind')})")
             if net.get("beacons"):
                 A(f"  - beacon candidates: {len(net['beacons'])}")
+            if net.get("frida_endpoint_count"):
+                A(f"  - Frida endpoint observations: "
+                  f"{net.get('frida_endpoint_count')} (sample-process API scope; "
+                  f"truncated={net.get('frida_endpoints_truncated')})")
+            fc = fd.get("frida_coverage") or {}
+            if fc:
+                A(f"  - Frida hook coverage: {len(fc.get('installed') or [])}/"
+                  f"{len(fc.get('requested') or [])} requested exports installed; "
+                  f"{len(fc.get('apis_fired') or [])} APIs observed; "
+                  f"status={fc.get('status')}")
             if net.get("pcap_deep_dive"):
                 A(f"  - pcap deep-dive: {net['pcap_deep_dive']}")
             for inj in (fd.get("injection") or []):
@@ -478,8 +566,41 @@ def build_report_v3(pack_root: Path) -> dict:
                   + " - detonation saw these, emulation missed "
                   "(emulation coverage gap).")
     else:
-        A("- Not run (static-only pack). Detonation is opt-in, segregated, "
-          "runs LAST, snapshot-gated, and its findings land here.")
+        if pack_mode == "dbg":
+            A("- No dynamic detonation was observed in this debugger-assisted run. "
+              "Detonation is a separate, opt-in producer and its findings land here.")
+        else:
+            A("- No dynamic detonation was observed in this run. Detonation is "
+              "opt-in, segregated, snapshot-gated, and runs as a separate producer.")
+        if dyn_stage.get("summary"):
+            A(f"- Dynamic stage: {dyn_stage['summary']}")
+    # Correlation is a cited analysis aid, not a verdict input. It remains
+    # visible in static-only packs so the report says explicitly that no
+    # current-run dynamic comparison was available.
+    corr = finding_record.get("correlation") or {}
+    if corr:
+        A("### Static/runtime correlation (candidate links)")
+        A("")
+        A(f"- Status: `{corr.get('status')}`; this section does not change the verdict.")
+        counts = corr.get("counts") or {}
+        A("- Relationships: " + ", ".join(
+            f"{name}={counts.get(name, 0)}" for name in
+            ("confirmed", "predicted_not_observed", "observed_not_predicted", "unverifiable")))
+        hyps = {h.get("id"): h for h in corr.get("hypotheses") or []
+                if isinstance(h, dict)}
+        obs = {o.get("id"): o for o in corr.get("observations") or []
+               if isinstance(o, dict)}
+        for rel in (corr.get("relationships") or [])[:8]:
+            h = hyps.get(rel.get("hypothesis_id")) or {}
+            matched = [obs[o] for o in (rel.get("observation_ids") or [])
+                       if o in obs]
+            label = h.get("value") or (matched[0].get("value") if matched else "unmatched candidate")
+            A(f"  - `{rel.get('status')}` `{label}` — {rel.get('reason')}; "
+              f"static refs={rel.get('hypothesis_refs') or 'none'}, "
+              f"dynamic refs={rel.get('observation_refs') or 'none'}")
+        for limitation in (corr.get("limitations") or [])[:5]:
+            A(f"  - coverage limitation: {limitation}")
+        A("")
     A("")
 
     A("## 9. Honesty & audit")

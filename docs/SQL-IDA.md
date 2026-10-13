@@ -1,9 +1,10 @@
-# SQL-IDA — Windows (FlareVM) — REAL ENGINE
+# SQL-IDA — Windows (FlareVM)
 
-> **Status: REAL (2026-09-15).** SQL-first IDA access, mirroring RevAI: the
-> free `idasql` engine runs against the `.i64` and is driven by
-> `tools/ida_sql_client.py`. No stub, no license gate — `idasql` is a public
-> release (`github.com/allthingsida/idasql`), version-matched to the IDA build.
+> **Integration:** WinRE uses the free `idasql` engine against an `.i64`
+> database through `tools/ida_sql_client.py`. `idasql` is not a substitute
+> for IDA licensing: WinRE's headless database workflow requires a compatible,
+> activated IDA Professional installation. Verify the pairing on the deployed
+> revision.
 > **Audience:** integrators querying IDA over SQL.
 
 ```
@@ -22,8 +23,9 @@ Port: HTTP `:19300` bound to `127.0.0.1`.
 | idasql CLI | `<IDA>\idasql.exe` next to `idat.exe` | staged by `ops/provision_tools.ps1` (downloads `idasql-v0.0.18.1-ida93.zip` from GitHub releases) → installed by `install/setup-flarevm.ps1` |
 | IDA plugin (optional, GUI) | `<IDA>\plugins\{idasql.dll,ida-plugin.json}` | same archive (`windows-x86_64/plugin/`) |
 
-Version matrix: pick the archive matching the installed IDA (9.2/9.3/9.4);
-IDA 9.3 is the WinRE default. `idasql v0.0.18.1` verified on this VM.
+Version matrix: select an archive matching the installed IDA version. The
+recorded IDA 9.3 verification used `idasql v0.0.18.1`; rerun the health and
+query checks below after changing either component.
 
 ## Verification (no stubs)
 

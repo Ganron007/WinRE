@@ -89,15 +89,16 @@
       <div class="table-wrap"><table><tbody>
         <tr><td class="mono">WINRE_SNAPSHOT_GATE</td><td class="mono">{{ cfg.gate.mode }}</td></tr>
         <tr><td class="mono">marker</td><td class="mono">{{ cfg.gate.marker_path }}</td></tr>
-        <tr><td class="mono">auto-restore</td><td class="mono">
+        <tr><td class="mono">hypervisor (report-only)</td><td class="mono">
           {% if cfg.gate.hypervisor %}{{ cfg.gate.hypervisor.hypervisor }} ·
-            {{ cfg.gate.hypervisor.snapshot }}{% else %}not configured
-            (set WINRE_HYPERVISOR / WINRE_VM_PATH / WINRE_SNAPSHOT){% endif %}</td></tr>
+            {{ cfg.gate.hypervisor.snapshot }}{% else %}not configured{% endif %}</td></tr>
       </tbody></table></div>
       <p class="muted" style="font-size:var(--tx-xs)">
-        <b>enforce is the default</b>: a detonation/debug is refused unless the
-        clean marker is present (or a hypervisor auto-restore just re-created
-        it), and the marker is consumed on use. <b>observe</b> is the explicit
+        <b>enforce is the default</b>: guest analysis is refused unless the
+        clean marker is present and the separate control-plane ledger is
+        attested clean. A guest process can recreate its marker; only an
+        operator restore and control-plane attestation clear the ledger.
+        Hypervisor settings are report-only. <b>observe</b> is the explicit
         opt-in override for benign test loops (records evidence, never blocks).
         A refused dynamic stage writes a fresh <code>dynamic/STAGE.json</code>
         and the audit sets <code>dynamic_blocked</code>. See

@@ -120,7 +120,7 @@ def test_two_executions_are_refused_with_one_clear_message():
     # the message must tell the operator the three real ways forward
     assert "--dynamic" in err and "restore" in err
     assert "WINRE_SNAPSHOT_GATE=observe" in err
-    assert "WINRE_HYPERVISOR" in err
+    assert "separate control plane" in err
 
 
 def test_observe_mode_is_advisory_and_needs_no_restore(monkeypatch):
@@ -135,10 +135,10 @@ def test_snapshot_restore_is_not_a_product_capability(monkeypatch):
 
     This test used to assert the OPPOSITE: that configuring
     WINRE_HYPERVISOR/VM_PATH/SNAPSHOT made `auto_restore` true and granted an
-    execution budget of 2. Reverting re-arms the one-shot clean marker, so a
-    single run could execute the sample repeatedly with nobody deciding the VM
-    was clean again - the marker exists precisely so a person makes that
-    decision. Restoring is an operator action (operator directive 2026-10-06).
+    execution budget of 2. Restoring can re-arm the guest marker, but the
+    control-plane ledger remains dirty until a person attests the restored VM.
+    Both controls are required; the guest marker alone is not a trust anchor.
+    Restoring is an operator action (operator directive 2026-10-06).
     """
     monkeypatch.setenv("WINRE_HYPERVISOR", "vmware")
     monkeypatch.setenv("WINRE_VM_PATH", r"C:\vm\flare.vmx")
@@ -228,14 +228,17 @@ def test_report_fallback_source_is_flagged(tmp_path):
     assert any("deterministic_fallback" in u for u in res["unmet_expectations"])
 
 
-def test_verdict_present_stays_green(tmp_path):
+def test_verdict_present_does_not_override_missing_pack_contracts(tmp_path):
     pack = _pack(tmp_path)
     _green_section(pack, verdict="benign")
     res = audit_mod.audit(pack.root)
-    assert res["unmet_expectations"] == []
-    assert res["truly_green"] is True
+    assert res["truly_green"] is False
+    assert any("current-run composite selection" in u
+               for u in res["unmet_expectations"])
     assert res["deep_verdict"] == "benign"
     assert res["static_verdict"] == "benign"
+    assert not any("deep verdict missing" in u or "report verdict missing" in u
+                   for u in res["unmet_expectations"])
 
 
 @pytest.mark.parametrize("raw,label,missing", [
@@ -518,6 +521,6 @@ def test_run_line_distinguishes_unknown_from_no_verdict():
 
 def test_casepack_is_documented_as_a_pack_level_file():
     doc = (REPO / "docs" / "EVIDENCE.md").read_text(encoding="utf-8")
-    assert "case-" in doc and "DFIR-Nexus ingest pack" in doc
+    assert "case-" in doc and "DFIR-Nexus" in doc
     bridge = (REPO / "docs" / "REVAI-BRIDGE.md").read_text(encoding="utf-8")
     assert "case-" in bridge

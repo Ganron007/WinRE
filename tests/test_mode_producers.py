@@ -24,18 +24,23 @@ SHA = "a" * 64
     ("agentic", False, False, "agentic"),
     ("agentic", True, False, "dbg"),
     ("agentic", False, True, "dynamic"),
-    ("static", True, False, "static"),      # static has no dbg variant
-    ("static", False, True, "static"),      # ...nor a dynamic one
 ])
 def test_resolve_pack_mode_picks_one_root(mode, dbg, dyn, expect):
     assert resolve_pack_mode(mode, agentic_dbg=dbg, dynamic=dyn) == expect
 
 
+@pytest.mark.parametrize("dbg,dyn", [(True, False), (False, True)])
+def test_static_engine_rejects_unsupported_capabilities(dbg, dyn):
+    with pytest.raises(ValueError, match="static engine does not support"):
+        resolve_pack_mode("static", agentic_dbg=dbg, dynamic=dyn)
+
+
 def test_the_driver_and_pipeline_agree():
     """Two entry points, one authority - or evidence lands in two places."""
-    for mode in ("static", "agentic"):
-        for dbg in (False, True):
-            for dyn in (False, True):
+    for mode, dbg, dyn in (("static", False, False),
+                           ("agentic", False, False),
+                           ("agentic", True, False),
+                           ("agentic", False, True)):
                 a = resolve_pack_mode(mode, agentic_dbg=dbg, dynamic=dyn)
                 assert a in MODES
                 assert EvidencePack.resolve_mode(

@@ -3,6 +3,7 @@ param(
   [Parameter(Mandatory = $true)][string]$Sha256,
   [string]$SamplePath = "",
   [int]$MaxSeconds = 45,
+  [int]$MaxChildren = 16,
   [string]$WorkRoot = "",
   [string]$Python = "C:\Python313\python.exe",
   [string]$FridaScript = "C:\WinRE\tools\frida_api_trace.py",
@@ -206,7 +207,8 @@ try {
     "--apis", $Apis,
     "--out", $trace,
     "--max-seconds", "$MaxSeconds",
-    "--max-calls", "5000"
+    "--max-calls", "5000",
+    "--max-children", "$MaxChildren"
   )
   if ($Adaptive) {
     # adaptive window: max-seconds is the CAP, idle-stop ends a quiet run

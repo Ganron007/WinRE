@@ -86,7 +86,8 @@ def test_the_orchestrator_does_not_import_it_on_the_vm_side():
 
 def test_the_orchestrator_defers_it():
     src = pathlib.Path(orchestrator.__file__).read_text(encoding="utf-8")
-    assert 'deferred["analyst_next"]' in src, (
+    assert '"analyst_next", "windbg_dump"' in src and \
+        'notes["deferred_to_control_plane"] = deferred' in src, (
         "ANALYST-NEXT is neither run on the VM nor recorded as deferred, so "
         "a reader cannot tell 'ran elsewhere' from 'never ran'")
 

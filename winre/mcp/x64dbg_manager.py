@@ -64,7 +64,8 @@ def stage_safe_sample(cfg: dict, remote_sample: str,
     x64dbg module lookups parse names as expressions — a hyphenated sample
     (`notepad-sys32.exe`) never resolves (`Module "notepad-sys32" not found`,
     verified live), so DetectOEP/DumpModule/AnalyzeModule silently fail.
-    Unsafe names are copied once to C:\\samples\\x64_<name>_<tag><ext>.
+    Unsafe names are copied beside the run-specific staged sample, preserving
+    the verified run directory and avoiding a shared mutable debug copy.
     Safe names are returned unchanged (no copy).
     """
     name = remote_sample.replace("/", "\\").rsplit("\\", 1)[-1]
@@ -72,7 +73,9 @@ def stage_safe_sample(cfg: dict, remote_sample: str,
     if module_name_is_safe(stem):
         return remote_sample
     safe_name = safe_module_filename(name, tag)
-    safe_path = rf"C:\samples\{safe_name}"
+    remote_sample = remote_sample.replace("/", "\\")
+    parent = remote_sample.rsplit("\\", 1)[0]
+    safe_path = rf"{parent}\{safe_name}"
     try:
         remote_driver.ssh_ps(
             cfg,

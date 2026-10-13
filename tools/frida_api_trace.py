@@ -361,6 +361,8 @@ def main() -> None:
     ap.add_argument("--module", default=None, help="unused (compat); hooks resolve globally")
     ap.add_argument("--out", required=True, help="output JSONL file")
     ap.add_argument("--max-calls", type=int, default=10000)
+    ap.add_argument("--max-children", type=int, default=16,
+                    help="maximum child processes to instrument (0 disables child gating)")
     ap.add_argument("--max-seconds", type=int, default=60)
     ap.add_argument(
         "--idle-stop",
@@ -399,6 +401,15 @@ def main() -> None:
         print("FATAL: --apis is empty", file=sys.stderr)
         sys.exit(1)
 
+    # Allocate a deterministic per-process slice so the sum across the root
+    # plus every allowed child cannot exceed the advertised trace call cap.
+    # Unused child allocations remain unused; we never overstate the bound.
+    process_slots = max(1, max(0, int(args.max_children)) + 1)
+    child_call_budget, root_call_remainder = divmod(
+        max(0, int(args.max_calls)), process_slots)
+    root_call_budget = child_call_budget + root_call_remainder
+    max_calls_total = root_call_budget + child_call_budget * (process_slots - 1)
+
     apis_js = ",\n        ".join(f'"{a}"' for a in api_list)
     # Path/string decode map: which arg indices are WCHAR* or CHAR*
     # Also sockaddr decoding for connect/sendto when possible.
@@ -407,8 +418,13 @@ def main() -> None:
 const apis = [
         {apis_js}
 ];
-const maxCalls = {args.max_calls};
+const maxCalls = {root_call_budget};
+const maxChildren = {args.max_children};
 let callCount = 0;
+let invocationSeq = 0;
+const hookCoverage = {{requested: apis.slice(), installed: [], installed_exports: [],
+    unavailable: [], failures: [], modules_seen: 0, module_observer: 'starting'}};
+const attachedExports = {{}};
 
 // WCHAR* / CHAR* argument indices by API name
 const wcharArgs = {{
@@ -492,11 +508,18 @@ function ptrToU32(p) {{
 // sockaddr* argument index by API name
 const sockaddrArgs = {{
   connect: [1],
-  connectEx: [1],
+  ConnectEx: [1],
   WSAConnect: [1],
-  sendto: [2],
-  recvfrom: [2],
+  sendto: [4],
+  recvfrom: [4],
+  WSASendTo: [5],
+  WSARecvFrom: [5],
 }};
+const sockaddrOutputApis = new Set(['recvfrom', 'wsarecvfrom']);
+const networkApis = new Set(['connect', 'connectex', 'wsaconnect', 'sendto',
+  'recvfrom', 'wsasendto', 'wsarecvfrom', 'winhttpconnect', 'internetconnecta',
+  'internetconnectw', 'httpopenrequesta', 'httpopenrequestw', 'winhttpopenrequest',
+  'urldownloadtofilea', 'urldownloadtofilew']);
 
 function resolveExport(name) {{
     try {{
@@ -532,19 +555,48 @@ function safeReadUtf8(ptr) {{
     }}
 }}
 
-function decodeSockAddr(ptr) {{
+function safeReadObjectName(objectAttributes) {{
+    try {{
+        if (!objectAttributes || objectAttributes.isNull()) return null;
+        const nameOffset = Process.pointerSize * 2;
+        const name = objectAttributes.add(nameOffset).readPointer();
+        if (!name || name.isNull()) return null;
+        const bufferOffset = Process.pointerSize === 8 ? 8 : 4;
+        const buffer = name.add(bufferOffset).readPointer();
+        return safeReadUtf16(buffer);
+    }} catch (e) {{ return null; }}
+}}
+
+function decodeSockAddr(ptr, length) {{
     try {{
         if (!ptr || ptr.isNull()) return null;
         const family = ptr.readU16();
         if (family === 2) {{ // AF_INET
+            if (length !== undefined && length !== null && length < 16) return null;
             const port = ((ptr.add(2).readU8() << 8) | ptr.add(3).readU8());
             const a = ptr.add(4).readU8();
             const b = ptr.add(5).readU8();
             const c = ptr.add(6).readU8();
             const d = ptr.add(7).readU8();
-            return a + '.' + b + '.' + c + '.' + d + ':' + port;
+            const ip = a + '.' + b + '.' + c + '.' + d;
+            return {{family: 'ipv4', family_number: family, ip: ip, port: port,
+                    scope_id: null, endpoint: ip + ':' + port}};
         }}
-        return 'family=' + family;
+        if (family === 23) {{ // AF_INET6
+            if (length !== undefined && length !== null && length < 28) return null;
+            const port = ((ptr.add(2).readU8() << 8) | ptr.add(3).readU8());
+            const bytes = new Uint8Array(ptr.add(8).readByteArray(16));
+            const groups = [];
+            for (let i = 0; i < 16; i += 2)
+                groups.push(((bytes[i] << 8) | bytes[i + 1]).toString(16));
+            const scope = ptr.add(24).readU32();
+            const ip = groups.join(':');
+            return {{family: 'ipv6', family_number: family, ip: ip, port: port,
+                    scope_id: scope || null,
+                    endpoint: '[' + ip + (scope ? '%' + scope : '') + ']:' + port}};
+        }}
+        return {{family: 'unknown', family_number: family, ip: null,
+                port: null, scope_id: null, endpoint: 'family=' + family}};
     }} catch (e) {{
         return null;
     }}
@@ -567,10 +619,18 @@ function enrichArgs(name, args) {{
         const s = safeReadUtf8(args[i]);
         if (s !== null) decoded['arg' + i] = s;
     }}
+    if (name === 'NtCreateFile' || name === 'ZwCreateFile') {{
+        const objectName = safeReadObjectName(args[2]);
+        if (objectName !== null) decoded['path'] = objectName;
+    }}
     const saIdx = sockaddrArgs[name] || [];
     for (const i of saIdx) {{
+        if (sockaddrOutputApis.has(name.toLowerCase())) continue;
         const sa = decodeSockAddr(args[i]);
-        if (sa) decoded['sockaddr' + i] = sa;
+        if (sa) {{
+            decoded['sockaddr' + i] = sa.endpoint;
+            decoded['sockaddr_meta' + i] = sa;
+        }}
     }}
     // P1-F6: resolve a handle-taking API (WriteFile & co) back to the path
     // that handle was opened with. Without this a file write cannot be
@@ -592,8 +652,13 @@ function enrichArgs(name, args) {{
         const acc = ptrToU32(args[1]);
         decoded['access'] = '0x' + acc.toString(16);
         decoded['writes'] = !!(acc & WRITE_ACCESS_MASK);
+        decoded['write_intent'] = decoded['writes'];
         decoded['reads'] = !!(acc & READ_ACCESS_MASK);
         decoded['provenance'] = 'access-mask';
+    }}
+    if (createApiSet.has(name)) {{
+        const dispositionIdx = (name === 'NtCreateFile' || name === 'ZwCreateFile') ? 7 : 4;
+        decoded['creation_disposition'] = ptrToU32(args[dispositionIdx]);
     }}
     // W1, second half: a WRITE-FAMILY call with an attributed path is positive
     // write evidence in its own right, independent of any access mask.
@@ -611,6 +676,7 @@ function enrichArgs(name, args) {{
     // is the evidence.
     if (writeFamilySet.has(name) && decoded['path']) {{
         decoded['writes'] = true;
+        decoded['write_intent'] = true;
         decoded['provenance'] = 'write-to-attributed-path';
     }}
     return {{ args: out, decoded: decoded }};
@@ -619,16 +685,21 @@ function enrichArgs(name, args) {{
 // handle -> path, filled when a CreateFile* returns and cleared on
 // CloseHandle so the map cannot grow unbounded across a long window.
 const handlePaths = {{}};
-const pendingPathByTid = {{}};
 
-function rememberOpenedHandle(name, retval, tid) {{
+function rememberOpenedHandle(name, retval, ctx, outcome) {{
     if (!createApiSet.has(name)) return;
+    // Do not bind a stale output handle after a failed NT call, nor a handle
+    // whose asynchronous create has not completed yet.
+    if (!outcome || outcome.success !== true
+        || outcome.effect === 'async_pending_completion_unobserved') return;
     if (retval === null || retval === undefined) return;
-    const rv = retval.toString();
-    if (rv === '0x0' || rv === '0xffffffff' || rv === '-1') return;
-    const p = pendingPathByTid[tid];
-    if (p) handlePaths[rv] = p;
-    pendingPathByTid[tid] = null;
+    let handle = retval;
+    if (name === 'NtCreateFile' || name === 'ZwCreateFile') {{
+        try {{ handle = ctx.fileHandlePtr.readPointer(); }} catch (e) {{ return; }}
+    }}
+    const rv = handle.toString();
+    if (rv === '0x0' || rv === '0xffffffff' || rv === '0xffffffffffffffff' || rv === '-1') return;
+    if (ctx.filePath) handlePaths[rv] = ctx.filePath;
 }}
 
 function forgetHandle(name, args) {{
@@ -636,25 +707,135 @@ function forgetHandle(name, args) {{
     delete handlePaths[args[0].toString()];
 }}
 
-function attachApi(name) {{
+function readWrittenBytes(ptr) {{
     try {{
-        const addr = resolveExport(name);
+        if (!ptr || ptr.isNull()) return null;
+        const value = Process.pointerSize === 8 ? ptr.readU64() : ptr.readU32();
+        return Number(value.toString());
+    }} catch (e) {{ return null; }}
+}}
+
+function returnOutcome(name, retval, ctx) {{
+    const low = name.toLowerCase();
+    let raw = null;
+    try {{ raw = retval ? retval.toString() : '0x0'; }} catch (e) {{}}
+    let success = null;
+    let bytes = null;
+    let writeSucceeded = false;
+    let effect = 'attempted';
+    if (createApiSet.has(name)) {{
+        const ntCreate = low === 'ntcreatefile' || low === 'zwcreatefile';
+        let status = null;
+        if (low === 'ntcreatefile' || low === 'zwcreatefile') {{
+            try {{ status = retval.toUInt32(); success = retval.toInt32() >= 0; }} catch (e) {{}}
+        }} else {{
+            try {{ success = retval.toUInt32() !== 0xffffffff; }} catch (e) {{}}
+        }}
+        if (ntCreate && status === 0x103) {{
+            success = true;
+            effect = 'async_pending_completion_unobserved';
+        }} else if (success) {{
+            effect = 'opened';
+            const createDisposition = ntCreate ? [0, 2, 4, 5] : [1, 2, 5];
+            if (createDisposition.indexOf(ctx.creationDisposition) !== -1)
+                effect = 'created_or_truncated';
+            else if ((!ntCreate && ctx.creationDisposition === 4)
+                     || (ntCreate && ctx.creationDisposition === 3))
+                effect = 'created_if_absent_or_opened';
+        }} else if (success === false) {{ effect = 'failed'; }}
+    }} else if (low === 'writefile' || low === 'writefilegather') {{
+        try {{ success = retval.toInt32() !== 0; }} catch (e) {{}}
+        bytes = low === 'writefile' ? readWrittenBytes(ctx.bytesWrittenPtr) : null;
+        writeSucceeded = success === true && bytes !== null && bytes > 0;
+        if (writeSucceeded) effect = 'written';
+        else if (success === false) effect = 'failed';
+        else if (success === true) effect = 'accepted_without_byte_count';
+    }} else if (low === 'ntwritefile' || low === 'zwwritefile') {{
+        let status = null;
+        try {{ status = retval.toUInt32(); success = retval.toInt32() >= 0; }} catch (e) {{}}
+        if (status === 0x103) {{
+            effect = 'async_pending_completion_unobserved';
+            success = true;
+        }} else {{
+            try {{
+                if (ctx.ioStatusPtr && !ctx.ioStatusPtr.isNull()) {{
+                    bytes = readWrittenBytes(ctx.ioStatusPtr.add(Process.pointerSize));
+                }}
+            }} catch (e) {{}}
+        }}
+        writeSucceeded = success === true && bytes !== null && bytes > 0;
+        if (writeSucceeded) effect = 'written';
+        else if (success === false) effect = 'failed';
+        else if (success === true && effect === 'attempted') effect = 'accepted_without_byte_count';
+    }} else if (low === 'writefileex') {{
+        try {{ success = retval.toInt32() !== 0; }} catch (e) {{}}
+        effect = success === true ? 'async_accepted_completion_unobserved' : 'failed';
+    }}
+    return {{raw: raw, success: success, bytes_written: bytes,
+             write_succeeded: writeSucceeded, effect: effect}};
+}}
+
+function emitCoverage() {{
+    send({{type: 'coverage', pid: Process.id, requested: hookCoverage.requested,
+          installed: hookCoverage.installed, installed_exports: hookCoverage.installed_exports,
+          unavailable: hookCoverage.unavailable, failures: hookCoverage.failures,
+          max_calls: maxCalls, modules_seen: hookCoverage.modules_seen,
+          module_observer: hookCoverage.module_observer,
+          process_coverage_complete: hookCoverage.module_observer === 'active',
+          scope: 'requested exports in this process; child coverage is reported by the host controller'}});
+}}
+
+function callerInfo(address) {{
+    try {{
+        const module = Process.findModuleByAddress(address);
+        const sym = DebugSymbol.fromAddress(address);
+        return {{address: address.toString(),
+                module: module ? module.name : null,
+                module_base: module ? module.base.toString() : null,
+                module_offset: module ? address.sub(module.base).toString() : null,
+                symbol: sym ? sym.toString() : null}};
+    }} catch (e) {{ return {{address: address ? address.toString() : null,
+                             resolution_error: String(e)}}; }}
+}}
+
+function attachApi(name, module) {{
+    try {{
+        let addr = null;
+        try {{ addr = module ? module.findExportByName(name) : resolveExport(name); }} catch (e) {{}}
         if (!addr) {{
-            send({{type: 'log', level: 'warn', msg: `API ${{name}} not found`}});
+            if (!module && hookCoverage.unavailable.indexOf(name) === -1)
+                hookCoverage.unavailable.push(name);
             return;
         }}
+        const addrKey = addr.toString();
+        const already = attachedExports[name] || [];
+        if (already.indexOf(addrKey) !== -1) return;
+        attachedExports[name] = already.concat([addrKey]);
         Interceptor.attach(addr, {{
             onEnter: function (args) {{
+                this.recorded = false;
                 if (callCount >= maxCalls) return;
                 callCount++;
                 const tid = Process.getCurrentThreadId();
                 const enriched = enrichArgs(name, args);
+                this.recorded = true;
+                this.tid = tid;
+                this.invocationId = Process.id + ':' + tid + ':' + (++invocationSeq);
+                this.decoded = enriched.decoded;
+                this.networkCall = networkApis.has(name.toLowerCase());
+                this.caller = this.networkCall ? callerInfo(this.returnAddress) : null;
+                this.creationDisposition = enriched.decoded['creation_disposition'];
+                this.bytesWrittenPtr = name === 'WriteFile' ? args[3] : null;
+                this.ioStatusPtr = (name.toLowerCase() === 'ntwritefile' || name.toLowerCase() === 'zwwritefile') ? args[4] : null;
+                if (sockaddrOutputApis.has(name.toLowerCase())) {{
+                    const lenArg = name.toLowerCase() === 'recvfrom' ? 5 : 6;
+                    this.sockaddrOutPtr = args[(sockaddrArgs[name] || [])[0]];
+                    this.sockaddrOutLenPtr = args[lenArg];
+                }}
                 // P1-F6: stash the path a CreateFile* is opening, so the
                 // handle it returns can be resolved back to that path.
-                if (createApiSet.has(name)) {{
-                    pendingPathByTid[tid] = enriched.decoded['arg0']
-                        || enriched.decoded['arg5'] || null;
-                }}
+                this.filePath = enriched.decoded['path'] || enriched.decoded['arg0'] || null;
+                this.fileHandlePtr = args[0];
                 if (closeApiSet.has(name)) {{
                     forgetHandle(name, args);
                 }}
@@ -662,29 +843,88 @@ function attachApi(name) {{
                     type: 'call',
                     ts: Date.now(),
                     api: name,
+                    pid: Process.id,
                     tid: tid,
+                    invocation_id: this.invocationId,
+                    caller: this.caller,
                     args: enriched.args,
                     decoded: enriched.decoded
                 }});
             }},
             onLeave: function (retval) {{
-                rememberOpenedHandle(name, retval, Process.getCurrentThreadId());
+                if (!this.recorded) return;
+                const outcome = returnOutcome(name, retval, this);
+                rememberOpenedHandle(name, retval, this, outcome);
                 send({{
                     type: 'ret',
                     ts: Date.now(),
                     api: name,
-                    tid: Process.getCurrentThreadId(),
-                    retval: retval ? retval.toString() : null
+                    pid: Process.id,
+                    tid: this.tid,
+                    invocation_id: this.invocationId,
+                    retval: outcome.raw,
+                    success: outcome.success,
+                    bytes_written: outcome.bytes_written,
+                    write_succeeded: outcome.write_succeeded,
+                    effect: outcome.effect
                 }});
+                if (sockaddrOutputApis.has(name.toLowerCase())) {{
+                    try {{
+                        const rc = retval.toInt32();
+                        const len = this.sockaddrOutLenPtr && !this.sockaddrOutLenPtr.isNull()
+                            ? this.sockaddrOutLenPtr.readU32() : null;
+                        if (rc !== -1 && this.sockaddrOutPtr) {{
+                            const endpoint = decodeSockAddr(this.sockaddrOutPtr, len);
+                            if (endpoint) send({{type: 'endpoint', ts: Date.now(),
+                                api: name, pid: Process.id, tid: this.tid,
+                                invocation_id: this.invocationId, caller: this.caller,
+                                decoded_key: 'sockaddr_out', address: endpoint.endpoint,
+                                address_family: endpoint.family,
+                                family_number: endpoint.family_number,
+                                ip: endpoint.ip, port: endpoint.port,
+                                scope_id: endpoint.scope_id,
+                                role: 'inbound'}});
+                        }}
+                    }} catch (e) {{}}
+                }}
             }}
         }});
-        send({{type: 'log', level: 'info', msg: `hooked ${{name}}`}});
+        if (hookCoverage.installed.indexOf(name) === -1)
+            hookCoverage.installed.push(name);
+        hookCoverage.installed_exports.push({{api: name,
+            module: module ? module.name : (Process.findModuleByAddress(addr) || {{}}).name || null,
+            address: addrKey}});
+        hookCoverage.unavailable = hookCoverage.unavailable.filter(x => x !== name);
     }} catch (e) {{
-        send({{type: 'log', level: 'error', msg: `hook ${{name}} failed: ${{e}}`}});
+        hookCoverage.failures.push({{api: name, module: module ? module.name : null,
+                                     error: String(e)}});
     }}
 }}
 
-apis.forEach(attachApi);
+apis.forEach(name => attachApi(name, null));
+try {{
+    hookCoverage.module_observer = 'active';
+    Process.attachModuleObserver({{
+        onAdded(module) {{
+            hookCoverage.modules_seen++;
+            const before = hookCoverage.installed_exports.length;
+            apis.forEach(name => attachApi(name, module));
+            if (hookCoverage.installed_exports.length !== before) emitCoverage();
+        }}
+    }});
+}} catch (e) {{
+    hookCoverage.module_observer = 'failed';
+    hookCoverage.failures.push({{api: '<module-observer>', error: String(e)}});
+}}
+emitCoverage();
+function listenForControl() {{
+    recv('coverage-flush', function () {{
+        emitCoverage();
+        send({{type: 'coverage-flushed', pid: Process.id}});
+        listenForControl();
+    }});
+}}
+listenForControl();
 send({{type: 'log', level: 'info', msg: 'hooks installed'}});
 """
 
@@ -725,6 +965,18 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
     out_fh = open(out_path, "w", encoding="utf-8")
     write_lock = threading.Lock()
     closed = {"done": False}
+    child_lock = threading.RLock()
+    child_scripts = []
+    child_sessions = []
+    instrumented_pids = {int(spawned_pid or args.pid)}
+    coverage_by_pid = {}
+    coverage_flush_acks = set()
+    child_state = {"requested": max(0, int(args.max_children)) > 0,
+                   "enabled": False, "attempted": 0,
+                   "instrumented": [], "failures": [], "limit_reached": False,
+                   "inflight": 0, "enable_error": None,
+                   "signal_registered": False}
+    call_counts = {}
     # shared, mutable time origin: the message handler can fire as soon as the
     # script loads, before the run loop assigns its own t_start
     t0 = {"t": time.time()}
@@ -739,6 +991,15 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
             return
         try:
             if msg["type"] == "send":
+                payload = msg.get("payload") or {}
+                if isinstance(payload, dict):
+                    if payload.get("type") == "coverage":
+                        coverage_by_pid[str(payload.get("pid"))] = payload
+                    elif payload.get("type") == "coverage-flushed":
+                        coverage_flush_acks.add(str(payload.get("pid")))
+                    elif payload.get("type") == "call":
+                        key = str(payload.get("pid"))
+                        call_counts[key] = call_counts.get(key, 0) + 1
                 with write_lock:
                     if closed["done"]:
                         return
@@ -749,7 +1010,6 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
                 # the follow-on traffic (the actual C2 POST, the dropped file's
                 # contents) is still captured before we stop
                 if not gate["fired"] and gate_kinds:
-                    payload = msg.get("payload") or {}
                     if isinstance(payload, dict) and payload.get("type") == "call":
                         hit = gate_for(payload.get("api"), gate_kinds,
                                        gate_apis, payload.get("args"),
@@ -781,6 +1041,80 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
         except Exception:
             pass
 
+    def _write_controller_event(payload):
+        try:
+            with write_lock:
+                if not closed["done"]:
+                    out_fh.write(json.dumps(payload) + "\n")
+                    out_fh.flush()
+        except Exception:
+            pass
+
+    def _instrument_child(child):
+        pid = int(getattr(child, "pid", 0) or 0)
+        record = {"type": "process", "action": "child_instrumentation",
+                  "ts": time.time(), "pid": pid,
+                  "parent_pid": getattr(child, "parent_pid", None),
+                  "path": getattr(child, "path", None),
+                  "argv": getattr(child, "argv", None)}
+        try:
+            child_session = device.attach(pid)
+            child_session.enable_child_gating()
+            # Root source uses its allocated share; each child receives the
+            # fixed child slice from the same aggregate budget.
+            child_js = js.replace(
+                f"const maxCalls = {root_call_budget};",
+                f"const maxCalls = {child_call_budget};")
+            child_script = child_session.create_script(child_js)
+            child_script.on("message", on_message)
+            child_script.load()
+            with child_lock:
+                child_sessions.append(child_session)
+                child_scripts.append(child_script)
+                instrumented_pids.add(pid)
+                child_state["instrumented"].append(pid)
+            record.update(status="instrumented", max_calls=child_call_budget)
+            device.resume(pid)
+        except Exception as e:
+            record.update(status="failed", error=f"{type(e).__name__}: {str(e)[:220]}")
+            with child_lock:
+                child_state["failures"].append({"pid": pid, "error": record["error"]})
+            # A failed callback must not strand a child in a suspended state.
+            try:
+                device.resume(pid)
+            except Exception as resume_error:
+                record["resume_error"] = f"{type(resume_error).__name__}: {str(resume_error)[:100]}"
+        _write_controller_event(record)
+        with child_lock:
+            child_state["inflight"] = max(0, child_state["inflight"] - 1)
+
+    def _on_child_added(_device, child):
+        pid = int(getattr(child, "pid", 0) or 0)
+        with child_lock:
+            if pid in instrumented_pids:
+                return
+            child_state["attempted"] += 1
+            accepted = child_state["attempted"] <= max(0, int(args.max_children))
+            if not accepted:
+                child_state["limit_reached"] = True
+                record = {"type": "process", "action": "child_instrumentation",
+                          "ts": time.time(), "pid": pid,
+                          "parent_pid": getattr(child, "parent_pid", None),
+                          "path": getattr(child, "path", None),
+                          "status": "not_instrumented",
+                          "reason": "max_children limit reached"}
+                child_state["failures"].append({"pid": pid,
+                                                "error": record["reason"]})
+                _write_controller_event(record)
+                try:
+                    device.resume(pid)
+                except Exception:
+                    pass
+                return
+            instrumented_pids.add(pid)  # reserve before starting the worker
+            child_state["inflight"] += 1
+        threading.Thread(target=_instrument_child, args=(child,), daemon=True).start()
+
     def _hard_exit(code: int = 0) -> None:
         closed["done"] = True
         try:
@@ -805,6 +1139,19 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
 
     threading.Thread(target=_watchdog, daemon=True).start()
 
+    try:
+        device.on("child-added", _on_child_added)
+        child_state["signal_registered"] = True
+    except Exception as e:
+        child_state["failures"].append({"error": f"child-added signal unavailable: {str(e)[:160]}"})
+    if child_state["requested"]:
+        try:
+            session.enable_child_gating()
+            child_state["enabled"] = True
+        except Exception as e:
+            child_state["enable_error"] = f"{type(e).__name__}: {str(e)[:180]}"
+            child_state["failures"].append({"error": child_state["enable_error"]})
+
     script.on("message", on_message)
     script.load()
     time.sleep(0.3)
@@ -822,9 +1169,19 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
             time.sleep(0.5)
             try:
                 if session.is_detached:
-                    stop_reason = "detached"
-                    print("session detached (target exited)", file=sys.stderr)
-                    break
+                    with child_lock:
+                        active_children = []
+                        for child_session in child_sessions:
+                            try:
+                                if not child_session.is_detached:
+                                    active_children.append(child_session)
+                            except Exception:
+                                pass
+                        child_pending = child_state["inflight"] > 0
+                    if not active_children and not child_pending:
+                        stop_reason = "detached"
+                        print("instrumented process tree detached", file=sys.stderr)
+                        break
             except Exception:
                 stop_reason = "detached"
                 break
@@ -842,6 +1199,57 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
     except KeyboardInterrupt:
         stop_reason = "interrupted"
         print("interrupted; detaching", file=sys.stderr)
+    with child_lock:
+        scripts_to_flush = [script] + list(child_scripts)
+    for active_script in scripts_to_flush:
+        try:
+            active_script.post({"type": "coverage-flush"})
+        except Exception:
+            pass
+    flush_deadline = time.time() + 3.0
+    expected_flush_pids = {str(int(spawned_pid or args.pid))} | {
+        str(pid) for pid in child_state["instrumented"]}
+    while ((child_state["inflight"] or
+            not expected_flush_pids.issubset(coverage_flush_acks))
+           and time.time() < flush_deadline):
+        time.sleep(0.05)
+    process_ids = sorted({int(spawned_pid or args.pid)} |
+                         set(child_state["instrumented"]))
+    module_coverage_complete = all(
+        coverage_by_pid.get(str(pid), {}).get("module_observer") == "active"
+        and str(pid) in coverage_flush_acks for pid in process_ids)
+    process_tree_complete = bool(
+        spawned_pid is not None and child_state["enabled"]
+        and child_state["signal_registered"] and module_coverage_complete
+        and not child_state["failures"] and not child_state["limit_reached"]
+        and child_state["inflight"] == 0)
+    process_tree = {
+        "type": "coverage_tree", "ts": time.time(),
+        "root_pid": int(spawned_pid or args.pid),
+        "max_calls_total": max_calls_total,
+        "root_call_budget": root_call_budget,
+        "child_call_budget": child_call_budget,
+        "root_mode": "spawned" if spawned_pid is not None else "attached",
+        "child_gating_requested": child_state["requested"],
+        "child_gating_enabled": child_state["enabled"],
+        "child_added_signal_registered": child_state["signal_registered"],
+        "child_gating_error": child_state["enable_error"],
+        "children_seen": child_state["attempted"],
+        "children_instrumented": sorted(child_state["instrumented"]),
+        "instrumented_pids": process_ids,
+        "child_failures": child_state["failures"],
+        "child_limit_reached": child_state["limit_reached"],
+        "module_observers_complete": module_coverage_complete,
+        "process_coverage_complete": process_tree_complete,
+        "calls_by_pid": call_counts,
+        "limitations": (["attached to an already-running root; child creation before gating may be missed"]
+                        if spawned_pid is None else []) +
+                       (["one or more child processes were not instrumented"]
+                        if child_state["failures"] else []) +
+                       (["not all process module observers reported active"]
+                        if not module_coverage_complete else []),
+    }
+    _write_controller_event(process_tree)
     try:
         with open(str(out_path) + ".run.json", "w", encoding="utf-8") as fh:
             json.dump({"stop_reason": stop_reason,
@@ -854,7 +1262,8 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
                        "gate_fired": gate["fired"],
                        "gate_kind": gate["kind"],
                        "gate_api": gate["api"],
-                       "gate_at_s": gate["at_s"]}, fh)
+                       "gate_at_s": gate["at_s"],
+                       "process_tree": process_tree}, fh)
     except Exception:
         pass
 
@@ -864,8 +1273,23 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
             device.kill(spawned_pid)
         except Exception:
             pass
+    for active_script in scripts_to_flush:
+        try:
+            active_script.unload()
+        except Exception:
+            pass
+    for child_session in child_sessions:
+        try:
+            child_session.disable_child_gating()
+            child_session.detach()
+        except Exception:
+            pass
     try:
-        script.unload()
+        session.disable_child_gating()
+    except Exception:
+        pass
+    try:
+        device.off("child-added", _on_child_added)
     except Exception:
         pass
     try:

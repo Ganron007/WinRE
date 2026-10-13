@@ -228,6 +228,28 @@ def test_verify_does_not_warn_about_census_required_items():
     assert "Fail \"  [census] REQUIRED python module missing" in src
 
 
+def test_verify_sql_probes_are_isolated_from_samples_and_existing_runtime_state():
+    src = _src("install/verify-flarevm.ps1")
+    assert "winre-verify-$PID-" in src
+    assert "WINRE_GHIDRA_CACHE" in src and "WINRE_GHIDRA_SQL_AUDIT" in src
+    assert "WINRE_GHIDRASQL_REGISTRY" in src and "WINRE_IDA_SQL_AUDIT" in src
+    assert "PYTHONDONTWRITEBYTECODE" in src
+    assert "C:\\samples\\_sqlprobe.exe" not in src
+    assert "C:\\samples\\_sqlprobe_ida.exe" not in src
+    assert "Where-Object { $_.Id -notin $script:SqlProcessIdsBefore }" in src
+    assert 'Remove-Item "C:\\WinRE\\cache\\ghidra\\*"' not in src
+    assert 'Remove-Item "C:\\WinRE\\logs\\ghidrasql-servers.json"' not in src
+
+
+def test_smoke_compile_helper_cleans_local_and_remote_temporary_files():
+    src = _src("ops/smoke_flare.py")
+    assert "TemporaryDirectory(prefix=\"winre_smoke_pyc_\")" in src
+    assert "winre-smoke-{uuid.uuid4().hex}.py" in src
+    assert "SMOKE_TEMP_CLEANED" in src
+    assert "finally:" in src
+    assert "_smoke_pycompile.py" not in src
+
+
 def test_mcp_liveness_is_a_handshake_not_a_port_check():
     src = _src("install/verify-flarevm.ps1")
     assert "Test-McpServer" in src, (

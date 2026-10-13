@@ -9,9 +9,9 @@ nothing off-box can drive the VM's debugger.
 That left the one step of the post-detonation window with no reason to be there:
 a sample that had just controlled the machine was analysed BY that machine.
 
-It now runs on the host with `cdb.exe` against the pulled dump. The VM path
-stays as a fallback for `--driver local`, where there is no local cdb but the MCP
-server is localhost anyway.
+It now runs only on the control plane with `cdb.exe` against the pulled dump.
+The guest fallback is disabled because the VM must not interpret its own
+post-detonation evidence.
 
 These tests pin the host path, and pin that its output is not decorative - a
 split that returns empty blocks would silently produce a pack with a
@@ -25,26 +25,23 @@ import pytest
 from winre import windbg_post as W
 
 
-def test_the_host_path_is_preferred():
-    """The order is the whole point: host first, VM only as a fallback."""
+def test_the_host_is_the_only_analysis_path():
+    """No WinDbg MCP fallback may run on the guest after detonation."""
     src = pathlib.Path(W.__file__).read_text(encoding="utf-8")
     i = src.find("def analyze_dump(")
     body = src[i:]
     host = body.find("_analyze_with_local_cdb(")
-    mcp = body.find("WinDbgMCPClient(")
     assert host != -1, "no host-side path"
-    assert mcp != -1, "the VM fallback was removed; --driver local needs it"
-    assert host < mcp, (
-        "the mcp-windbg (VM) path runs before the local one - the analysis "
-        "still happens on the box that executed the sample")
+    assert "WinDbgMCPClient(" not in body
+    assert "guest MCP fallback disabled" in body
 
 
-def test_the_vm_path_is_kept_for_local_runs():
-    """Removing it would break `--driver local`, where cdb is absent but the MCP
-    server is localhost anyway."""
-    src = pathlib.Path(W.__file__).read_text(encoding="utf-8")
-    assert "WinDbgMCPClient" in src
-    assert "_ensure_mcp_server" in src
+def test_retired_remote_helper_fails_closed():
+    src = pathlib.Path(W.__file__).resolve().with_name(
+        "__remote_windbg_helper.py")
+    text = src.read_text(encoding="utf-8")
+    assert "deferred_to_control_plane" in text
+    assert "analyze_dump" not in text
 
 
 def test_local_cdb_is_found_on_this_host():

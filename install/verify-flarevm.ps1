@@ -1,12 +1,15 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    verify-flarevm.ps1 - verify a WinRE FlareVM deployment (READ-ONLY).
+    verify-flarevm.ps1 - verify a WinRE FlareVM deployment with isolated probes.
 
 .DESCRIPTION
     Consolidated PASS/FAIL battery for the Windows side of the WinRE lab.
-    Mirrors RevAI's install/verify-remnux.sh. Never modifies the system -
-    safe to run anytime. Exit 0 = all critical checks passed; 1 = failures.
+    Mirrors RevAI's install/verify-remnux.sh. Live SQL probes use only a
+    per-run temporary directory and stop only SQL processes started by this
+    invocation. Existing samples, evidence, caches, logs and SQL processes are
+    left untouched. Run while the VM is idle. Exit 0 = all critical checks
+    passed; 1 = failures.
 
     Run ON the FlareVM:
       powershell -ExecutionPolicy Bypass -File C:\WinRE\install\verify-flarevm.ps1
@@ -15,6 +18,35 @@
 $ErrorActionPreference = "Continue"
 $script:ERR = 0
 $script:WARN = 0
+
+# Keep live SQL semantics probes isolated from C:\samples and the deployed
+# cache/log trees. The clients honor these process-scoped overrides.
+$script:VerifyTemp = Join-Path ([IO.Path]::GetTempPath()) "winre-verify-$PID-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Force -Path $script:VerifyTemp | Out-Null
+$script:SqlProcessIdsBefore = @(
+    Get-Process ghidrasql, idasql -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty Id
+)
+$script:SavedSqlEnv = @{}
+$script:SqlEnvNames = @(
+    "WINRE_GHIDRA_CACHE", "WINRE_GHIDRA_SQL_AUDIT",
+    "WINRE_GHIDRASQL_REGISTRY", "WINRE_IDA_SQL_AUDIT",
+    "GHIDRASQL_PORT", "IDASQL_PORT", "PYTHONDONTWRITEBYTECODE"
+)
+foreach ($name in $script:SqlEnvNames) {
+    $script:SavedSqlEnv[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+}
+$script:VerifyLogs = Join-Path $script:VerifyTemp "logs"
+New-Item -ItemType Directory -Force -Path $script:VerifyLogs | Out-Null
+[Environment]::SetEnvironmentVariable("WINRE_GHIDRA_CACHE", (Join-Path $script:VerifyTemp "ghidra"), "Process")
+[Environment]::SetEnvironmentVariable("WINRE_GHIDRA_SQL_AUDIT", (Join-Path $script:VerifyLogs "ghidra-sql-audit.jsonl"), "Process")
+[Environment]::SetEnvironmentVariable("WINRE_GHIDRASQL_REGISTRY", (Join-Path $script:VerifyLogs "ghidrasql-servers.json"), "Process")
+[Environment]::SetEnvironmentVariable("WINRE_IDA_SQL_AUDIT", (Join-Path $script:VerifyLogs "ida-sql-audit.jsonl"), "Process")
+[Environment]::SetEnvironmentVariable("GHIDRASQL_PORT", [string](Get-Random -Minimum 24000 -Maximum 50000), "Process")
+[Environment]::SetEnvironmentVariable("IDASQL_PORT", [string](Get-Random -Minimum 50001 -Maximum 64000), "Process")
+[Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "1", "Process")
+$script:SqlProbeCalc = Join-Path $script:VerifyTemp "probe-calc.exe"
+$script:SqlProbeNotepad = Join-Path $script:VerifyTemp "probe-notepad.exe"
 
 function Ok([string]$m)   { Write-Host "  [OK]   $m" -ForegroundColor Green }
 function Warn([string]$m) { Write-Host "  [WARN] $m" -ForegroundColor Yellow; $script:WARN++ }
@@ -206,13 +238,8 @@ if ($ghidra) {
         $grsVer = (& C:\Tools\ghidrasql\ghidrasql.exe --version 2>&1 | Select-Object -First 1)
         if ($grsVer) { Info "ghidrasql $($grsVer.Trim())" }
         # live SQL semantics check (WHERE + ORDER BY) on a small benign probe
-        $probe = @("C:\samples\calc.exe", "C:\samples\notepad.exe") |
-            Where-Object { Test-Path $_ } | Select-Object -First 1
-        if (-not $probe) {
-            $probe = "C:\samples\_sqlprobe.exe"
-            Copy-Item "$env:windir\system32\calc.exe" $probe -Force -EA SilentlyContinue
-            $probe = if (Test-Path $probe) { $probe } else { $null }
-        }
+        Copy-Item "$env:windir\system32\calc.exe" $script:SqlProbeCalc -Force -EA SilentlyContinue
+        $probe = if (Test-Path $script:SqlProbeCalc) { $script:SqlProbeCalc } else { $null }
         if ($probe -and (Test-Path "C:\WinRE\tools\flare_ghidra_sql.py")) {
             $out = & $py "C:\WinRE\tools\flare_ghidra_sql.py" query `
                 "SELECT name, size FROM funcs WHERE size > 150 ORDER BY size DESC LIMIT 3" `
@@ -288,14 +315,10 @@ if ($idaDir) { Ok "IDA -> $idaDir" }
 else { Warn "IDA not found in any of: $($idaCands -join ', ') (operator-installed; deep stage degrades to Ghidra+Malcat)" }
 if (Test-Path (Join-Path $idaDir "idasql.exe")) {
     Ok "idasql.exe present -> $(Join-Path $idaDir 'idasql.exe')"
-    $idaProbe = @("C:\samples\calc.exe", "C:\samples\notepad.exe") |
-        Where-Object { Test-Path $_ } | Select-Object -First 1
-    if (-not $idaProbe) {
-        # virgin VM: use a benign OS binary as the SQL probe (read-only copy)
-        New-Item -ItemType Directory -Force -Path "C:\samples" | Out-Null
-        Copy-Item "$env:windir\system32\notepad.exe" "C:\samples\_sqlprobe_ida.exe" -Force -EA SilentlyContinue
-        if (Test-Path "C:\samples\_sqlprobe_ida.exe") { $idaProbe = "C:\samples\_sqlprobe_ida.exe" }
-    }
+    # Use a private temporary copy so IDA's adjacent .i64 database is also
+    # disposable; never create or overwrite files in C:\samples.
+    Copy-Item "$env:windir\system32\notepad.exe" $script:SqlProbeNotepad -Force -EA SilentlyContinue
+    $idaProbe = if (Test-Path $script:SqlProbeNotepad) { $script:SqlProbeNotepad } else { $null }
     if (-not (Test-Path "C:\WinRE\tools\ida_sql_client.py")) {
         # OUR client, OUR wiring: a missing one is a broken deployment, not a
         # reason to skip the gate quietly - it used to, with no message at all
@@ -372,9 +395,10 @@ if ($r2Hit) {
     else { Fail "radare2 present but not runnable: $r2Hit" }
 }
 # sink_sites smoke (r2-assisted deep tool): catches r2-integration regressions
-$probeSql = @("C:\samples\calc.exe", "C:\samples\notepad.exe") |
-    Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $probeSql -and (Test-Path "C:\samples\_sqlprobe.exe")) { $probeSql = "C:\samples\_sqlprobe.exe" }
+if (-not (Test-Path $script:SqlProbeCalc)) {
+    Copy-Item "$env:windir\system32\calc.exe" $script:SqlProbeCalc -Force -EA SilentlyContinue
+}
+$probeSql = if (Test-Path $script:SqlProbeCalc) { $script:SqlProbeCalc } else { $null }
 if ($r2Hit -and $probeSql -and (Test-Path "C:\WinRE\tools\kb_gap_tools.py")) {
     $sinkOut = (& $py "C:\WinRE\tools\kb_gap_tools.py" sink_sites $probeSql --json 2>&1 | Out-String)
     try { $sj = $sinkOut | ConvertFrom-Json } catch { $sj = $null }
@@ -656,7 +680,7 @@ Write-Host "--- clock (control-plane skew diagnosis) ---"
 # RevAI handoff 2026-09-27 item 4: freshness no longer compares clocks
 # (winre/run_nonce.py), so this is a DIAGNOSTIC gate: a stopped w32time is a
 # WARN (it makes every timestamp in the pack untrustworthy for a human
-# reading them), never a FAIL. Read-only: verify stays side-effect free.
+# reading them), never a FAIL. This probe does not change clock configuration.
 $w32 = Get-Service -Name w32time -ErrorAction SilentlyContinue
 if ($w32 -and $w32.Status -eq "Running") {
     $q = (& w32tm.exe /query /status 2>&1 | Out-String)
@@ -671,32 +695,25 @@ if (Test-Path "C:\WinRE\vm_clock.json") { Ok "clock state file C:\WinRE\vm_clock
 else { Warn "clock state file missing (re-run install/setup-flarevm.ps1)" }
 
 Write-Host ""
-Write-Host "--- cleanup (verify must not dirty the image) ---"
-# The SQL live gates stage probe samples and leave per-project servers/caches
-# behind. A verify run must be side-effect free so a golden snapshot stays
-# clean (found 2026-09-19: _sqlprobe* + cache\ghidra + server logs remained).
-# Kill the per-project SQL servers FIRST - a live server recreates its
-# project dir and log immediately after deletion.
-Get-Process ghidrasql, idasql -ErrorAction SilentlyContinue |
-    Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 2
-Get-ChildItem "C:\samples" -Filter "_sqlprobe*" -ErrorAction SilentlyContinue |
-    Remove-Item -Force -ErrorAction SilentlyContinue
-Remove-Item "C:\WinRE\cache\ghidra\*" -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item "C:\WinRE\logs\ghidrasql-servers.json",
-            "C:\WinRE\logs\ghidrasql-server.log",
-            "C:\WinRE\logs\idasql-server.log",
-            "C:\WinRE\logs\ghidra-sql-audit.jsonl",
-            "C:\WinRE\logs\ida-sql-audit.jsonl" `
-            -Force -ErrorAction SilentlyContinue
-# bytecode caches are not evidence either: the SQL/MCP helpers recreate them on
-# every run, so a verify would otherwise bake one into a golden snapshot
-Get-ChildItem "C:\WinRE" -Recurse -Directory -Filter "__pycache__" `
-    -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-if (@(Get-ChildItem "C:\samples" -Filter "_sqlprobe*" -ErrorAction SilentlyContinue).Count -eq 0) {
-    Ok "probe artifacts + SQL runtime state cleaned (samples/cache/logs/pycache)"
+Write-Host "--- cleanup (verification-owned temporary state only) ---"
+$script:NewSqlProcesses = @(
+    Get-Process ghidrasql, idasql -ErrorAction SilentlyContinue |
+        Where-Object { $_.Id -notin $script:SqlProcessIdsBefore }
+)
+if ($script:NewSqlProcesses.Count -gt 0) {
+    $script:NewSqlProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
+    Ok "stopped $($script:NewSqlProcesses.Count) SQL process(es) started by this verification"
 } else {
-    Warn "probe artifacts still present under C:\samples"
+    Ok "no SQL processes started by this verification"
+}
+Remove-Item -LiteralPath $script:VerifyTemp -Recurse -Force -ErrorAction SilentlyContinue
+foreach ($name in $script:SqlEnvNames) {
+    [Environment]::SetEnvironmentVariable($name, $script:SavedSqlEnv[$name], "Process")
+}
+if (Test-Path $script:VerifyTemp) {
+    Warn "verification temporary directory could not be removed: $script:VerifyTemp"
+} else {
+    Ok "isolated probe files, databases, and logs removed from temporary storage"
 }
 
 Write-Host ""

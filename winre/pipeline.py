@@ -35,7 +35,8 @@ import time
 from pathlib import Path
 
 from .evidence import (EvidencePack, stage_result, utcnow, verdict_fields,
-                       write_execution_plan, resolve_pack_mode)
+                       write_execution_plan, resolve_pack_mode,
+                       archive_stage_for_fresh_run)
 from . import audit as audit_mod
 from . import yara_gen
 from .findings import build as _build_findings   # analysis plane (DESIGN.md 2)
@@ -135,6 +136,7 @@ def _quick(sample: Path, pack: EvidencePack) -> dict:
     t0 = time.time()
     evidence: dict = {}
     failures: list[str] = []
+    warnings: list[str] = []
 
     # Malcat MCP (best-effort; commercial-optional)
     #   not installed  -> skipped, NO failure (free-tools path, Ghidra-primary)
@@ -143,7 +145,9 @@ def _quick(sample: Path, pack: EvidencePack) -> dict:
     # shape as the remote quick helper. Both paths must match.
     try:
         if not _malcat_installed():
-            evidence["malcat"] = {"skipped": "not installed (optional) — "
+            evidence["malcat"] = {"status": "unavailable",
+                                  "reason_code": "commercial_tool_not_installed",
+                                  "skipped": "not installed (optional) — "
                                              "Ghidra-primary static path"}
         else:
             from winre.mcp import MalcatClient
@@ -174,11 +178,15 @@ def _quick(sample: Path, pack: EvidencePack) -> dict:
                                 .get("strings") if True else []),
                 }
             else:
-                evidence["malcat"] = {"skipped": "server not running on :9009"}
-                failures.append("malcat:server-down")
+                evidence["malcat"] = {"status": "unavailable",
+                                      "reason_code": "malcat_server_unavailable",
+                                      "skipped": "server not running on :9009"}
+                warnings.append("malcat:malcat_server_unavailable")
     except Exception as e:
-        evidence["malcat"] = {"skipped": str(e)}
-        failures.append(f"malcat:{str(e)[:80]}")
+        evidence["malcat"] = {"status": "unavailable",
+                              "reason_code": "malcat_probe_failed",
+                              "skipped": str(e)[:120]}
+        warnings.append(f"malcat:malcat_probe_failed:{str(e)[:80]}")
 
     # IDA SQL — OPTIONAL. Only if a .i64 already exists AND idasql answers
     # quickly (the -q one-shot path can hang on this idasql build; the
@@ -196,17 +204,23 @@ def _quick(sample: Path, pack: EvidencePack) -> dict:
                 evidence["ida"]["i64_created"] = True
         else:
             evidence["ida"] = {"error": ida.get("error", "")[:200]}
+            warnings.append(f"ida:{(ida.get('error') or 'unavailable')[:80]}")
     except Exception as e:
         evidence["ida"] = {"error": str(e)[:200]}
+        warnings.append(f"ida:{str(e)[:80]}")
 
     # Ghidra SQL (canonical funcs + high-signal imports for YARA)
     ghidra = _run_sql("ghidra", sample, "@funcs")
     gh_ev: dict = {}
     if ghidra.get("ok"):
         gh_ev["func_rows"] = len(ghidra.get("rows") or [])
+        gh_ev["status"] = "completed"
+        gh_ev["reason_code"] = "completed"
     else:
         failures.append(f"ghidra:{ghidra.get('error','')[:80]}")
         gh_ev["error"] = ghidra.get("error", "")
+        gh_ev["status"] = "failed"
+        gh_ev["reason_code"] = "ghidra_query_failed"
     ghidra_imp = _run_sql("ghidra", sample, "@imports")
     if ghidra_imp.get("ok"):
         rows = ghidra_imp.get("rows") or []
@@ -240,16 +254,41 @@ def _quick(sample: Path, pack: EvidencePack) -> dict:
         evidence["static_tools_error"] = str(e)[:120]
 
     verdict = "malicious" if evidence.get("malcat", {}).get("yara_hits") else "unknown"
+    capability_census = {
+        "schema": "winre-quick-capability-census/v1",
+        "required": ["ghidra"],
+        "capabilities": [
+            {"tool": "ghidra", "required": True,
+             "status": evidence.get("ghidra", {}).get("status", "failed"),
+             "reason_code": evidence.get("ghidra", {}).get("reason_code")},
+            {"tool": "ida", "required": False,
+             "status": "completed" if evidence.get("ida", {}).get("func_count") is not None
+                      else "unavailable",
+             "reason_code": "completed" if evidence.get("ida", {}).get("func_count") is not None
+                           else "optional_cross_check_unavailable"},
+            {"tool": "malcat", "required": False,
+             "status": "completed" if evidence.get("malcat", {}).get("sha256")
+                      else str(evidence.get("malcat", {}).get("status") or "unavailable"),
+             "reason_code": evidence.get("malcat", {}).get("reason_code")},
+        ],
+        "required_failures": failures,
+        "optional_warnings": warnings,
+    }
     pack.write("quick", "quick.json", {
-        "evidence": evidence, "tool_failures": failures, "verdict": verdict,
+        "evidence": evidence, "tool_failures": failures,
+        "capability_census": capability_census, "verdict": verdict,
     })
     malcat_state = "ok" if evidence.get("malcat", {}).get("sha256") else "skip"
+    quick_ok = not failures
     pack.write("quick", "META.json", stage_result(
-        "quick", ok=not failures, error=";".join(failures) or None,
+        "quick", ok=quick_ok, error=";".join(failures) or None,
         summary=f"malcat={malcat_state} ida={evidence.get('ida',{}).get('func_count')} ghidra={evidence.get('ghidra',{}).get('func_rows')}",
         verdict=verdict, tool_failures=failures,
+        capability_census=capability_census,
+        tool_warnings=warnings,
     ))
-    return {"evidence": evidence, "verdict": verdict, "failures": failures}
+    return {"evidence": evidence, "verdict": verdict, "failures": failures,
+            "warnings": warnings, "capability_census": capability_census}
 
 
 def _run_sql(engine: str, sample: Path, sql: str, timeout: int | None = None) -> dict:
@@ -297,41 +336,100 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
              adaptive: bool = False,
              idle_stop_seconds: int = 0,
              stop_on: str = "network,file",
-             stop_on_settle: int = 20) -> dict:
+             stop_on_settle: int = 20,
+             run_id: str | None = None) -> dict:
     """Run orchestrator --mode local, copy its dynamic pack into evidence."""
     t0 = time.time()
     orch = Path(__file__).resolve().parent / "orchestrator.py"
     env = os.environ.copy()
     env["WINRE_ORCHESTRATOR_MODE"] = "local"
     env.setdefault("WINRE_ORCH_LOCK", r"C:\WinRE\lock\orchestrator.lock")
-    # logs root (NOT the section): the ledger lives VM-wide at
-    # logs/_vm_state.json; the dynamic dir is pinned into our mode section
+    # logs root (NOT the section): the guest helper keeps a diagnostic
+    # logs/_vm_state.json; the authoritative gate ledger stays in the separate
+    # control-plane internal/ directory. Dynamic artifacts remain mode-pinned.
     env["REVENG_LOGS_DIR"] = str(pack.root.parent.parent)
-    env["WINRE_DYNAMIC_DIR"] = str(pack.stages["dynamic"])
     env["REVENG_SESSIONS_DIR"] = str(SESSIONS_DIR)
-    # write a session so orchestrator finds the sample
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    (SESSIONS_DIR / f"{sha}.json").write_text(json.dumps({
-        "sha256": sha, "sample_path": str(sample),
-        "file_type": {"format": "pe"},
-    }), encoding="utf-8")
     # per-run nonce: the local driver verifies the stamp by VALUE too, so a
     # stale META from a previous run can never pass as this run's pack
     from .run_nonce import check as nonce_check, new_run_id
-    run_id = new_run_id()
-    # Drop the previous run's META.json BEFORE launching: audit falls back to
-    # META.json when STAGE.json is missing, so a stale ok:true + frida_events
-    # would make a run that never detonated look like it did (code audit
-    # 2026-09-28). The remote driver already did this; the local one did not.
-    for _stale in (pack.stages["dynamic"] / "META.json",
-                   pack.stages["dynamic"] / "STAGE.json"):
+    from .evidence import sha256_file
+    import shutil
+    run_id = run_id or new_run_id()
+    # The producer must not write into the accepted evidence directory. A
+    # failed/crashed run can then leave only a run-bound partial directory;
+    # it cannot mix stale siblings with a fresh META.
+    producer_dir = (pack.root.parent / ".winre-producer" /
+                    (pack.mode or "legacy") / run_id / "dynamic")
+    suffix = sample.suffix.lower()
+    if not suffix or len(suffix) > 10 or not suffix[1:].isalnum():
+        suffix = ".bin"
+    staged_sample = (pack.root.parent / ".winre-staging" / sha / run_id
+                     / f"sample{suffix}")
+    session_file = SESSIONS_DIR / "runs" / f"{run_id}.json"
+    if producer_dir.exists() or session_file.exists() or staged_sample.exists():
+        failed = stage_result("dynamic", False,
+                              error="run-specific staging/producer/session path already exists",
+                              elapsed_s=round(time.time() - t0, 1), run_id=run_id)
+        pack.write("dynamic", "STAGE.json", failed)
+        return failed
+    try:
+        archived = archive_stage_for_fresh_run(pack)
+        if not archived.get("ok"):
+            raise RuntimeError(archived.get("error") or "archive failed")
+        source_hash = sha256_file(sample)
+        if source_hash != sha:
+            raise RuntimeError("input sample changed after intake identity was computed")
+        staged_sample.parent.mkdir(parents=True, exist_ok=False)
+        shutil.copy2(sample, staged_sample)
+        staged_hash = sha256_file(staged_sample)
+        source_after_copy = sha256_file(sample)
+        if staged_hash != sha or source_after_copy != sha:
+            raise RuntimeError("sample staging hash mismatch or source changed during copy")
+        pack.write("intake", "LOCAL-STAGING.json", {
+            "schema": "winre.local-staging/v1", "ok": True,
+            "run_id": run_id, "sha256": sha,
+            "source_path": str(sample.resolve()),
+            "staged_path": str(staged_sample.resolve()),
+            "staged_sha256": staged_hash,
+            "source_sha256_after_copy": source_after_copy,
+        })
+        # Wrappers are not evidence and may remain when the prior directory
+        # contained no payload. Remove them explicitly before this attempt.
+        dynamic_dir = pack.stages["dynamic"]
+        dynamic_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("STAGE.json", "SKIP.json", "META.json", "manifest.json"):
+            stale = dynamic_dir / name
+            if stale.exists():
+                stale.unlink()
+        producer_dir.mkdir(parents=True, exist_ok=False)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        session_file.write_text(json.dumps({
+            "sha256": sha, "sample_path": str(staged_sample.resolve()),
+            "file_type": {"format": "pe"},
+        }), encoding="utf-8")
+    except Exception as e:
+        failed = stage_result("dynamic", False,
+                              error=f"dynamic run preparation failed: {type(e).__name__}: {e}",
+                              elapsed_s=round(time.time() - t0, 1), run_id=run_id,
+                              archived=locals().get("archived"))
+        pack.write("dynamic", "STAGE.json", failed)
         try:
-            if _stale.exists():
-                _stale.unlink()
-        except OSError:
+            pack.write("intake", "LOCAL-STAGING.json", {
+                "schema": "winre.local-staging/v1", "ok": False,
+                "run_id": run_id, "sha256": sha,
+                "source_path": str(sample),
+                "staged_path": str(staged_sample),
+                "error": f"{type(e).__name__}: {e}"[:240],
+            })
+        except Exception:
             pass
-    cmd = [sys.executable, str(orch), sha, "--mode", "local",
-           "--max-seconds", str(max_seconds), "--run-id", run_id]
+        return failed
+
+    env["WINRE_DYNAMIC_DIR"] = str(producer_dir)
+    env["WINRE_SESSION_FILE"] = str(session_file)
+    env["WINRE_RUN_ID"] = run_id
+    cmd = [sys.executable, str(orch), sha, "--sample", str(staged_sample.resolve()),
+           "--mode", "local", "--max-seconds", str(max_seconds), "--run-id", run_id]
     if enable_pesieve:
         cmd.append("--pesieve")
     if adaptive:
@@ -344,24 +442,73 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
                             timeout=int(max_seconds) + 600,
                             encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
-        return stage_result("dynamic", False, error="orchestrator timeout",
-                            elapsed_s=round(time.time() - t0, 1), run_id=run_id)
-    # orchestrator wrote dynamic/META.json (its own schema). DO NOT clobber it —
-    # audit reads THAT file. Write our stage wrapper separately.
-    meta = pack.read("dynamic", "META.json") or {}
+        cp = None
+
+    # A completed producer is accepted only when the nonce, sample identity,
+    # terminal state and finish marker all agree. A valid but red run is still
+    # promotable so its partial capture remains inspectable as current evidence.
+    meta_path = producer_dir / "META.json"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        meta = {}
     nonce = nonce_check(meta, run_id)
-    ok = bool(nonce["fresh"] and meta.get("ok"))
+    metadata_complete = bool(
+        meta.get("sha256") == sha and nonce.get("fresh")
+        and not meta.get("running") and meta.get("finished_at"))
+    promoted = False
+    partial_path = None
+    if metadata_complete:
+        try:
+            target = pack.stages["dynamic"]
+            target.mkdir(parents=True, exist_ok=True)
+            if any(target.iterdir()):
+                raise RuntimeError("canonical dynamic stage is not empty")
+            target.rmdir()
+            shutil.move(str(producer_dir), str(target))
+            promoted = True
+        except Exception as e:
+            meta["acceptance_error"] = f"producer promotion failed: {type(e).__name__}: {e}"
+    if not promoted and producer_dir.exists():
+        partial_parent = pack.root / "previous_runs"
+        partial_parent.mkdir(parents=True, exist_ok=True)
+        partial_dest = partial_parent / f"dynamic_partial_{run_id}"
+        try:
+            shutil.move(str(producer_dir), str(partial_dest))
+            partial_path = str(partial_dest.relative_to(pack.root)).replace("\\", "/")
+        except OSError as e:
+            meta["preserve_error"] = f"{type(e).__name__}: {e}"
+    if session_file.exists():
+        try:
+            session_file.unlink()
+        except OSError:
+            pass
+    ok = bool(promoted and metadata_complete and meta.get("ok"))
+    if cp is None:
+        error = "orchestrator timeout"
+    elif not metadata_complete:
+        error = (meta.get("error") or meta.get("acceptance_error")
+                 or nonce.get("reason") or "producer META is incomplete or not terminal")
+    else:
+        error = meta.get("error") if not ok else ""
     stage_meta = stage_result("dynamic", ok,
-                              error=meta.get("error") or ("" if ok else
-                                                         (nonce["reason"]
-                                                          if not nonce["fresh"]
-                                                          else "no META ok")),
+                              error=error,
                               summary=f"events={meta.get('frida_events')} ok={ok}",
                               frida_events=meta.get("frida_events"),
                               verdict=meta.get("verdict"),
                               elapsed_s=round(time.time() - t0, 1),
                               gate_pass=meta.get("gate_marker_consumed"),
-                              run_id=run_id, nonce=nonce)
+                              run_id=run_id, nonce=nonce,
+                              archived=archived, producer_promoted=promoted,
+                              sample_staging={"run_id": run_id,
+                                              "sha256": sha,
+                                              "staged_path": str(staged_sample),
+                                              "staged_sha256": staged_hash},
+                              partial_evidence=partial_path,
+                              producer_exit=(cp.returncode if cp is not None else None))
+    # If no producer was accepted, write only a wrapper for this attempt; old
+    # detonation artifacts are already retained under previous_runs/.
+    pack.stages["dynamic"].mkdir(parents=True, exist_ok=True)
     pack.write("dynamic", "STAGE.json", stage_meta)
     # ---- the artifact manifest (design §8) ---------------------------------
     # Same contract as remote_driver: written after the pull so it describes what
@@ -372,9 +519,16 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
         stage_meta["manifest"] = _manifest.write_manifest(
             pack.stages["dynamic"], run_id=run_id, sha256=sha,
             mode=pack.mode or "dynamic", meta=meta,
-            requested={"frida": True, "procmon": True, "memory": True,
-                       "network": True, "process_snapshot": True,
-                       "malcat": True, "job": True})
+            requested={
+                "frida": {"requested": True, "required": True},
+                "procmon": {"requested": True, "required": True},
+                "network": {"requested": True, "required": True},
+                "network_enrichment": {"requested": True, "required": False},
+                "memory": {"requested": True, "required": False},
+                "process_snapshot": {"requested": True, "required": False},
+                "malcat": {"requested": True, "required": False},
+                "job": {"requested": True, "required": True},
+            })
         pack.write("dynamic", "STAGE.json", stage_meta)
     except Exception as e:
         stage_meta["manifest"] = {"schema": "winre-artifact-manifest/v1",
@@ -392,7 +546,8 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
             reason="snapshot_gate_blocked", ok=False,
             error=meta.get("error"),
             summary="blocked by snapshot gate (no detonation ran in this run)",
-            preserved_previous=prev.get("preserved_previous"),
+            preserved_previous=(prev.get("preserved_previous")
+                                or (archived or {}).get("preserved_previous")),
             preserved_artifacts=prev.get("preserved_artifacts") or None,
             extra={"gate_mode": meta.get("gate_mode"),
                    "preserve_error": prev.get("preserve_error")}))
@@ -445,7 +600,7 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
             from .static_deep import run_static_deep_dive
             agent_result = run_static_deep_dive(
                 sample.name, pack.sha,
-                mode="local", quick=quick)
+                mode="local", quick=quick, sample_path=sample.resolve())
         else:
             from .agentic import run_langgraph_deep_dive, TOOL_NAMES
             agent_result = run_langgraph_deep_dive(
@@ -457,7 +612,7 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
         for h in (agent_result.get("history") or [])[:80]:
             entry = {"step": h.get("step"), "tool": h.get("tool"),
                      "args": h.get("args"), "error": h.get("error"),
-                     "reason": h.get("reason")}
+                     "reason": h.get("reason"), "status": h.get("status")}
             res = h.get("result")
             if isinstance(res, dict):
                 entry["result"] = res
@@ -469,10 +624,16 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
             # deep.json unable to show the routing even though the run knew it
             # (code audit 2026-09-28).
             "verdict_judged_by": agent_result.get("verdict_judged_by"),
+            "judgment_pass_error": agent_result.get("judgment_pass_error"),
+            "planner_draft": agent_result.get("planner_draft"),
+            "debug_run": agent_result.get("debug_run"),
+            "format_detection": agent_result.get("format_detection"),
             "llm_analysis": agent_result.get("llm_analysis"),
             "fallback_reason": agent_result.get("fallback_reason"),
             "tool_calls": len(agent_result.get("history") or []),
             "history": history,
+            "capability_census": agent_result.get("capability_census"),
+            "tool_failures": agent_result.get("tool_failures") or [],
             "packed_signal": agent_result.get("packed_signal"),
             "unpack_prepass": agent_result.get("unpack_prepass"),
             "windbg_dump": agent_result.get("windbg_dump"),
@@ -502,9 +663,9 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
         failures.append(f"agent:{e}")
         agent_result = None
 
-    # surface step-level tool errors from the static checklist (honesty —
-    # a failed tool must show in the audit, not hide inside history)
-    if mode == "static" and agent_result:
+    # Capability outcomes are audited the same way for both engines.
+    if agent_result:
+        out["capability_census"] = agent_result.get("capability_census")
         for _tf in (agent_result.get("tool_failures") or []):
             if _tf not in failures:
                 failures.append(_tf)
@@ -531,6 +692,7 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
         "key_evidence": (verdict_obj or {}).get("key_evidence") or [],
         "llm_analysis": (out.get("agent") or {}).get("llm_analysis"),
         "tool_failures": failures,
+        "capability_census": out.get("capability_census"),
         "no_verdict": no_verdict,
         "llm_roles": (out.get("agent") or {}).get("llm_roles"),
     })
@@ -583,7 +745,7 @@ def _yara(pack: EvidencePack, quick: dict, dynamic: dict | None) -> dict:
 
 
 def _report(pack: EvidencePack, sha: str, quick: dict, dynamic: dict | None,
-            deep: dict | None) -> dict:
+            deep: dict | None, composition: dict | None = None) -> dict:
     """Write a source-tagged report + ANALYST-NEXT pointing at next steps."""
     t0 = time.time()
     q = (quick or {}).get("evidence") or {}
@@ -602,10 +764,27 @@ def _report(pack: EvidencePack, sha: str, quick: dict, dynamic: dict | None,
     if dynamic_ran:
         analyst_next.insert(0, "Review dynamic artifacts (procmon.csv, pcap)")
         analyst_next.append("Restore FlareVM snapshot after dynamic run")
+    phase = ("static+dynamic" if dynamic_ran else
+             "static+debugger" if (pack.mode or pack.root.name) == "dbg" else
+             "static")
     # The verdict is reproduced IN the report (not only in deep.json): a
     # report whose source is llm_judge but that carries no verdict used to be
     # a silent gap (RevAI handoff 2026-09-27 item 2).
-    v_obj, v_label, no_verdict = verdict_fields(agent.get("verdict"))
+    static_obj, static_label, static_missing = verdict_fields(agent.get("verdict"))
+    composite = composition if isinstance(composition, dict) else {}
+    composite_label = composite.get("level")
+    if composite_label:
+        v_label = str(composite_label)
+        v_obj = {
+            "verdict": v_label,
+            "confidence": composite.get("confidence") or "low",
+            "summary": ("Selected from current, identity-validated mode findings; "
+                        f"deciding mode={composite.get('deciding_mode') or 'none'}."),
+            "key_evidence": composite.get("basis") or [],
+        }
+        no_verdict = False
+    else:
+        v_obj, v_label, no_verdict = static_obj, static_label, static_missing
     report = {
         "sha256": sha,
         "generated_at": utcnow(),
@@ -614,9 +793,14 @@ def _report(pack: EvidencePack, sha: str, quick: dict, dynamic: dict | None,
         else "deterministic_fallback",
         "verdict": v_label,
         "verdict_obj": v_obj,
+        "static_verdict": static_label,
+        "static_verdict_obj": static_obj,
+        "composite": composite or None,
+        "selected_verdict_source": ("mode-composite" if composite_label
+                                     else source),
         "no_verdict": no_verdict,
         "llm_roles": dp.get("llm_roles") or (agent.get("llm_roles")),
-        "phase": "static+dynamic" if dynamic_ran else "static",
+        "phase": phase,
         "quick": {k: q.get(k) for k in ("ida", "ghidra", "malcat") if k in q},
         "dynamic": {
             "ok": d.get("ok"),
@@ -671,17 +855,39 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
         clear a static malicious verdict)
       - requires snapshot restore after (analyst/operator)
     """
+    if enable_dynamic or enable_agentic_dbg:
+        message = (
+            "local pipeline refuses debug/dynamic execution: the local driver "
+            "runs on Flare, so it cannot produce trusted post-execution "
+            "analysis. Use --driver remote to keep interpretation on the "
+            "control plane.")
+        print(f"[winre-pipeline] ABORT: {message}", flush=True)
+        return {"sha": None, "aborted": True, "error": message,
+                "results": {"error": message}}
     sha = __import__("winre.evidence", fromlist=["sha256_file"]).sha256_file(sample)
 # one authority decides which pack root this run owns; dbg and dynamic each
     # own one so no run overwrites another (docs/internal/DESIGN.md 3)
-    pack_mode = resolve_pack_mode(mode, agentic_dbg=enable_agentic_dbg,
-                                  dynamic=enable_dynamic)
+    try:
+        pack_mode = resolve_pack_mode(mode, agentic_dbg=enable_agentic_dbg,
+                                      dynamic=enable_dynamic)
+    except ValueError as e:
+        return {"sha": sha, "aborted": True, "error": str(e),
+                "results": {"audit": {"truly_green": False,
+                                       "aborted": True,
+                                       "aborted_reason": str(e)}}}
+    from .run_nonce import new_run_id
+    run_id = new_run_id()
     pack = EvidencePack(LOGS_DIR, sha, mode=pack_mode).ensure()
     results: dict = {}
+    (pack.root / "META.json").write_text(json.dumps({
+        "sha256": sha, "mode": pack_mode, "pack_mode": pack_mode,
+        "run_id": run_id, "status": "in_progress",
+        "generated_at": utcnow(),
+    }, indent=2) + "\n", encoding="utf-8")
 
     # ---- RUN-LEVEL EXECUTION PLAN (fail fast, before any stage) -----------
-    # `enforce` + no hypervisor auto-restore = ONE execution per clean
-    # restore. A run asking for two (--dynamic + --agentic-dbg) used to
+    # `enforce` + operator-controlled restore = ONE execution per verified
+    # clean state. A run asking for two (--dynamic + --agentic-dbg) used to
     # half-execute and then get refused mid-run; it is now refused up front
     # with one clear message, and the plan is recorded for audit.json
     # (RevAI handoff 2026-09-27 item 1).
@@ -690,9 +896,9 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
     # (the console) that debugged this sha earlier must not be allowed to
     # execute again off a freshly restored, armed snapshot.
     _gate.reset_session()
-    # phase 5 (DESIGN.md section 7): a VM that has already executed a sample is
-    # not a trustworthy analysis host. Read-only modes may still run - they
-    # execute nothing, so demanding a revert per read would be absurd.
+    # phase 5 (DESIGN.md section 7): every mode invokes guest-side tools. A
+    # dirty guest can tamper with those tools even when the sample is not
+    # re-executed, so all modes require an operator-attested clean marker.
     from . import vm_gate as _vmgate
     # remote_driver is imported lazily in the other entry point below to
     # avoid a circular import (remote_driver imports pipeline._report), so a
@@ -705,7 +911,7 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
     if blocker:
         _vmgate.record_refusal(pack, blocker)
     plan = _gate.execution_plan(dynamic=enable_dynamic, debug=enable_agentic_dbg)
-    write_execution_plan(pack, plan)
+    write_execution_plan(pack, plan, run_id=run_id)
     results["execution_plan"] = plan
     results["vm_gate"] = blocker
     if not gate_ok or not plan.get("ok"):
@@ -722,24 +928,28 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
         # executed anything (code audit 2026-09-28, HIGH).
         _aborted_audit = {
             "truly_green": False, "all_green": False, "quality_green": False,
-            "aborted": True, "aborted_reason": plan.get("error"),
+            "aborted": True, "aborted_reason": _msg,
+            "run_id": run_id,
             "execution_plan": plan,
-            "unmet_expectations": ["run aborted before any stage: execution "
-                                   "plan exceeds the snapshot-gate budget"],
+            "unmet_expectations": [f"run aborted before any stage: {_msg}"],
             "checks": [], "fallback_stages": [], "failed_tools": [],
             "dynamic_conflict": False, "dynamic_blocked": False,
             "static_yara_wins": True, "static_verdict": None,
             "deep_verdict": None, "deep_verdict_source": None,
             "llm_roles": None, "dynamic_verdict": None,
-            "snapshot_gate": {"mode": _gate.mode(), "ok": False,
-                              "detail": {"aborted": True}},
+            "snapshot_gate": {"mode": _gate.mode(),
+                              "ok": bool(plan.get("ok")),
+                              "detail": plan},
+            "vm_gate": blocker,
             "generated_at": utcnow(),
         }
         results["audit"] = _aborted_audit
         (pack.root / "audit.json").write_text(
             json.dumps(_aborted_audit, indent=2) + "\n", encoding="utf-8")
         (pack.root / "META.json").write_text(json.dumps({
-            "sha256": sha, "mode": mode, "aborted": True,
+            "sha256": sha, "mode": pack_mode, "engine_mode": mode,
+            "aborted": True,
+            "pack_mode": pack_mode, "run_id": run_id,
             "error": plan.get("error"), "truly_green": False,
             "execution_plan": plan,
             "generated_at": utcnow(),
@@ -771,24 +981,45 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
         dynamic = _dynamic(sample, pack, sha, max_seconds, enable_pesieve,
                            adaptive=adaptive,
                            idle_stop_seconds=idle_stop_seconds,
-                           stop_on=stop_on, stop_on_settle=stop_on_settle)
+                           stop_on=stop_on, stop_on_settle=stop_on_settle,
+                           run_id=run_id)
         results["dynamic"] = dynamic
 
-    # DFIR-Nexus ingest pack: dynamic logs + static context in one 7z
-    results["case_pack"] = None
-    if dynamic and dynamic.get("ok"):
-        try:
-            from .casepack import build_case
-            results["case_pack"] = build_case(pack.root, sha, mode)
-        except Exception as e:
-            results["case_pack"] = {"ok": False,
-                                    "error": f"case pack: {str(e)[:200]}"}
+    # Finalize the current mode's findings before any report or export reads
+    # them. The pending candidate is trusted only for this in-process run;
+    # other modes must pass persisted run/audit identity checks in compose.
+    findings_record = _build_findings(
+        pack_mode, pack.root, sha=sha, evidence_dir=pack.stages["dynamic"],
+        run_id=run_id)
+    results["findings"] = findings_record
+    if pack_mode == "dynamic":
+        dynamic_stage = pack.read("dynamic", "STAGE.json") or {}
+        dynamic_stage["findings"] = findings_record
+        dynamic_stage["verdict"] = (findings_record.get("verdict") or {}).get("level")
+        pack.write("dynamic", "STAGE.json", dynamic_stage)
+    from .compose import compose_for_sample
+    composite = compose_for_sample(sha, LOGS_DIR,
+                                  pending={pack_mode: findings_record})
+    composite["run_id"] = run_id
+    (pack.root / "composite.json").write_text(
+        json.dumps(composite, indent=2, default=str) + "\n", encoding="utf-8")
+    results["composite"] = composite
 
-    report = _report(pack, sha, quick, dynamic, deep)
+    report = _report(pack, sha, quick, dynamic, deep, composition=composite)
     results["report"] = report
 
+    # Per-stage manifests must exist before audit consumes collector coverage.
+    try:
+        from .manifest import write_pack_manifests
+        results["artifact_manifests"] = write_pack_manifests(
+            pack.root, run_id=run_id, sha256=sha, mode=pack_mode,
+            dynamic_requested=enable_dynamic)
+    except Exception as e:
+        results["artifact_manifests"] = {
+            "ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+
     # audit: static truly_green independent of dynamic; dynamic is a note
-    audit_res = audit_mod.audit(pack.root)
+    audit_res = audit_mod.audit(pack.root, require_dynamic=enable_dynamic)
     (pack.root / "audit.json").write_text(
         json.dumps(audit_res, indent=2) + "\n", encoding="utf-8")
     results["audit"] = audit_res
@@ -806,11 +1037,18 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
         _deep_meta = pack.read("deep", "META.json") or {}
         (pack.root / "META.json").write_text(json.dumps({
             "sha256": sha,
+            "run_id": run_id,
+            "status": "completed",
             "mode": pack_mode,
             "engine": _deep_meta.get("engine"),
             "source": (results.get("report") or {}).get("source"),
             "phase": (results.get("report") or {}).get("phase"),
-            "verdict": audit_res.get("static_verdict"),
+            "verdict": (composite.get("level")
+                        or audit_res.get("selected_verdict")
+                        or audit_res.get("static_verdict")),
+            "mode_verdict": audit_res.get("static_verdict"),
+            "selected_verdict_source": (results.get("report") or {})
+                                       .get("selected_verdict_source"),
             "truly_green": audit_res["truly_green"],
             "unmet_expectations": audit_res.get("unmet_expectations") or [],
             "execution_plan": plan,
@@ -820,14 +1058,35 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
             # dynamic-weighted composite (winre.compose) had nothing to
             # consume and the report said "the analysis plane did not run"
             # when it had simply never been invoked.
-            "findings": _build_findings(
-                pack_mode, pack.root, sha=sha,
-                evidence_dir=pack.stages["dynamic"]),
+            "findings": findings_record,
+            "composite": composite,
             "llm_roles": audit_res.get("llm_roles"),
             "generated_at": utcnow(),
         }, indent=2) + "\n", encoding="utf-8")
     except OSError:
         pass
+
+    # Refresh the delivered-view manifest after audit, rendered reports and
+    # pack META have reached their terminal form.
+    try:
+        from .manifest import write_pack_manifests
+        results["artifact_manifests"] = write_pack_manifests(
+            pack.root, run_id=run_id, sha256=sha, mode=pack_mode,
+            dynamic_requested=enable_dynamic)
+    except Exception as e:
+        results["artifact_manifests_final"] = {
+            "ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+    # Export only after reports, audit and pack metadata are final and pinned
+    # to this run. The archive manifest then hashes the actual delivered view.
+    results["case_pack"] = None
+    if dynamic and dynamic.get("ok"):
+        try:
+            from .casepack import build_case
+            results["case_pack"] = build_case(pack.root, sha, pack_mode)
+        except Exception as e:
+            results["case_pack"] = {"ok": False,
+                                    "error": f"case pack: {str(e)[:200]}"}
 
     # summary line: verdict from the deep/rules engine (quick's verdict is a
     # placeholder on remote runs). "no verdict" is spelled out instead of
@@ -835,16 +1094,21 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
     phase = "static"
     if dynamic:
         phase += f"+dynamic({'ok' if dynamic.get('ok') else 'FAIL'})"
-    _sv = audit_res.get("static_verdict")
-    if not _sv:
-        _sv = ("none (deep stage produced no verdict)"
+    _mode_verdict = audit_res.get("static_verdict")
+    if not _mode_verdict:
+        _mode_verdict = ("none (deep stage produced no verdict)"
                if any("verdict" in str(u) for u in
                       (audit_res.get("unmet_expectations") or []))
                else "none")
+    _selected_verdict = (composite.get("level")
+                         or audit_res.get("selected_verdict")
+                         or _mode_verdict)
     print(f"[winre-pipeline] {sha} [{phase}] "
-          f"verdict={_sv} "
+          f"verdict={_selected_verdict} mode_verdict={_mode_verdict} "
           f"truly_green={audit_res['truly_green']}", flush=True)
-    return {"sha": sha, "results": results}
+    return {"sha": sha, "pack_mode": pack_mode, "run_id": run_id,
+            "verdict": _selected_verdict,
+            "results": results}
 
 
 def main() -> int:
@@ -902,6 +1166,11 @@ def main() -> int:
     enable_dynamic = args.dynamic or _os.environ.get("WINRE_ENABLE_DYNAMIC", "").strip().lower() in ("1", "true", "yes")
     enable_agentic_dbg = args.agentic_dbg or _os.environ.get(
         "WINRE_AGENTIC_DBG", "").strip().lower() in ("1", "true", "yes")
+    if args.driver == "local" and (enable_dynamic or enable_agentic_dbg):
+        print("[winre-pipeline] ABORT: local pipeline refuses debug/dynamic "
+              "execution because it runs on Flare and cannot perform trusted "
+              "post-execution analysis. Use --driver remote.", file=sys.stderr)
+        return 2
     if args.driver == "remote":
         from . import remote_driver
         res = remote_driver.run_remote_pipeline(
@@ -910,7 +1179,9 @@ def main() -> int:
             enable_agentic_dbg=enable_agentic_dbg,
             mode=args.mode,
             adaptive=args.adaptive,
-            idle_stop_seconds=args.idle_stop_seconds)
+            idle_stop_seconds=args.idle_stop_seconds,
+            stop_on=args.stop_on,
+            stop_on_settle=args.stop_on_settle)
         if res.get("aborted"):
             return 2   # fail fast before anything executed
         if args.publish:
@@ -927,7 +1198,9 @@ def main() -> int:
                        enable_agentic_dbg=enable_agentic_dbg,
                        mode=args.mode,
                        adaptive=args.adaptive,
-                       idle_stop_seconds=args.idle_stop_seconds)
+                       idle_stop_seconds=args.idle_stop_seconds,
+                       stop_on=args.stop_on,
+                       stop_on_settle=args.stop_on_settle)
     if res.get("aborted"):
         return 2   # fail fast before anything executed
     if args.publish:

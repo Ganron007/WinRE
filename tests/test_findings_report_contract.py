@@ -85,6 +85,46 @@ def test_a_pack_with_no_findings_still_reports_the_gap_honestly(tmp_path):
     assert FINDINGS_STEM in md
 
 
+def test_debug_report_shows_selected_verdict_observation_and_unpack_gap(tmp_path):
+    """The report separates the composite decision from debugger limitations."""
+    pack_root = tmp_path / SHA / "dbg"
+    for stage in ("deep", "dynamic", "report"):
+        (pack_root / stage).mkdir(parents=True, exist_ok=True)
+    (pack_root / "deep" / "deep.json").write_text(json.dumps({
+        "agent": {"source": "llm_judge", "verdict": {
+            "verdict": "malicious", "confidence": "high",
+            "summary": "Static analysis found downloader behavior."}}}),
+        encoding="utf-8")
+    (pack_root / "dynamic" / "STAGE.json").write_text(json.dumps({
+        "ok": True, "ran": False, "skipped": "not requested",
+        "summary": "dynamic not requested"}), encoding="utf-8")
+    (pack_root / "findings.json").write_text(json.dumps({
+        "verdict": {"level": "suspicious", "confidence": "low"},
+        "findings": {
+            "debug_observation": {
+                "window_completed": True, "observed_seconds": 30,
+                "requested_seconds": 30, "exit_observed": True,
+                "monitor_status": "collected", "target_observed": True,
+                "process_starts": 382, "process_stops": 384,
+                "scope": "process starts and stops only"},
+            "unpack": {"ok": False}},
+        "limitations": ["the debugger ran but produced no usable dump: no OEP"]
+    }), encoding="utf-8")
+    (pack_root / "composite.json").write_text(json.dumps({
+        "level": "suspicious", "confidence": "medium",
+        "deciding_mode": "static", "basis": ["capa:behavior"]}),
+        encoding="utf-8")
+
+    md = _report(pack_root)
+    assert "Phase:** static+debugger" in md
+    assert "**SUSPICIOUS** (confidence: medium) — source `mode-composite`" in md
+    assert "Deep-stage assessment (MALICIOUS" in md
+    assert "ETW process monitor" in md and "starts=382; stops=384" in md
+    assert "process starts and stops only" in md
+    assert "no usable OEP dump was recovered" in md
+    assert "No dynamic detonation was observed in this debugger-assisted run" in md
+
+
 def test_no_consumer_reads_the_stage_dir_for_findings():
     """Every findings consumer must read the mode root. Checked by BEHAVIOUR
     above; this asserts the stage-dir path is gone from the codebase so the

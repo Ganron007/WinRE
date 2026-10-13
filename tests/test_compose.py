@@ -87,6 +87,17 @@ def test_conflicts_name_every_source():
             assert set(c["sources"]) == {"static", "agentic", "dynamic"}
 
 
+def test_static_mode_disagreement_does_not_claim_dynamic_evidence():
+    out = compose.compose({"static": _f("static", SUSPICIOUS),
+                           "agentic": _f("agentic", MALICIOUS, conf="high")})
+    assert out["level"] == SUSPICIOUS
+    assert out["deciding_mode"] == "static"
+    disagreement = next(c for c in out["conflicts"]
+                        if c["kind"] == "disagreement")
+    assert "dynamic" not in disagreement["detail"]
+    assert "execution evidence" in disagreement["detail"]
+
+
 # ------------------------------------------------------------- real packs
 
 def test_compose_for_sample_over_real_packs():

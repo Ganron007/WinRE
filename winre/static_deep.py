@@ -393,11 +393,38 @@ def _is_go(sample: str) -> bool:
     return b"Go build ID" in data or b"go1." in data or b"runtime.main" in data
 
 
+def _detect_local_format(sample_path: str | Path | None, *, mode: str) -> dict:
+    if not sample_path:
+        return {"status": "unverifiable", "document_format": None,
+                "go_binary": None,
+                "reason": ("local source sample path was not supplied; a remote "
+                           "guest path cannot be read by the control plane")}
+    try:
+        with Path(sample_path).open("rb") as fh:
+            data = fh.read(2 * 1024 * 1024)
+    except OSError as e:
+        return {"status": "unverifiable", "document_format": None,
+                "go_binary": None,
+                "reason": f"local sample could not be read: {type(e).__name__}: {str(e)[:120]}"}
+    magic = data[:8]
+    doc = ("ole" if magic == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" else
+           "zip-office?" if data.startswith(b"PK\x03\x04") else
+           "pdf" if data.startswith(b"%PDF-") else
+           "rtf" if data.lstrip().startswith(b"{\\rtf") else None)
+    is_go = (b"Go build ID" in data or b"go1." in data
+             or b"runtime.main" in data)
+    return {"status": "detected", "sample_source": "local_input",
+            "document_format": doc or "other", "go_binary": is_go,
+            "reason": "local input inspected by deterministic magic/signature checks"}
+
+
 def run_static_deep_dive(sample_name: str, sha: str, *,
                          max_steps: int = 42,
                          mode: str = "remote",
                          quick: dict | None = None,
-                         cfg: dict | None = None) -> dict:
+                         cfg: dict | None = None,
+                         remote_sample: str | None = None,
+                         sample_path: str | Path | None = None) -> dict:
     """Deterministic deep dive over the static toolset (no LLM).
 
     Fixed checklist, bounded per-tool timeouts, rules-based verdict.
@@ -406,30 +433,46 @@ def run_static_deep_dive(sample_name: str, sha: str, *,
     """
     from winre.agentic import ToolRegistry
     t0 = time.time()
-    reg = ToolRegistry(sample_name, sha, cfg, mode=mode)
+    reg = ToolRegistry(sample_name, sha, cfg, mode=mode,
+                       remote_sample=remote_sample)
     history: list[dict] = []
     ev: dict = {}
     calls = 0
-    step_failures: list[str] = []
 
     def _run(tool: str, **kw):
         nonlocal calls
+        # `_purpose` is bookkeeping for this checklist (for example, keep
+        # function and string queries in separate evidence slots). It is not
+        # part of the tool's schema and must be removed before dispatch.
+        purpose = kw.pop("_purpose", None)
         if calls >= max_steps:
-            return {"skipped": "checklist budget exhausted"}
+            r = {"status": "budget_exhausted",
+                 "reason_code": "checklist_call_budget",
+                 "skipped": "checklist budget exhausted"}
+            history.append({"step": len(history) + 1, "tool": tool,
+                            "purpose": purpose, "args": kw, "result": r,
+                            "error": None, "status": r["status"]})
+            return r
         calls += 1
         try:
             r = reg.call(tool, kw)
         except Exception as e:
-            r = {"error": str(e)[:200]}
-        ev[tool] = r
-        if isinstance(r, dict) and r.get("error"):
-            step_failures.append(f"{tool}:{str(r['error'])[:80]}")
+            r = {"status": "failed", "reason_code": "tool_exception",
+                 "error": str(e)[:200]}
+        # A tool may expose multiple independent query surfaces. Preserve each
+        # result by purpose; a later query must not overwrite the function rows
+        # that the decompiler is about to consume.
+        if purpose:
+            ev[f"{tool}.{purpose}"] = r
+        else:
+            ev[tool] = r
         history.append({"step": len(history) + 1, "tool": tool,
-                        "args": kw,
+                        "purpose": purpose, "args": kw,
                         "result": r if len(json.dumps(r, default=str)) < 60000
                         else {"truncated": True,
                               "keys": list(r.keys()) if isinstance(r, dict) else []},
-                        "error": r.get("error") if isinstance(r, dict) else None})
+                        "error": r.get("error") if isinstance(r, dict) else None,
+                        "status": r.get("status") if isinstance(r, dict) else "failed"})
         return r
 
     # 0. analysis-readiness gate FIRST (AMAT Track 7): packed/encrypted?
@@ -453,9 +496,11 @@ def run_static_deep_dive(sample_name: str, sha: str, *,
     _run("script_decode")
     _run("sink_sites")
     # 3. SQL surfaces
-    _run("ghidra_query", sql="SELECT name, addr AS address, size FROM funcs ORDER BY size DESC LIMIT 20",
+    _run("ghidra_query", _purpose="functions",
+         sql="SELECT name, addr AS address, size FROM funcs ORDER BY size DESC LIMIT 20",
          max_rows=20)
-    _run("ghidra_query", sql="SELECT content, addr AS address FROM strings LIMIT 25",
+    _run("ghidra_query", _purpose="strings",
+         sql="SELECT content, addr AS address FROM strings LIMIT 25",
          max_rows=25)
     _run("ida_query", sql="SELECT name, addr AS address, size FROM funcs LIMIT 20")
     # 4. strings (plain, decoded, encoded)
@@ -464,21 +509,29 @@ def run_static_deep_dive(sample_name: str, sha: str, *,
     _run("xor_string_search")
     # 5. curated rules + signatures
     _run("yarascan")
-    gh = {} if not isinstance(ev.get("ghidra_query"), dict) else ev["ghidra_query"]
+    gh = ev.get("ghidra_query.functions")
+    gh = gh if isinstance(gh, dict) else {}
     # 6. decompile the largest function (if any found) + signature-match it
     rows = (gh.get("rows") or []) if isinstance(gh, dict) else []
     top_fn: dict = {}
     if rows:
         addr = None
-        try:
-            addr = rows[0][1] if isinstance(rows[0], (list, tuple)) else rows[0].get("address")
-        except Exception:
-            addr = None
+        row = rows[0]
+        if isinstance(row, (list, tuple)) and len(row) >= 2:
+            name, addr = row[0], row[1]
+            size = row[2] if len(row) > 2 else 0
+        elif isinstance(row, dict):
+            name = row.get("name")
+            addr = row.get("address", row.get("addr"))
+            size = row.get("size", 0)
+        else:
+            name, addr, size = None, None, 0
         if addr:
             _run("ghidra_decompile", function_addr=str(addr))
         try:
-            top_fn = {"name": str(rows[0][0]), "size": int(rows[0][2])} \
-                if isinstance(rows[0], (list, tuple)) and len(rows[0]) > 2 else {}
+            if name and addr:
+                top_fn = {"name": str(name), "address": str(addr),
+                          "size": int(size or 0)}
         except Exception:
             top_fn = {}
     pe_imps: list[str] = []
@@ -494,7 +547,14 @@ def run_static_deep_dive(sample_name: str, sha: str, *,
     # 7. format-gated extras
     if _is_dotnet(ev.get("pe_parse") or {}):
         _run("dotnet_analyze")
-    doc = _is_doc(reg.remote_sample)
+    # remote_sample is a guest path in remote mode and cannot be read by this
+    # control-plane process. Format predicates must use the caller's local
+    # input; if it is unavailable, leave these legs unselected.
+    source_path = str(sample_path) if sample_path is not None else (
+        reg.remote_sample if mode == "local" else None)
+    format_detection = _detect_local_format(source_path, mode=mode)
+    doc = (format_detection.get("document_format")
+           if format_detection.get("status") == "detected" else None)
     if doc == "ole":
         _run("olevba_analyze")
     elif doc == "pdf":
@@ -505,8 +565,12 @@ def run_static_deep_dive(sample_name: str, sha: str, *,
         if _dict_of(ev.get("rtf_predecode")).get("embedded_ole2"):
             _run("olevba_analyze")
     # Go binaries: symbol recovery (honest skip when not Go)
-    if _is_go(reg.remote_sample):
+    if format_detection.get("status") == "detected" and format_detection.get("go_binary"):
         _run("goresym_analyze")
+    if format_detection.get("status") == "unverifiable":
+        history.append({"step": len(history) + 1, "tool": "format_detection",
+                        "status": "unverifiable",
+                        "reason": format_detection.get("reason")})
     # 8. second engines + emulation (bounded, best-effort)
     _run("r2_decompile")
     _run("upx_unpack")
@@ -536,10 +600,15 @@ def run_static_deep_dive(sample_name: str, sha: str, *,
                    "summary": f"rules engine error: {str(e)[:120]}",
                    "key_evidence": [], "rules_fired": ["rules-error"]}
     elapsed = round(time.time() - t0, 1)
+    from .capabilities import census as capability_census
+    capabilities = capability_census(history)
     return {"verdict": verdict, "source": "static_deterministic",
             "history": history, "llm_analysis": None,
             "tool_calls": calls, "elapsed_s": elapsed,
-            "mode": "static", "tool_failures": step_failures}
+            "mode": "static",
+            "format_detection": format_detection,
+            "tool_failures": capabilities["required_failures"],
+            "capability_census": capabilities}
 
 
 if __name__ == "__main__":

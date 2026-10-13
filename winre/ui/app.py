@@ -304,6 +304,8 @@ def _pack_views(root: Path, files: dict) -> dict:
     # dynamic — detonation summary
     dyn_meta = get("dynamic", "META.json")
     stg = get("dynamic", "STAGE.json")
+    dynamic_manifest = _read_json(root / "dynamic" / "manifest.json") or {}
+    pack_manifest = _read_json(root / "artifact-manifest.json") or {}
     fr = get("dynamic", "frida_summary.json") or {}
     pm = get("dynamic", "procmon_summary.json") or {}
     net = get("dynamic", "network.json") or {}
@@ -373,10 +375,19 @@ def _pack_views(root: Path, files: dict) -> dict:
     v["dynamic"] = {
         "ran": bool(dyn_meta),
         "meta": dyn_meta, "stage": stg,
+        "artifact_coverage": (dynamic_manifest.get("coverage") or {}),
+        "pack_artifact_count": pack_manifest.get("artifact_count"),
+        "pack_coverage": (pack_manifest.get("coverage") or {}),
         "frida": {"calls": fr.get("calls"),
                   "top_apis": (fr.get("top_apis") or [])[:12],
                   "decoded_paths": (fr.get("decoded_paths") or [])[:10],
-                  "sockaddrs": (fr.get("sockaddrs") or [])[:10]} if fr.get("status") == "ok" else None,
+                  "sockaddrs": (fr.get("sockaddrs") or [])[:10],
+                  "network_endpoints": (fr.get("network_endpoints") or [])[:20],
+                  "network_endpoint_count": fr.get("network_endpoint_count"),
+                  "network_endpoints_truncated": fr.get("network_endpoints_truncated"),
+                  "hook_coverage": fr.get("hook_coverage"),
+                  "file_effects_truncated": fr.get("file_effects_truncated"),
+                  "unmatched_calls": fr.get("unmatched_calls")} if fr.get("status") == "ok" else None,
         "procmon": {"rows_total": pm.get("rows_total"),
                     "rows_sample": pm.get("rows_sample"),
                     "top_operations": (pm.get("top_operations") or [])[:12],
@@ -413,6 +424,8 @@ def _pack_views(root: Path, files: dict) -> dict:
         "engine": dj.get("engine") if isinstance(dj, dict) else None,
         "meta": get("deep", "META.json"),
     }
+    findings = _read_json(root / "findings.json") or {}
+    v["correlation"] = findings.get("correlation")
 
     # yara — rules + lineage
     rr = get("yara", "rule_report.json") or {}
@@ -768,7 +781,7 @@ def create_app() -> "Flask":
     def health():
         return jsonify(_vm_health())
 
-    # --- Snapshot gate (L1 marker / L2 hypervisor / L3 ledger) -------------
+    # --- Snapshot gate (guest marker + independent control-plane ledger) ---
 
     @app.route("/api/gate")
     def api_gate():
@@ -783,15 +796,15 @@ def create_app() -> "Flask":
                 _mode = "unknown"
             return jsonify({"mode": _mode, "marker": None,
                             "vm_state": {}, "ledger_clean": False,
-                            "hypervisor": None, "blocked": False,
+                            "hypervisor": None, "blocked": True,
                             "reason": f"probe error: {e}"}), 200
 
     @app.route("/api/gate/attest", methods=["POST"])
     def api_gate_attest():
         """HITL attestation: {"action": "restored"|"verified_clean", "sha"?}.
 
-        `verified_clean` is marker-verified server-side (L1) — a false claim
-        is refused. Single-use: the next execution dirties the ledger.
+        `verified_clean` checks the guest marker and writes the separate
+        control-plane ledger. The next requested execution marks it dirty.
         """
         from winre import snapshot_gate
         body = request.get_json(force=True, silent=True) or {}

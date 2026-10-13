@@ -9,12 +9,13 @@
 
     Usage:
       powershell -ExecutionPolicy Bypass -File ops\sync_to_flare.ps1
-      $env:FLARE_HOST / FLARE_USER / FLARE_SSH_KEY  to override defaults
+      $env:FLARE_HOST / FLARE_USER / FLARE_SSH_KEY / FLARE_SSH_PORT to override defaults
 #>
 param(
     [string]$FlareHost = $env:FLARE_HOST,
     [string]$User = $env:FLARE_USER,
     [string]$SshKey  = $env:FLARE_SSH_KEY,
+    [string]$SshPort = $env:FLARE_SSH_PORT,
     [string]$RemoteRoot = $env:FLARE_REMOTE_ROOT,
     # Remove remote files inside the mirrored source trees that no longer exist
     # on the host. OFF by default: the sync is additive so a re-run can never
@@ -27,6 +28,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+function Die([string]$m) { Write-Host "[sync_to_flare] FATAL: $m" -ForegroundColor Red; exit 2 }
+function Step([string]$m) { Write-Host "[sync_to_flare] $m" }
+function Warn([string]$m) { Write-Host "[sync_to_flare] WARN $m" -ForegroundColor Yellow }
 # Fallback: parse the repo .env (host vars live there, not in the process env)
 $Repo0 = Split-Path -Parent $PSScriptRoot
 $DotEnv = Join-Path $Repo0 ".env"
@@ -41,10 +45,25 @@ if (Test-Path $DotEnv) {
 if (-not $FlareHost) { $FlareHost = $env:FLARE_HOST; if (-not $FlareHost) { $FlareHost = $dotenvVars["FLARE_HOST"] } }
 if (-not $User) { $User = $env:FLARE_USER; if (-not $User) { $User = $dotenvVars["FLARE_USER"] }; if (-not $User) { $User = "FLARE-VM" } }
 if (-not $SshKey) { $SshKey = $env:FLARE_SSH_KEY; if (-not $SshKey) { $SshKey = $dotenvVars["FLARE_SSH_KEY"] } }
+if (-not $SshPort) { $SshPort = $env:FLARE_SSH_PORT; if (-not $SshPort) { $SshPort = $dotenvVars["FLARE_SSH_PORT"] } }
 if (-not $FlareHost -or -not $SshKey) {
     Die "FLARE_HOST / FLARE_SSH_KEY not set (neither env nor .env)"
 }
+if (-not $SshPort) { $SshPort = "22" }
+$portNumber = 0
+if (-not [int]::TryParse([string]$SshPort, [ref]$portNumber) -or
+    $portNumber -lt 1 -or $portNumber -gt 65535) {
+    Die "FLARE_SSH_PORT must be an integer from 1 through 65535 (got '$SshPort')"
+}
+$SshPort = [string]$portNumber
+if (-not $RemoteRoot) { $RemoteRoot = $dotenvVars["FLARE_REMOTE_ROOT"] }
 if (-not $RemoteRoot) { $RemoteRoot = "C:\WinRE" }
+# The runtime, setup, verifier, and remote driver all currently use C:\WinRE.
+# A different sync root would produce a successful copy while leaving the
+# actual pipeline pointed at the old location, so fail before staging.
+if ($RemoteRoot.TrimEnd('\') -ine 'C:\WinRE') {
+    Die "WinRE runtime paths are fixed at C:\WinRE; refusing unsupported FLARE_REMOTE_ROOT '$RemoteRoot'"
+}
 
 $Repo = Split-Path -Parent $PSScriptRoot
 $Staging = Join-Path $env:TEMP "winre-sync-$PID"
@@ -60,10 +79,6 @@ if (Test-Path $Staging) { Remove-Item -LiteralPath $Staging -Recurse -Force -Err
 # the VM by every sync - a fake session file (sha256 = 64 a's) reappeared three
 # times while being "deleted" from the VM, because scp copies and never prunes.
 $Excludes = @(".git","__pycache__","logs","cache","local-runs","dist",".env","internal",".pytest_cache",".mypy_cache","sessions",".ruff_cache")
-
-function Die([string]$m) { Write-Error "[sync_to_flare] FATAL: $m"; exit 2 }
-function Step([string]$m) { Write-Host "[sync_to_flare] $m" }
-function Warn([string]$m) { Write-Host "[sync_to_flare] WARN $m" -ForegroundColor Yellow }
 
 Step "staging repo -> $Staging"
 New-Item -ItemType Directory -Force -Path $Staging | Out-Null
@@ -89,7 +104,7 @@ Step "scp -> $dest"
 $null = New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP "winre-sync-tmp")
 # BatchMode: without it a rejected key makes scp prompt for a password and
 # hang forever inside a non-interactive chain
-scp -i "$SshKey" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 -r "$Staging\*" "$dest" 2>&1 | ForEach-Object { Write-Host $_ }
+scp -i "$SshKey" -P $SshPort -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 -r "$Staging\*" "$dest" 2>&1 | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) { Die "scp failed rc=$LASTEXITCODE" }
 
 # scp's glob does NOT pick up dotfiles on Windows, so `.env.template` and
@@ -102,7 +117,7 @@ $dotStaged = Get-ChildItem -LiteralPath $Staging -Force -File |
 if ($dotStaged) {
     Step ("scp dotfiles -> " + (($dotStaged.Name) -join ", "))
     foreach ($f in $dotStaged) {
-        scp -i "$SshKey" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 "$($f.FullName)" "$dest" 2>&1 |
+        scp -i "$SshKey" -P $SshPort -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 "$($f.FullName)" "$dest" 2>&1 |
             ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) { Die "scp dotfile $($f.Name) failed rc=$LASTEXITCODE" }
     }
@@ -117,7 +132,20 @@ if ($Prune -or $PruneDryRun) {
     Step "prune: remote files with no upstream counterpart"
     $rel = Get-ChildItem -LiteralPath $Staging -Recurse -File -Force |
         ForEach-Object { $_.FullName.Substring($Staging.Length + 1).Replace('\','/') }
-    $stagedList = ($rel -join "`n")
+    # Keep inventories out of the SSH command line. Embedding the staged list
+    # in -EncodedCommand exceeded the Windows OpenSSH command-line limit once
+    # this repo reached 212 files.
+    $stagedManifestLocal = Join-Path $env:TEMP "winre-sync-$PID-prune-staged.txt"
+    $stagedManifestRemoteUnix = "C:/Windows/Temp/winre-sync-$PID-prune-staged.txt"
+    $stagedManifestRemoteWin = "C:\Windows\Temp\winre-sync-$PID-prune-staged.txt"
+    [IO.File]::WriteAllText($stagedManifestLocal, ($rel -join [Environment]::NewLine),
+                            [Text.UTF8Encoding]::new($false))
+    $stagedManifestDest = "{0}@{1}:{2}" -f $User, $FlareHost, $stagedManifestRemoteUnix
+    scp -i "$SshKey" -P $SshPort -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 "$stagedManifestLocal" "$stagedManifestDest" 2>&1 |
+        ForEach-Object { Write-Host $_ }
+    $stagedManifestScpRc = $LASTEXITCODE
+    Remove-Item -LiteralPath $stagedManifestLocal -Force -ErrorAction SilentlyContinue
+    if ($stagedManifestScpRc -ne 0) { Die "could not upload prune inventory (scp rc=$stagedManifestScpRc)" }
     # The remote script resolves the root ITSELF and derives relative paths
     # from the resolved FullName. The previous version doubled the backslashes
     # in the root string and then took Substring(Length+1): the FileSystem
@@ -131,9 +159,8 @@ if ($Prune -or $PruneDryRun) {
 if (-not `$root) { 'PRUNE_NO_ROOT'; exit 0 }
 `$prefix=`$root.FullName.TrimEnd('\') + '\'
 `$staged=@{}
-@'
-$stagedList
-'@ -split "`n" | Where-Object { `$_ } | ForEach-Object { `$staged[`$_] = 1 }
+Get-Content -LiteralPath '$stagedManifestRemoteWin' | Where-Object { `$_ } |
+    ForEach-Object { `$staged[[string]`$_] = 1 }
 `$srcDirs=@('winre','tools','ops','install','docs','tests','assets')
 `$cand=@()
 foreach (`$d in `$srcDirs) { `$p=Join-Path `$root.FullName `$d
@@ -151,8 +178,9 @@ if (`$cand.Count -eq 0) { 'PRUNE_NONE'; exit 0 }
 `$cand | Sort-Object | ForEach-Object { 'PRUNE ' + `$_ }
 "@
     $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($pruneScript))
-    $plist = ssh -i $SshKey -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes "$User@$FlareHost" "powershell -NoProfile -EncodedCommand $enc" 2>&1 | Out-String
+    $plist = ssh -i $SshKey -p $SshPort -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes "$User@$FlareHost" "powershell -NoProfile -EncodedCommand $enc" 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0 -and $plist -notmatch "PRUNE_") {
+        Write-Output $plist
         Die "prune probe failed (ssh rc=$LASTEXITCODE) - refusing to report an empty diff"
     }
     $lines = @($plist -split "`r?`n" | Where-Object { $_.Trim() -like "PRUNE*" })
@@ -187,7 +215,7 @@ $($targets -join "`n")
 }
 "@
                         $denc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($del))
-            $dout = ssh -i $SshKey -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes "$User@$FlareHost" "powershell -NoProfile -EncodedCommand $denc" 2>&1 | Out-String
+            $dout = ssh -i $SshKey -p $SshPort -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes "$User@$FlareHost" "powershell -NoProfile -EncodedCommand $denc" 2>&1 | Out-String
             $removed = @($dout -split "`r?`n" | Where-Object { $_.Trim() -like "REMOVED*" })
             $failed  = @($dout -split "`r?`n" | Where-Object { $_.Trim() -like "FAILED*" })
             $skipped = @($dout -split "`r?`n" | Where-Object { $_.Trim() -like "SKIPPED_OUTSIDE*" })
@@ -205,8 +233,82 @@ $($targets -join "`n")
 }
 
 Step "remote verify"
-$probe = ssh -i $SshKey -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes "$User@$FlareHost" "powershell -NoProfile -Command (Test-Path 'C:\WinRE\winre\orchestrator.py')" 2>&1
-if ("$probe".Trim() -eq "True") { Step "DEPLOY_OK" } else { Write-Output $probe; Die "remote verify failed" }
+$manifestRows = @(Get-ChildItem -LiteralPath $Staging -Recurse -File -Force | ForEach-Object {
+    @{
+        path = $_.FullName.Substring($Staging.Length + 1).Replace('\','/')
+        sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+})
+if ($manifestRows.Count -eq 0) { Die "staging tree is empty; refusing a vacuous deployment check" }
+$manifestLocal = Join-Path $env:TEMP "winre-sync-$PID-manifest.jsonl"
+$manifestRemoteUnix = "C:/Windows/Temp/winre-sync-$PID-manifest.jsonl"
+$manifestRemoteWin = "C:\Windows\Temp\winre-sync-$PID-manifest.jsonl"
+$manifestJsonLines = @($manifestRows | ForEach-Object {
+    ConvertTo-Json -InputObject $_ -Depth 3 -Compress
+})
+[IO.File]::WriteAllLines($manifestLocal, $manifestJsonLines, [Text.UTF8Encoding]::new($false))
+$manifestDest = "$User@$FlareHost`:$manifestRemoteUnix"
+scp -i "$SshKey" -P $SshPort -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 "$manifestLocal" "$manifestDest" 2>&1 |
+    ForEach-Object { Write-Host $_ }
+$manifestScpRc = $LASTEXITCODE
+Remove-Item -LiteralPath $manifestLocal -Force -ErrorAction SilentlyContinue
+if ($manifestScpRc -ne 0) { Die "could not upload deployment verification manifest (scp rc=$manifestScpRc)" }
+
+# Confirm every staged file (including dotfiles and untracked new modules) is
+# present with the same SHA-256 after transfer. The old check only tested one
+# hard-coded C:\WinRE path, so partial/stale deployments could say DEPLOY_OK.
+$verifyScript = @"
+`$ErrorActionPreference='Stop'
+`$root=Get-Item -LiteralPath '$RemoteRoot'
+`$prefix=`$root.FullName.TrimEnd('\') + '\'
+`$manifestPath='$manifestRemoteWin'
+try {
+  `$manifestLines=Get-Content -LiteralPath `$manifestPath
+  `$bad=@()
+  `$count=0
+  foreach (`$line in `$manifestLines) {
+    if (-not `$line) { continue }
+    `$row=ConvertFrom-Json -InputObject `$line
+    `$count++
+    `$rel=[string]`$row.path
+    if (-not `$rel -or `$rel.StartsWith('/') -or `$rel -match '(^|/)\.\.(/|$)') {
+      `$bad += "unsafe-path:`$rel"; continue
+    }
+    `$target=Join-Path `$root.FullName `$rel.Replace('/','\')
+    `$full=[IO.Path]::GetFullPath(`$target)
+    if (-not `$full.StartsWith(`$prefix,[System.StringComparison]::OrdinalIgnoreCase)) {
+      `$bad += "outside-root:`$rel"; continue
+    }
+    if (-not (Test-Path -LiteralPath `$full -PathType Leaf)) {
+      `$bad += "missing:`$rel"; continue
+    }
+    `$actual=(Get-FileHash -LiteralPath `$full -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (`$actual -ne ([string]`$row.sha256).ToLowerInvariant()) { `$bad += "hash:`$rel" }
+  }
+  if (`$bad.Count -gt 0) {
+    `$bad | ForEach-Object { Write-Output ("PARITY_FAIL " + `$_) }
+    exit 3
+  }
+  Write-Output ("DEPLOY_PARITY_OK files=" + `$count)
+} finally {
+  Remove-Item -LiteralPath `$manifestPath -Force -ErrorAction SilentlyContinue
+}
+"@
+$verifyTokens = $null
+$verifyParseErrors = $null
+$null = [System.Management.Automation.Language.Parser]::ParseInput(
+    $verifyScript, [ref]$verifyTokens, [ref]$verifyParseErrors)
+if ($verifyParseErrors.Count -gt 0) {
+    Die "generated remote parity script is invalid: $($verifyParseErrors[0].Message)"
+}
+$verifyEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($verifyScript))
+$probe = ssh -i "$SshKey" -p $SshPort -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes "$User@$FlareHost" "powershell -NoProfile -EncodedCommand $verifyEncoded" 2>&1 | Out-String
+if ($LASTEXITCODE -eq 0 -and $probe -match "DEPLOY_PARITY_OK files=$($manifestRows.Count)(?:\s|$)") {
+    Step "DEPLOY_OK — SHA-256 parity for $($manifestRows.Count) staged files"
+} else {
+    Write-Output $probe
+    Die "remote deployment parity verification failed"
+}
 
 try { Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue } catch {}
 Step "DONE"

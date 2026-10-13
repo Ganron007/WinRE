@@ -138,7 +138,7 @@ def test_writetofile_is_in_the_handle_apis(fat):
     assert "WriteFile: 0" in src
     assert "NtWriteFile: 0" in src
     assert "handlePaths[" in src
-    assert "pendingPathByTid[" in src
+    assert "ctx.filePath" in src
     # CloseHandle must release, or the map grows unbounded in a 150s window
     assert "forgetHandle" in src and "CloseHandle" in src
 
@@ -190,7 +190,9 @@ def _render_js():
         class Args:
             max_calls = 1000
             apis = "WriteFile"
+            max_children = 4
         ns["args"] = Args()
+    ns["root_call_budget"] = 500
     if "apis_js" in names:
         ns["apis_js"] = '"WriteFile"'
     exec(compile(ast.fix_missing_locations(mod), "<js>", "exec"), ns)
@@ -202,7 +204,7 @@ def test_the_tracer_js_builds_with_the_handle_map():
     js = _render_js()
     assert "{{" not in js and "}}" not in js, "unrendered f-string escapes"
     assert js.count("{") == js.count("}"), "unbalanced braces"
-    for needle in ("handlePaths", "pendingPathByTid", "createApiSet",
+    for needle in ("handlePaths", "ctx.filePath", "createApiSet",
                    "closeApiSet", "rememberOpenedHandle", "forgetHandle",
                    "decoded['path']"):
         assert needle in js, f"missing from the generated JS: {needle}"

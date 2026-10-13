@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -114,6 +115,218 @@ def scp_from(cfg: dict, remote: str, local: Path,
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
     if r.returncode != 0:
         raise RuntimeError(f"scp from flare failed: {r.stderr[:300]}")
+
+
+def remote_sha256(cfg: dict, remote_path: str) -> str:
+    """Read a remote file's SHA-256 without transferring its contents."""
+    escaped = remote_path.replace("'", "''")
+    script = (
+        "$ErrorActionPreference='Stop'; "
+        f"$p='{escaped}'; "
+        "if (-not (Test-Path -LiteralPath $p -PathType Leaf)) "
+        "{ throw 'staged sample is missing' }; "
+        "(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash"
+    )
+    result = ssh_ps(cfg, script, timeout=90)
+    if result.returncode != 0:
+        raise RuntimeError("remote SHA-256 failed: "
+                           + (result.stderr or result.stdout or "unknown error")[:240])
+    hashes = re.findall(r"(?i)\b[0-9a-f]{64}\b", result.stdout or "")
+    if not hashes:
+        raise RuntimeError("remote SHA-256 returned no valid digest")
+    return hashes[-1].lower()
+
+
+def remote_file_inventory(cfg: dict, remote_dir: str) -> dict[str, tuple[int, str]]:
+    """Inventory a finished producer directory by relative path, size and hash."""
+    root = remote_dir.replace("/", "\\").replace("'", "''")
+    script = (
+        "$ErrorActionPreference='Stop'; "
+        f"$root=(Resolve-Path -LiteralPath '{root}').Path.TrimEnd('\\'); "
+        "$rows=@(Get-ChildItem -LiteralPath $root -File -Recurse -Force | "
+        "ForEach-Object { "
+        "if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) "
+        "{ throw ('reparse point is not accepted: ' + $_.FullName) }; "
+        "$rel=$_.FullName.Substring($root.Length).TrimStart('\\').Replace('\\','/'); "
+        "$h=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); "
+        "[pscustomobject]@{path=$rel;size_bytes=[int64]$_.Length;sha256=$h} }); "
+        "ConvertTo-Json -InputObject $rows -Depth 4 -Compress"
+    )
+    result = ssh_ps(cfg, script, timeout=900)
+    if result.returncode != 0:
+        raise RuntimeError("remote inventory failed: "
+                           + (result.stderr or result.stdout or "unknown error")[:240])
+    try:
+        rows = json.loads((result.stdout or "").strip())
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"remote inventory was not JSON: {e}") from e
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not isinstance(rows, list):
+        raise RuntimeError("remote inventory has an invalid shape")
+    inventory: dict[str, tuple[int, str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise RuntimeError("remote inventory contains an invalid entry")
+        rel = str(row.get("path") or "").replace("\\", "/")
+        digest = str(row.get("sha256") or "").lower()
+        if (not rel or rel.startswith("/") or ".." in rel.split("/")
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or rel in inventory):
+            raise RuntimeError("remote inventory contains an unsafe or duplicate entry")
+        inventory[rel] = (int(row.get("size_bytes") or -1), digest)
+    return inventory
+
+
+def local_file_inventory(root: Path) -> dict[str, tuple[int, str]]:
+    """Hash every regular file in an incoming directory without following links."""
+    from .evidence import sha256_file
+
+    inventory: dict[str, tuple[int, str]] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise RuntimeError(f"incoming transfer contains a symbolic link: {path}")
+        if not path.is_file():
+            continue
+        rel = str(path.relative_to(root)).replace("\\", "/")
+        inventory[rel] = (path.stat().st_size, sha256_file(path))
+    return inventory
+
+
+def _remote_staging_destination(sample: Path, sha: str, run_id: str) -> str:
+    suffix = sample.suffix.lower()
+    if not re.fullmatch(r"\.[a-z0-9]{1,10}", suffix):
+        suffix = ".bin"
+    return f"C:/samples/winre/{sha.lower()}/{run_id.lower()}/sample{suffix}"
+
+
+def stage_remote_sample(cfg: dict, sample: Path, sha: str,
+                        run_id: str) -> dict:
+    """Copy a sample to a unique remote path and prove the bytes match.
+
+    A failed or partial copy is left in its unique run directory for diagnosis;
+    callers must stop before invoking any analysis or execution tool.
+    """
+    from .evidence import sha256_file
+
+    if not re.fullmatch(r"(?i)[0-9a-f]{64}", str(sha or "")):
+        raise ValueError("expected sample SHA-256 is invalid")
+    if not re.fullmatch(r"(?i)[0-9a-f]{32}", str(run_id or "")):
+        raise ValueError("run ID is invalid")
+    expected = sha.lower()
+    local_before = sha256_file(sample)
+    if local_before != expected:
+        raise RuntimeError("local sample changed after run identity was computed")
+
+    remote_path = _remote_staging_destination(sample, expected, run_id)
+    remote_dir = remote_path.rsplit("/", 1)[0]
+    escaped_dir = remote_dir.replace("'", "''")
+    escaped_path = remote_path.replace("'", "''")
+    ready = ssh_ps(
+        cfg,
+        "$ErrorActionPreference='Stop'; "
+        f"$d='{escaped_dir}'; $p='{escaped_path}'; "
+        "New-Item -ItemType Directory -Force -Path $d | Out-Null; "
+        "if (Test-Path -LiteralPath $p) { throw 'run staging destination exists' }; "
+        "'STAGING_READY'",
+        timeout=90,
+    )
+    if ready.returncode != 0 or "STAGING_READY" not in (ready.stdout or ""):
+        raise RuntimeError("remote staging directory could not be prepared: "
+                           + (ready.stderr or ready.stdout or "unknown error")[:240])
+
+    scp_to(cfg, sample, remote_path)
+    remote_hash = remote_sha256(cfg, remote_path)
+    local_after = sha256_file(sample)
+    if local_after != expected:
+        raise RuntimeError("local sample changed while it was being uploaded")
+    if remote_hash != expected:
+        raise RuntimeError(f"remote sample hash mismatch: expected {expected}, "
+                           f"received {remote_hash}")
+    return {
+        "schema": "winre.remote-staging/v1",
+        "ok": True,
+        "run_id": run_id.lower(),
+        "sha256": expected,
+        "remote_sha256": remote_hash,
+        "remote_path": remote_path,
+        "original_name": sample.name,
+        "bytes": sample.stat().st_size,
+    }
+
+
+def _verified_remote_sample(pack: EvidencePack, sample_name: str,
+                            cfg: dict, *, supplied_path: str | None = None,
+                            expected_sha: str | None = None) -> str:
+    """Resolve the run's staged sample and verify its identity before use."""
+    expected = (expected_sha or pack.sha or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise RuntimeError("analysis refused: evidence pack has no valid sample SHA-256")
+
+    remote_path = supplied_path
+    if remote_path is None:
+        staged = pack.read("intake", "REMOTE-STAGING.json") or {}
+        if (staged.get("schema") == "winre.remote-staging/v1"
+                and staged.get("ok") is True
+                and str(staged.get("sha256") or "").lower() == expected
+                and staged.get("original_name") == sample_name):
+            candidate = str(staged.get("remote_path") or "")
+            normalized = candidate.replace("/", "\\")
+            required_prefix = f"C:\\samples\\winre\\{expected}\\"
+            tail = normalized[len(required_prefix):] if normalized.lower().startswith(
+                required_prefix.lower()) else ""
+            if (tail and re.fullmatch(r"[0-9a-f]{32}\\sample\.[a-z0-9]{1,10}",
+                                      tail, flags=re.IGNORECASE)):
+                remote_path = normalized
+        # Legacy/manual-stage fallback remains safe only because its bytes are
+        # checked against this pack's SHA before any tool is called.
+        if remote_path is None:
+            remote_path = rf"C:\samples\{sample_name}"
+
+    remote_hash = remote_sha256(cfg, remote_path)
+    if remote_hash != expected:
+        raise RuntimeError(f"analysis refused: remote sample identity mismatch "
+                           f"(expected {expected}, received {remote_hash})")
+    return remote_path
+
+
+def _remote_staging_abort(pack: EvidencePack, sha: str, run_id: str,
+                          error: str, remote_path: str | None = None) -> dict:
+    """Make a rejected staging attempt visible and non-green in its pack."""
+    message = f"sample staging rejected: {str(error)[:240]}"
+    staging = {
+        "schema": "winre.remote-staging/v1", "ok": False,
+        "run_id": run_id, "sha256": sha, "remote_path": remote_path,
+        "error": message, "recorded_at": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    pack.write("intake", "REMOTE-STAGING.json", staging)
+    pack.write("intake", "META.json", stage_result(
+        "intake", False, error=message, summary="remote sample identity not established"))
+    audit = {
+        "truly_green": False, "all_green": False, "quality_green": False,
+        "aborted": True, "aborted_reason": message,
+        "checks": [], "fallback_stages": [], "failed_tools": [],
+        "unmet_expectations": [message], "dynamic_conflict": False,
+        "dynamic_blocked": False, "static_yara_wins": True,
+        "static_verdict": None, "deep_verdict": None,
+        "deep_verdict_source": None, "llm_roles": None,
+        "dynamic_verdict": None,
+        "staging": {"ok": False, "run_id": run_id, "sha256": sha,
+                    "remote_path": remote_path},
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    (pack.root / "audit.json").write_text(
+        json.dumps(audit, indent=2) + "\n", encoding="utf-8")
+    (pack.root / "META.json").write_text(json.dumps({
+        "sha256": sha, "mode": pack.mode, "pack_mode": pack.mode,
+        "run_id": run_id, "aborted": True, "truly_green": False,
+        "error": message,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }, indent=2) + "\n", encoding="utf-8")
+    return {"sha": sha, "pack_mode": pack.mode,
+            "results": {"staging": staging, "audit": audit},
+            "aborted": True, "error": message}
 
 
 def _remote_py(cfg: dict) -> str:
@@ -311,16 +524,26 @@ print(json.dumps({"evidence": out}))
 # Remote stage implementations (control plane)
 # ---------------------------------------------------------------------------
 
-def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict) -> dict:
+def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict, *,
+                 remote_sample: str | None = None) -> dict:
     """SSH: run the quick SQL wrappers on the VM via a helper script, pull JSON back.
 
     Uses a remote helper .py (scp'd) instead of nested inline quoting — the
     nested powershell -Command string mangles @ and quotes over SSH.
     """
-    ensure_mcp_servers(cfg, only=("malcat",))  # Malcat serves this stage
     t0 = time.time()
     py = _remote_py(cfg)
-    remote_sample = rf"C:\samples\{sample_name}"
+    try:
+        remote_sample = _verified_remote_sample(
+            pack, sample_name, cfg, supplied_path=remote_sample)
+    except Exception as e:
+        failed = stage_result("quick", False,
+                              error=f"staging identity: {str(e)[:220]}")
+        pack.write("quick", "quick.json", {"evidence": {}, "verdict": "unknown",
+                                           "tool_failures": [failed["error"]]})
+        pack.write("quick", "META.json", failed)
+        return failed
+    ensure_mcp_servers(cfg, only=("malcat",))  # Malcat serves this stage
 
     # helper script: runs ghidra + ida counts, prints JSON
     helper = REPO / "winre" / "_remote_quick_helper.py"
@@ -345,17 +568,43 @@ def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict) -> dict:
             pass
     if not evidence:
         evidence = {"ghidra": {"error": (r.stderr or r.stdout)[-200:]}}
-    # honesty: ERRORS are tool failures; SKIPS are honest capability gaps
-    # (commercial tool absent / no .i64 yet) and must NOT penalize quality
-    failed_sources = [k for k, v in evidence.items()
-                      if isinstance(v, dict) and v.get("error")]
-    tool_failures = [f"{k}:{(v.get('error') or '')[:80]}"
-                     for k, v in evidence.items()
-                     if isinstance(v, dict) and v.get("error")]
-    active_sources = [k for k, v in evidence.items()
-                      if isinstance(v, dict)
-                      and not v.get("error") and not v.get("skipped")]
-    ok = parsed and (len(failed_sources) < len(evidence)) and bool(active_sources)
+    # Ghidra function census is this stage's required quick capability. IDA
+    # and Malcat are optional cross-checks (IDA may not have a database yet;
+    # Malcat is a commercial installation), so their absence/errors remain
+    # visible warnings and never inflate the required-failure list.
+    gh = evidence.get("ghidra") if isinstance(evidence, dict) else None
+    gh_ok = (isinstance(gh, dict) and not gh.get("error")
+             and gh.get("func_rows") is not None)
+    tool_failures = ([] if gh_ok else [
+        f"ghidra:{((gh or {}).get('error') or 'function census missing')[:100]}"
+    ])
+    warnings = [f"{name}:{(evidence.get(name) or {}).get('error') or
+                            (evidence.get(name) or {}).get('skipped')}"
+                for name in ("ida", "malcat")
+                if isinstance(evidence.get(name), dict)
+                and ((evidence[name].get("error") or evidence[name].get("skipped")))]
+    ok = bool(parsed and gh_ok)
+    quick_census = {
+        "schema": "winre-quick-capability-census/v1",
+        "required": ["ghidra"],
+        "capabilities": [
+            {"tool": "ghidra", "required": True,
+             "status": "completed" if gh_ok else "failed",
+             "reason_code": "completed" if gh_ok else "ghidra_function_census_missing"},
+            {"tool": "ida", "required": False,
+             "status": "completed" if (evidence.get("ida") or {}).get("func_count") is not None
+                      else "unavailable",
+             "reason_code": "completed" if (evidence.get("ida") or {}).get("func_count") is not None
+                           else "optional_cross_check_unavailable"},
+            {"tool": "malcat", "required": False,
+             "status": "completed" if (evidence.get("malcat") or {}).get("sha256")
+                      else "unavailable",
+             "reason_code": "completed" if (evidence.get("malcat") or {}).get("sha256")
+                           else "commercial_tool_unavailable"},
+        ],
+        "required_failures": tool_failures,
+        "optional_warnings": warnings,
+    }
 
     # --- control-plane threat intel: VirusTotal HASH-ONLY -------------------
     # Runs on the driving box (never the air-gapped VM) and only sends the
@@ -384,16 +633,21 @@ def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict) -> dict:
 
     verdict = "unknown"
     pack.write("quick", "quick.json", {"evidence": evidence, "verdict": verdict,
-                                       "tool_failures": tool_failures})
+                                       "tool_failures": tool_failures,
+                                       "tool_warnings": warnings,
+                                       "capability_census": quick_census})
     pack.write("quick", "META.json", stage_result(
         "quick", ok,
-        error=None if ok else "quick helper failed or all sources errored",
+        error=None if ok else "quick helper failed or required Ghidra census missing",
         summary=f"ghidra={evidence.get('ghidra',{}).get('func_rows')} "
                 f"malcat={'yes' if evidence.get('malcat',{}).get('sha256') else 'skip'} "
                 f"ida={evidence.get('ida',{}).get('func_count')}",
         verdict=verdict, tool_failures=tool_failures,
+        tool_warnings=warnings, capability_census=quick_census,
         fallback=not ok, elapsed_s=round(time.time() - t0, 1)))
-    return {"evidence": evidence, "verdict": verdict}
+    return {"evidence": evidence, "verdict": verdict,
+            "failures": tool_failures, "warnings": warnings,
+            "capability_census": quick_census}
 
 
 # ---------------------------------------------------------------------------
@@ -452,8 +706,9 @@ for _a in sys.argv[4:]:
 
 pipeline = Path(__file__).resolve().parents[1]
 sessions = pipeline / "sessions"
-sessions.mkdir(parents=True, exist_ok=True)
-(sessions / f"{sha}.json").write_text(json.dumps({
+session_file = sessions / "runs" / f"{run_id or sha}.json"
+session_file.parent.mkdir(parents=True, exist_ok=True)
+session_file.write_text(json.dumps({
     "sha256": sha,
     "sample_path": sample,
     "file_type": {"format": "pe"},
@@ -463,17 +718,17 @@ env = os.environ.copy()
 env["WINRE_ORCHESTRATOR_MODE"] = "local"
 env.setdefault("WINRE_ORCH_LOCK", str(pipeline / "lock" / "orchestrator.lock"))
 env["REVENG_LOGS_DIR"] = str(pipeline / "logs")
-env["WINRE_DYNAMIC_DIR"] = str(pipeline / "logs" / sha / section / "dynamic")
+env["WINRE_DYNAMIC_DIR"] = str(
+    pipeline / "logs" / sha / section / "dynamic" / "runs" / (run_id or sha))
 env["REVENG_SESSIONS_DIR"] = str(sessions)
-# phase 3 (docs/internal/DESIGN.md section 2): the orchestrator is about to run
-# ON THE FLAREVM, so the analysis half of _post_pull_enrich must not run there.
-# It runs on this side after the pull, in winre.analysis.
-env["WINRE_POST_PULL_OFF_VM"] = "1"
+env["WINRE_SESSION_FILE"] = str(session_file)
+# phase 3 (docs/internal/DESIGN.md section 2): the orchestrator always defers
+# interpretation; this control-plane process runs it after a verified pull.
 if run_id:
     env["WINRE_RUN_ID"] = run_id
 
 cmd = [sys.executable, str(pipeline / "winre" / "orchestrator.py"), sha,
-       "--mode", "local", "--max-seconds", str(max_seconds)]
+       "--sample", sample, "--mode", "local", "--max-seconds", str(max_seconds)]
 if run_id:
     cmd += ["--run-id", run_id]
 if pesieve:
@@ -542,15 +797,26 @@ def _requested_sources(pack, meta: dict) -> dict:
     requested is `not_requested`, not silently missing. Guessing from what is
     present would make every pack look complete.
     """
-    req = {"frida": True, "procmon": True, "memory": True, "network": True,
-           "process_snapshot": True, "malcat": True, "job": True}
-    # pe-sieve / x64dbg unpack are opt-in capabilities
-    for flag in ("pesieve", "x64dbg"):
-        req[flag] = bool(meta.get(f"{flag}_ran") or meta.get(flag))
-    # windbg's MCP is localhost-bound on the VM; if it never came up the source
-    # was requested and failed, which is exactly what the manifest should say
-    req["windbg"] = bool(meta.get("windbg_dump") is not None
-                         or meta.get("windbg_ran"))
+    dyn = bool(meta.get("execution_kind") == "dynamic" or
+               meta.get("detonation_ran") or meta.get("sample_pid"))
+    req = {
+        "frida": {"requested": dyn, "required": dyn},
+        "procmon": {"requested": dyn, "required": dyn},
+        "network": {"requested": dyn, "required": dyn},
+        "network_enrichment": {"requested": dyn, "required": False},
+        "process_snapshot": {"requested": dyn, "required": False},
+        "memory": {"requested": dyn, "required": False},
+        "malcat": {"requested": dyn, "required": False},
+        "job": {"requested": dyn, "required": dyn},
+        "pe_sieve": {"requested": bool(meta.get("pe_sieve_ran") or
+                                         meta.get("pe_sieve_enabled")),
+                      "required": False},
+        "x64dbg": {"requested": bool((meta.get("x64dbg_dump") or {}).get("attempted")),
+                   "required": False},
+        "windbg": {"requested": dyn, "required": False},
+        "external_capture": {"requested": bool(meta.get("external_capture_requested")),
+                              "required": False},
+    }
     return req
 
 
@@ -560,13 +826,16 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                    idle_stop_seconds: int = 0,
                    stop_on: str = "network,file",
                    stop_on_settle: int = 20,
-                   clock: dict | None = None) -> dict:
+                   clock: dict | None = None,
+                   remote_sample: str | None = None,
+                   run_id: str | None = None) -> dict:
     """SSH: run orchestrator --mode local on the VM via helper, scp pack back."""
     t0 = time.time()
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    # --- snapshot gate: control plane decides (probe / auto-restore); the
-    # VM-side orchestrator does the ATOMIC marker consume at the execution
-    # site (its local file op). Control plane never consumes here.
+    # --- snapshot gate: the control plane requires both the guest marker and
+    # its independent clean-state ledger. The VM-side orchestrator then
+    # consumes the marker at the execution site. Control plane never consumes
+    # the guest marker here.
     from . import snapshot_gate
     gate = snapshot_gate.preflight("dynamic", sha=sha, cfg=cfg, consume=False)
     if not gate.get("allowed"):
@@ -604,16 +873,27 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
             extra={"gate_mode": gate.get("gate", {}).get("mode"),
                    "preserve_error": prev.get("preserve_error")}))
         return blocked
+    try:
+        remote_sample = _verified_remote_sample(
+            pack, sample_name, cfg, supplied_path=remote_sample,
+            expected_sha=sha)
+    except Exception as e:
+        failed = stage_result("dynamic", False,
+                              error=f"staging identity: {str(e)[:220]}",
+                              elapsed_s=round(time.time() - t0, 1),
+                              gate=gate.get("gate"))
+        pack.write("dynamic", "STAGE.json", failed)
+        return failed
     py = _remote_py(cfg)
-    remote_sample = rf"C:\samples\{sample_name}"
     # Helper source: the tracked file is the single source of truth; the
     # embedded copy is a fallback for checkouts without it (two drifting
     # copies of this script is how the --run-id arg nearly shipped missing).
     helper = REPO / "winre" / "_remote_dynamic_helper.py"
-    if not helper.is_file():
-        helper = REPO / "winre" / "_remote_dynamic_helper.embedded.py"
-        helper.write_text(REMOTE_DYNAMIC_HELPER, encoding="utf-8")
     try:
+        # The helper is generated and gitignored. Always refresh it from the
+        # embedded source before copying so a stale local helper cannot bypass
+        # the run-specific directory/session contract.
+        helper.write_text(REMOTE_DYNAMIC_HELPER, encoding="utf-8")
         scp_to(cfg, helper, rf'{cfg["remote_pipeline"]}\winre\_remote_dynamic_helper.py')
     except Exception as e:
         return stage_result("dynamic", False, error=f"scp helper: {e}",
@@ -622,7 +902,36 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
 
     # Per-run nonce: freshness is decided by this VALUE (winre/run_nonce.py),
     # never by comparing the VM clock with the control plane's clock.
-    run_id = new_run_id()
+    run_id = run_id or new_run_id()
+    if not re.fullmatch(r"[0-9a-f]{32}", run_id, flags=re.IGNORECASE):
+        return stage_result("dynamic", False, error="invalid dynamic run ID",
+                            elapsed_s=round(time.time() - t0, 1),
+                            gate=gate.get("gate"))
+
+    # Preserve the last accepted evidence before this run starts. A failed
+    # archive means no detonation: the result would have nowhere safe to land.
+    local_dyn = pack.stages["dynamic"]
+    archived = archive_stage_for_fresh_run(pack)
+    if not archived.get("ok"):
+        failed = stage_result("dynamic", False,
+                              error="could not archive prior dynamic evidence: "
+                                    + str(archived.get("error") or "unknown error"),
+                              archived=archived, run_id=run_id,
+                              gate=gate.get("gate"))
+        pack.write("dynamic", "STAGE.json", failed)
+        return failed
+    local_dyn.mkdir(parents=True, exist_ok=True)
+    for wrapper in ("STAGE.json", "SKIP.json"):
+        try:
+            (local_dyn / wrapper).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            failed = stage_result("dynamic", False,
+                                  error=f"could not clear stale {wrapper}: {e}",
+                                  archived=archived, run_id=run_id)
+            pack.write("dynamic", "STAGE.json", failed)
+            return failed
     # Gate mode is a CONTROL-PLANE decision: forward it (and the marker path)
     # to the VM helper so an operator's observe/off override works end-to-end.
     # Without this the helper's own default (enforce) blocks benign test
@@ -652,7 +961,12 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                f'{"" if not stop_on else " --stop-on-settle=" + str(int(stop_on_settle))}'
                f' --section={pack.mode or "agentic"}'
                f' --run-id={run_id}')
-    r = ssh_ps(cfg, _script, timeout=int(max_seconds) + 700)
+    try:
+        r = ssh_ps(cfg, _script, timeout=int(max_seconds) + 700)
+    except Exception as e:
+        r = subprocess.CompletedProcess(
+            args=[], returncode=-1, stdout="",
+            stderr=f"dynamic helper SSH failed: {type(e).__name__}: {e}")
     # honest RC check: the helper prints RC=<code> as its last line
     helper_rc = None
     for line in reversed((r.stdout or "").splitlines()):
@@ -665,39 +979,119 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
             break
     job_ran = r.returncode == 0 and helper_rc is not None and helper_rc >= 0
 
-    # ARCHIVE the previous stage, do not patch it.
-    #
-    # This used to delete `META.json` and `memory/` and then pull fresh files
-    # OVER whatever else was already there. Everything else survived from the
-    # previous run - frida_trace.jsonl, procmon.csv, network_raw/,
-    # post_mortem.json, windbg_analysis.json, process_snapshot*.json - so a
-    # partial pull, or a same-named file missing from this run, left an old
-    # sibling beside a fresh META whose nonce checked out. That is not a
-    # hypothetical: one pack on disk holds http_*.txt and packets_*.pcap from
-    # three different dates while claiming a single fresh run.
-    #
-    # The fix follows the pattern `evidence.mark_dynamic_not_requested` already
-    # established: the previous run is MOVED to previous_runs/, never deleted,
-    # and the pull lands in an empty directory. A run that produces nothing now
-    # produces nothing, rather than producing a mixture of two runs.
-    local_dyn = pack.stages["dynamic"]
-    archived = archive_stage_for_fresh_run(pack)
-    local_dyn.mkdir(parents=True, exist_ok=True)
-
     ok = False
     err = None
-    remote_dyn = (rf'{cfg["remote_pipeline"]}\logs\{sha}'
-                  rf'\{pack.mode or "agentic"}\dynamic')
+    remote_root = str(cfg["remote_pipeline"]).replace("\\", "/").rstrip("/")
+    remote_dyn = (f"{remote_root}/logs/{sha}/{pack.mode or 'agentic'}"
+                  f"/dynamic/runs/{run_id}")
     if not job_ran:
         err = (f"detonation did not run: ssh rc={r.returncode} "
                f"helper_rc={helper_rc}; stderr={(r.stderr or '')[:200]}")
+    remote_inventory = None
+    inventory_error = None
     try:
-        scp_from(cfg, remote_dyn, pack.root, recursive=True)
-        ok = True
+        remote_inventory = remote_file_inventory(cfg, remote_dyn)
     except Exception as e:
+        inventory_error = f"remote inventory: {type(e).__name__}: {e}"
+
+    incoming_parent = pack.root / ".incoming" / run_id
+    pull_root = incoming_parent / "dynamic"
+    transfer_error = None
+    try:
+        incoming_parent.mkdir(parents=True, exist_ok=True)
+        if pull_root.exists():
+            raise RuntimeError(f"incoming destination already exists: {pull_root}")
+        scp_from(cfg, remote_dyn, pull_root, recursive=True)
+    except Exception as e:
+        transfer_error = f"transfer: {type(e).__name__}: {e}"
+
+    incoming_meta: dict = {}
+    incoming_inventory: dict[str, tuple[int, str]] = {}
+    local_inventory_error = None
+    try:
+        if pull_root.is_dir():
+            try:
+                incoming_meta = json.loads(
+                    (pull_root / "META.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                incoming_meta = {}
+            incoming_inventory = local_file_inventory(pull_root)
+    except Exception as e:
+        local_inventory_error = f"local inventory: {type(e).__name__}: {e}"
+
+    inventory_matches = (remote_inventory is not None
+                         and local_inventory_error is None
+                         and incoming_inventory == remote_inventory)
+    nonce = run_nonce.check(incoming_meta, run_id)
+    metadata_complete = bool(
+        incoming_meta.get("sha256") == sha
+        and not incoming_meta.get("running")
+        and incoming_meta.get("finished_at"))
+    transfer_complete = bool(
+        transfer_error is None and inventory_matches
+        and nonce.get("fresh") and metadata_complete and job_ran)
+    transfer = {
+        "complete": transfer_complete,
+        "run_id": run_id,
+        "remote_directory": remote_dyn,
+        "remote_files": len(remote_inventory or {}),
+        "local_files": len(incoming_inventory),
+        "inventory_matches": inventory_matches,
+        "fresh_meta": bool(nonce.get("fresh")),
+        "metadata_complete": metadata_complete,
+        "helper_completed": job_ran,
+        "error": transfer_error or inventory_error or local_inventory_error,
+    }
+    if remote_inventory is not None and not inventory_matches and not transfer["error"]:
+        transfer["error"] = "remote and received file inventories differ"
+
+    if transfer_complete:
+        import shutil as _shutil
+        try:
+            # The receiver was emptied before detonation. Replace it only after
+            # the full incoming inventory and current-run META have matched.
+            local_dyn.rmdir()
+            _shutil.move(str(pull_root), str(local_dyn))
+            ok = True
+        except OSError as e:
+            transfer_complete = False
+            transfer["complete"] = False
+            transfer["error"] = f"promote incoming evidence failed: {e}"
+            err = transfer["error"]
+        if ok:
+            for parent in (incoming_parent, incoming_parent.parent):
+                try:
+                    parent.rmdir()
+                except OSError:
+                    pass
+    if not transfer_complete:
         if err is None:
-            err = str(e)
-    meta = pack.read("dynamic", "META.json") or {}
+            err = (transfer["error"] or inventory_error
+                   or nonce.get("reason")
+                   or ("run metadata is incomplete" if not metadata_complete
+                       else "run did not complete"))
+        partial_path = None
+        if pull_root.exists():
+            import shutil as _shutil
+            partial_parent = pack.root / "previous_runs"
+            partial_parent.mkdir(parents=True, exist_ok=True)
+            partial_dest = partial_parent / f"dynamic_partial_{run_id}"
+            if partial_dest.exists():
+                partial_dest = partial_parent / f"dynamic_partial_{run_id}-{time.time_ns()}"
+            try:
+                _shutil.move(str(pull_root), str(partial_dest))
+                partial_path = str(partial_dest.relative_to(pack.root)).replace("\\", "/")
+            except OSError as e:
+                transfer["preserve_error"] = str(e)[:200]
+        transfer["partial_evidence"] = partial_path
+        for parent in (incoming_parent, incoming_parent.parent):
+            try:
+                parent.rmdir()
+            except OSError:
+                pass
+        meta = incoming_meta
+    else:
+        meta = pack.read("dynamic", "META.json") or {}
     # Freshness = the orchestrator stamped OUR nonce (value comparison).
     # No clocks in the decision: a skewed VM clock can neither make a fresh
     # run look stale nor an old pack look fresh (RevAI handoff item 5).
@@ -706,7 +1100,7 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     gate_mode = snapshot_gate.mode()
     gate_pass = (gate_mode != "enforce") or bool(meta.get("gate_marker_consumed"))
     # ok=sample-ran without the tracer surviving is not a green detonation.
-    ok = bool(fresh and meta.get("ok"))
+    ok = bool(transfer_complete and fresh and meta.get("ok"))
     # A stage can be "not green" for two different reasons, and only one of
     # them is a product failure. Say which, so the pack is auditable:
     #   no detonation      -> the sample never ran (DLL, spawn refused)
@@ -722,22 +1116,8 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     skew = clock_skew_s(cfg, cached=clock)
     restore_required = bool(meta.get("restore_required"))
 
-    # ---- FINDINGS (phase 3, docs/internal/DESIGN.md section 2) ---------
-    # Everything derived happens HERE, on the control plane, after the pull.
-    # The analysis that used to run inside orchestrator._post_pull_enrich ran
-    # ON THE FLAREVM - a box that had just executed the sample, whose python,
-    # tshark and libraries are all fair game for a sample that wanted to
-    # tamper with them. The VM is now an evidence producer only.
-    #
-    # STAGE.json's `verdict` now comes from the findings, so
-    # audit.dynamic_verdict stops being null and dynamic_conflict stops being
-    # dead code that has never once fired.
-    dyn_findings = _findings.build(
-        pack.mode or "dynamic", pack.root, sha=sha,
-        evidence_dir=pack.stages["dynamic"])
-    # phase 3: the analysis half of _post_pull_enrich, run HERE. The VM was
-    # told to defer it (WINRE_POST_PULL_OFF_VM) so nothing interprets the
-    # evidence on the box that just executed the sample.
+    # phase 3: the analysis half of _post_pull_enrich runs HERE after a
+    # verified pull. The guest always defers interpretation.
     # stage_meta must already exist: an earlier version of this block ran
     # BEFORE `stage_meta = stage_result(...)`, so every detonation that
     # succeeded crashed the control plane AFTER the evidence had been pulled.
@@ -745,12 +1125,18 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     # evidence including two memory dumps - the exact dishonesty this
     # architecture is meant to prevent.
     post_analysis = None
-    if ok:
+    if transfer_complete and fresh:
         try:
             from . import analysis as _analysis
             post_analysis = _analysis.run(pack.stages["dynamic"])
         except Exception as e:
             post_analysis = {"error": f"{type(e).__name__}: {e}"}
+
+    # Finalize findings only after host-side enrichment has completed. The
+    # earlier ordering wrote a verdict over an incomplete evidence view.
+    dyn_findings = _findings.build(
+        pack.mode or "dynamic", pack.root, sha=sha,
+        evidence_dir=pack.stages["dynamic"], run_id=run_id)
 
     # ---- the artifact manifest (design §8) ---------------------------------
     # Written AFTER the analysis steps so it covers the derived files too, and
@@ -788,6 +1174,7 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                               gate_pass=gate_pass, gate=gate.get("gate"),
                               helper_rc=helper_rc,
                               run_id=run_id, nonce=nonce,
+                              archived=archived, transfer=transfer,
                               clock_skew_s=(skew or {}).get("clock_skew_s"),
                               control_plane_started_at=started_at,
                               vm_finished_at=meta.get("finished_at"),
@@ -993,6 +1380,31 @@ def ensure_mcp_servers(cfg: dict | None = None, *,
     return out
 
 
+def _debug_target_image(agent_result: dict | None, fallback: str) -> str:
+    """Basename of the exact sample copy x64dbg was asked to load.
+
+    Debug-safe staging may rename a sample whose module name would be parsed
+    as an x64dbg expression. ETW correlation must follow that actual path,
+    while retaining the supplied sample name as a fallback for old packs.
+    """
+    from pathlib import PureWindowsPath
+    target = (agent_result or {}).get("debug_run") or {}
+    target = target.get("target") or {}
+    candidate = target.get("staged_path") or target.get("sample_name") or fallback
+    return PureWindowsPath(str(candidate)).name or PureWindowsPath(fallback).name
+
+
+def _debug_monitor_failure(capture: dict) -> str | None:
+    """A collected host trace is useful only if it observed the requested target."""
+    if capture.get("status") != "collected":
+        return str(capture.get("error") or capture.get("reason")
+                   or capture.get("status") or "collection_failed")
+    summary = capture.get("summary") or {}
+    if summary.get("target_observed") is not True:
+        return "target_process_not_observed"
+    return None
+
+
 def remote_mcp_health(cfg: dict) -> dict:
     """Probe the VM's MCP servers.
 
@@ -1030,7 +1442,10 @@ def remote_mcp_health(cfg: dict) -> dict:
 
 def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
                 sha: str = "", dynamic: bool = False,
-                mode: str = "agentic") -> dict:
+                mode: str = "agentic",
+                remote_sample: str | None = None,
+                local_sample_path: str | Path | None = None,
+                run_id: str = "") -> dict:
     """Deep dive from the control plane.
 
     mode="agentic" (default): LangGraph ReAct agent over the static toolset
@@ -1044,6 +1459,25 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
     """
     from . import llm_client
     t0 = time.time()
+    if not run_id:
+        try:
+            run_id = json.loads((pack.root / "META.json").read_text(
+                encoding="utf-8")).get("run_id") or new_run_id()
+        except Exception:
+            run_id = new_run_id()
+    try:
+        remote_sample = _verified_remote_sample(
+            pack, sample_name, cfg, supplied_path=remote_sample,
+            expected_sha=sha or pack.sha)
+    except Exception as e:
+        failed = stage_result("deep", False,
+                              error=f"staging identity: {str(e)[:220]}",
+                              elapsed_s=round(time.time() - t0, 1))
+        pack.write("deep", "deep.json", {"source": "staging_failure",
+                                          "tool_failures": [failed["error"]],
+                                          "agent": {"verdict": None}})
+        pack.write("deep", "META.json", failed)
+        return failed
     heal = ensure_mcp_servers(cfg)  # headless MCP self-heal (boot launcher is primary)
     mcp = remote_mcp_health(cfg)
     # commercial-optional: strip Malcat agent tools when Malcat is not
@@ -1057,29 +1491,34 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
     fallback = False
     failures: list[str] = []
 
-    # x64dbg MCP (HTTP from here) — probe only in static phase. Use the
-    # expression-safe staged name (hyphens break x64dbg module lookups).
-    if mcp.get("x64dbg"):
-        try:
-            from winre.mcp import X64DbgClient
-            from winre.mcp.x64dbg_manager import stage_safe_sample
-            xc = X64DbgClient(host=cfg["host"])
-            staged = stage_safe_sample(cfg, rf"C:\samples\{sample_name}",
-                                       tag=(sha or "")[:12])
-            lb = xc.load_binary(staged)
-            out["x64dbg"] = {"loaded": lb.get("ok"), "staged": staged}
-        except Exception as e:
-            failures.append(f"x64dbg:{e}")
-
     # Deep engine: static deterministic checklist, or LangGraph agent
     agent_result = None
+    debug_capture: dict = {"requested": bool(dynamic),
+                           "status": "not_requested" if not dynamic else "failed",
+                           "run_id": run_id}
+    debug_monitor_started = None
+    debug_monitor_dir = pack.stages["deep"] / "debug_monitor"
+    if dynamic:
+        try:
+            from .debug_monitor import start_remote
+            debug_monitor_started = start_remote(cfg, run_id)
+            debug_capture = {"requested": True, **debug_monitor_started}
+        except Exception as e:
+            debug_capture = {"requested": True, "status": "failed",
+                             "run_id": run_id,
+                             "error": f"{type(e).__name__}: {str(e)[:240]}"}
+            debug_monitor_dir.mkdir(parents=True, exist_ok=True)
+            (debug_monitor_dir / "META.json").write_text(
+                json.dumps(debug_capture, indent=2) + "\n", encoding="utf-8")
     try:
         quick_ev = pack.read("quick", "quick.json")
         if mode == "static":
             from winre.static_deep import run_static_deep_dive
             agent_result = run_static_deep_dive(
                 sample_name, sha or sample_name,
-                mode="remote", quick=quick_ev, cfg=cfg)
+                mode="remote", quick=quick_ev, cfg=cfg,
+                remote_sample=remote_sample,
+                sample_path=local_sample_path)
         else:
             from winre.agentic import (run_langgraph_deep_dive, TOOL_NAMES)
             names: list[str] = list(TOOL_NAMES)
@@ -1089,12 +1528,13 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
                                                    max_steps=14, dry=dry_llm,
                                                    dynamic=dynamic,
                                                    available_tools=names,
-                                                   quick=quick_ev)
+                                                   quick=quick_ev,
+                                                   remote_sample=remote_sample)
         history = []
         for h in (agent_result.get("history") or [])[:80]:
             entry = {"step": h.get("step"), "tool": h.get("tool"),
                      "args": h.get("args"), "error": h.get("error"),
-                     "reason": h.get("reason")}
+                     "reason": h.get("reason"), "status": h.get("status")}
             res = h.get("result")
             if isinstance(res, dict):
                 # FULL result preserved (evidence contract — raw outputs are
@@ -1108,13 +1548,20 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
             # deep.json unable to show the routing even though the run knew it
             # (code audit 2026-09-28).
             "verdict_judged_by": agent_result.get("verdict_judged_by"),
+            "judgment_pass_error": agent_result.get("judgment_pass_error"),
+            "planner_draft": agent_result.get("planner_draft"),
+            "debug_run": agent_result.get("debug_run"),
+            "format_detection": agent_result.get("format_detection"),
             "llm_analysis": agent_result.get("llm_analysis"),
             "fallback_reason": agent_result.get("fallback_reason"),
             "tool_calls": len(agent_result.get("history") or []),
             "history": history,
+            "capability_census": agent_result.get("capability_census"),
+            "tool_failures": agent_result.get("tool_failures") or [],
             "packed_signal": agent_result.get("packed_signal"),
             "unpack_prepass": agent_result.get("unpack_prepass"),
             "windbg_dump": agent_result.get("windbg_dump"),
+            "debug_monitor": debug_capture,
             # which debugger served the unpack (x32dbg vs x64dbg, P1-F1)
             "dbg_ensure": agent_result.get("dbg_ensure"),
             # per-role models actually used (RevAI handoff item 7)
@@ -1129,8 +1576,34 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
         failures.append(f"agent:{e}")
         agent_result = None
 
-    # surface step-level tool errors from the static checklist (honesty)
-    if mode == "static" and agent_result:
+    if debug_monitor_started:
+        try:
+            from .debug_monitor import stop_and_pull
+            debug_capture = stop_and_pull(
+                cfg, debug_monitor_started, debug_monitor_dir,
+                target_image=_debug_target_image(agent_result, sample_name))
+            debug_capture["run_id"] = run_id
+            (debug_monitor_dir / "META.json").write_text(
+                json.dumps(debug_capture, indent=2, default=str) + "\n",
+                encoding="utf-8")
+        except Exception as e:
+            debug_capture = {"requested": True, "status": "failed",
+                             "run_id": run_id,
+                             "error": f"{type(e).__name__}: {str(e)[:240]}"}
+            debug_monitor_dir.mkdir(parents=True, exist_ok=True)
+            (debug_monitor_dir / "META.json").write_text(
+                json.dumps(debug_capture, indent=2) + "\n", encoding="utf-8")
+    if dynamic:
+        out["debug_monitor"] = debug_capture
+        if out.get("agent"):
+            out["agent"]["debug_monitor"] = debug_capture
+        monitor_failure = _debug_monitor_failure(debug_capture)
+        if monitor_failure:
+            failures.append("debug_monitor:" + monitor_failure)
+
+    # Capability outcomes are audited the same way for both engines.
+    if agent_result:
+        out["capability_census"] = agent_result.get("capability_census")
         for _tf in (agent_result.get("tool_failures") or []):
             if _tf not in failures:
                 failures.append(_tf)
@@ -1168,6 +1641,7 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
         "key_evidence": (verdict_obj or {}).get("key_evidence") or [],
         "llm_analysis": (out.get("agent") or {}).get("llm_analysis"),
         "tool_failures": failures,
+        "capability_census": out.get("capability_census"),
         "no_verdict": no_verdict,
         "llm_roles": (out.get("agent") or {}).get("llm_roles"),
     })
@@ -1180,6 +1654,7 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
                if no_verdict else None),
         summary=f"mcp={mcp} engine={engine} mode={mode} fallback={fallback}",
         engine=engine, mode=mode, fallback=fallback, tool_failures=failures,
+        debug_monitor=debug_capture,
         verdict=verdict_label, no_verdict=no_verdict,
         elapsed_s=round(time.time() - t0, 1)))
     # neat closure: if the agent had debug tools, x64dbg + the sample must
@@ -1252,9 +1727,21 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
     # one authority decides which pack root this run owns (docs/internal/
     # DESIGN.md 1.2e: dbg/dynamic used to share the agentic root and overwrite
     # each other)
-    pack_mode = resolve_pack_mode(mode, agentic_dbg=enable_agentic_dbg,
-                                  dynamic=enable_dynamic)
+    try:
+        pack_mode = resolve_pack_mode(mode, agentic_dbg=enable_agentic_dbg,
+                                      dynamic=enable_dynamic)
+    except ValueError as e:
+        return {"sha": sha, "aborted": True, "error": str(e),
+                "results": {"audit": {"truly_green": False,
+                                       "aborted": True,
+                                       "aborted_reason": str(e)}}}
     pack = EvidencePack(LOCAL_LOGS, sha, mode=pack_mode).ensure()
+    run_id = new_run_id()
+    (pack.root / "META.json").write_text(json.dumps({
+        "sha256": sha, "mode": pack_mode, "pack_mode": pack_mode,
+        "run_id": run_id, "status": "in_progress",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }, indent=2) + "\n", encoding="utf-8")
 
     # ---- RUN-LEVEL EXECUTION PLAN (fail fast, before any stage) -----------
     # Under `enforce` the clean marker is one-shot: a run that asks for two
@@ -1265,9 +1752,9 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
     # the run intended.
     from . import snapshot_gate as _gate
     _gate.reset_session()      # debug-session scope is per run, not per process
-    # phase 5 (DESIGN.md section 7): a VM that has already executed a sample
-    # is not a trustworthy analysis host, so no executing mode may start on it.
-    # Read-only modes (static/agentic) may: they execute nothing.
+    # phase 5 (DESIGN.md section 7): every mode invokes guest-side analysis
+    # tools, which may have been tampered with by a prior sample. Require the
+    # operator-attested clean marker before invoking any of them.
     from . import vm_gate as _vmgate
     gate_ok, blocker = _vmgate.require_clean_vm(
         cfg, mode=mode, agentic_dbg=enable_agentic_dbg, dynamic=enable_dynamic)
@@ -1277,7 +1764,7 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
         for _step in blocker.get("how_to_clear") or []:
             print(f"[winre-remote]   -> {_step}", flush=True)
     plan = _gate.execution_plan(dynamic=enable_dynamic, debug=enable_agentic_dbg)
-    write_execution_plan(pack, plan)
+    write_execution_plan(pack, plan, run_id=run_id)
     results: dict = {"execution_plan": plan, "vm_gate": blocker}
     if not gate_ok or not plan.get("ok"):
         _msg = blocker.get("reason") if blocker else plan.get("error")
@@ -1293,24 +1780,28 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
         # (code audit 2026-09-28, HIGH).
         _aborted_audit = {
             "truly_green": False, "all_green": False, "quality_green": False,
-            "aborted": True, "aborted_reason": plan.get("error"),
+            "aborted": True, "aborted_reason": _msg,
+            "run_id": run_id,
             "execution_plan": plan,
-            "unmet_expectations": ["run aborted before any stage: execution "
-                                   "plan exceeds the snapshot-gate budget"],
+            "unmet_expectations": [f"run aborted before any stage: {_msg}"],
             "checks": [], "fallback_stages": [], "failed_tools": [],
             "dynamic_conflict": False, "dynamic_blocked": False,
             "static_yara_wins": True, "static_verdict": None,
             "deep_verdict": None, "deep_verdict_source": None,
             "llm_roles": None, "dynamic_verdict": None,
-            "snapshot_gate": {"mode": _gate.mode(), "ok": False,
-                              "detail": {"aborted": True}},
+            "snapshot_gate": {"mode": _gate.mode(),
+                              "ok": bool(plan.get("ok")),
+                              "detail": plan},
+            "vm_gate": blocker,
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         results["audit"] = _aborted_audit
         (pack.root / "audit.json").write_text(
             json.dumps(_aborted_audit, indent=2) + "\n", encoding="utf-8")
         (pack.root / "META.json").write_text(json.dumps({
-            "sha256": sha, "mode": mode, "aborted": True,
+            "sha256": sha, "mode": pack_mode, "engine_mode": mode,
+            "pack_mode": pack_mode,
+            "run_id": run_id, "aborted": True,
             "error": plan.get("error"),
             "truly_green": False,
             "execution_plan": plan,
@@ -1323,21 +1814,53 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
     clock = clock_skew_s(cfg)
     results["clock"] = clock
 
-    # upload the sample to the VM (C:\samples\<name>) — tools run there
-    remote_sample = rf"C:\samples\{sample.name}"
+    # Stage under a unique run directory, then verify bytes before any tool,
+    # debugger, or detonation stage can consume them.
+    remote_path = _remote_staging_destination(sample, sha, run_id)
     try:
-        scp_to(cfg, sample, remote_sample.replace("\\", "/"))
+        staging = stage_remote_sample(cfg, sample, sha, run_id)
     except Exception as e:
-        print(f"[winre-remote] WARN sample upload failed: {e}", flush=True)
+        print(f"[winre-remote] ABORT: sample staging failed: {e}", flush=True)
+        return _remote_staging_abort(pack, sha, run_id, str(e), remote_path)
+    remote_sample = staging["remote_path"]
+    pack.write("intake", "REMOTE-STAGING.json", {
+        **staging,
+        "verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    })
+    results["staging"] = staging
 
     # intake (local — we have the file)
     from .pipeline import _intake
     results["intake"] = _intake(sample, pack)
 
     # ---- STATIC phase (quick + deep over SSH/HTTP) ----
-    results["quick"] = remote_quick(sample.name, pack, cfg)
+    results["quick"] = remote_quick(sample.name, pack, cfg,
+                                    remote_sample=remote_sample)
+    if (not results["quick"].get("ok")
+            and "staging identity:" in str(results["quick"].get("error") or "")):
+        aborted = _remote_staging_abort(
+            pack, sha, run_id, str(results["quick"].get("error")), remote_path)
+        aborted["results"].update(results)
+        aborted["results"]["staging"] = {
+            **staging, "ok": False,
+            "error": results["quick"].get("error"),
+        }
+        return aborted
     results["deep"] = remote_deep(sample.name, pack, cfg, dry_llm, sha=sha,
-                                  dynamic=enable_agentic_dbg, mode=mode)
+                                  dynamic=enable_agentic_dbg, mode=mode,
+                                  remote_sample=remote_sample,
+                                  local_sample_path=sample.resolve(),
+                                  run_id=run_id)
+    if (not results["deep"].get("ok")
+            and "staging identity:" in str(results["deep"].get("error") or "")):
+        aborted = _remote_staging_abort(
+            pack, sha, run_id, str(results["deep"].get("error")), remote_path)
+        aborted["results"].update(results)
+        aborted["results"]["staging"] = {
+            **staging, "ok": False,
+            "error": results["deep"].get("error"),
+        }
+        return aborted
 
     # ---- DYNAMIC phase (segregated, opt-in, runs LAST after static) ----
     if not enable_dynamic:
@@ -1350,16 +1873,9 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
                                             idle_stop_seconds=idle_stop_seconds,
                                             stop_on=stop_on,
                                             stop_on_settle=stop_on_settle,
-                                            clock=clock)
-        # DFIR-Nexus ingest pack: dynamic logs + static context in one 7z
-        try:
-            from .casepack import build_case
-            dyn = results["dynamic"]
-            if dyn.get("ok"):
-                results["case_pack"] = build_case(pack.root, sha, mode)
-        except Exception as e:
-            results["case_pack"] = {"ok": False,
-                                    "error": f"case pack: {str(e)[:200]}"}
+                                            clock=clock,
+                                            remote_sample=remote_sample,
+                                            run_id=run_id)
 
     # yara (local, from evidence)
     try:
@@ -1377,22 +1893,40 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
     except Exception as e:
         results["yara"] = {"ok": False, "error": str(e)}
 
+    # Findings are finalized after enrichment and before report/export.
+    results["findings"] = _findings.build(
+        pack_mode, pack.root, sha=sha,
+        evidence_dir=pack.stages["dynamic"], run_id=run_id)
+    if pack_mode == "dynamic":
+        dynamic_stage = pack.read("dynamic", "STAGE.json") or {}
+        dynamic_stage["findings"] = results["findings"]
+        dynamic_stage["verdict"] = (results["findings"].get("verdict") or {}).get("level")
+        pack.write("dynamic", "STAGE.json", dynamic_stage)
+    from .compose import compose_for_sample
+    results["composite"] = compose_for_sample(
+        sha, LOCAL_LOGS, pending={pack_mode: results["findings"]})
+    results["composite"]["run_id"] = run_id
+    (pack.root / "composite.json").write_text(
+        json.dumps(results["composite"], indent=2, default=str) + "\n",
+        encoding="utf-8")
+
     # report + audit + RevAI-contract reporting chain (local)
     from .pipeline import _report
-    results["report"] = _report(pack, sha, results["quick"], results.get("dynamic"),
-                                results["deep"])
+    results["report"] = _report(pack, sha, results["quick"],
+                                results.get("dynamic"), results["deep"],
+                                composition=results["composite"])
 
-    # findings for THIS mode (design section 2: every mode is a producer).
-    # This previously ran only after a dynamic pull, so --mode static,
-    # --mode agentic and --agentic-dbg wrote no findings.json at all - which
-    # left the dynamic-weighted composite with nothing to weigh and the
-    # report saying "the analysis plane did not run" when it had never been
-    # invoked.
-    results["findings"] = _findings.build(
-            pack_mode, pack.root, sha=sha,
-            evidence_dir=pack.stages["dynamic"])
+    # Stage manifests feed the audit's requested-source coverage gate.
+    try:
+        from .manifest import write_pack_manifests
+        results["artifact_manifests"] = write_pack_manifests(
+            pack.root, run_id=run_id, sha256=sha, mode=pack_mode,
+            dynamic_requested=enable_dynamic)
+    except Exception as e:
+        results["artifact_manifests"] = {
+            "ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
 
-    audit_res = audit_mod.audit(pack.root)
+    audit_res = audit_mod.audit(pack.root, require_dynamic=enable_dynamic)
     (pack.root / "audit.json").write_text(
         json.dumps(audit_res, indent=2) + "\n", encoding="utf-8")
     results["audit"] = audit_res
@@ -1407,20 +1941,50 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
         _deep_meta = pack.read("deep", "META.json") or {}
         (pack.root / "META.json").write_text(json.dumps({
             "sha256": sha,
-            "mode": mode,
+            "mode": pack_mode, "pack_mode": pack_mode,
+            "run_id": run_id, "status": "completed",
             "engine": _deep_meta.get("engine"),
             "source": (results.get("report") or {}).get("source"),
             "phase": (results.get("report") or {}).get("phase"),
-            "verdict": audit_res.get("static_verdict"),
+            "verdict": (results["composite"].get("level")
+                        or audit_res.get("selected_verdict")
+                        or audit_res.get("static_verdict")),
+            "mode_verdict": audit_res.get("static_verdict"),
+            "selected_verdict_source": (results.get("report") or {})
+                                       .get("selected_verdict_source"),
             "truly_green": audit_res["truly_green"],
             "unmet_expectations": audit_res.get("unmet_expectations") or [],
             "execution_plan": plan,
+            "findings": results["findings"],
+            "composite": results["composite"],
             "llm_roles": audit_res.get("llm_roles"),
             "clock_skew_s": (clock or {}).get("clock_skew_s"),
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }, indent=2) + "\n", encoding="utf-8")
     except OSError:
         pass
+
+    # Refresh the inventory after the audit, rendered reports and final pack
+    # metadata exist, then seal that exact view into a case export if needed.
+    try:
+        from .manifest import write_pack_manifests
+        results["artifact_manifests"] = write_pack_manifests(
+            pack.root, run_id=run_id, sha256=sha, mode=pack_mode,
+            dynamic_requested=enable_dynamic)
+    except Exception as e:
+        results["artifact_manifests_final"] = {
+            "ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+    # Build the DFIR export after all reports, audit and pack metadata are
+    # complete and pinned to this run.
+    results["case_pack"] = None
+    if results.get("dynamic", {}).get("ok"):
+        try:
+            from .casepack import build_case
+            results["case_pack"] = build_case(pack.root, sha, pack_mode)
+        except Exception as e:
+            results["case_pack"] = {"ok": False,
+                                    "error": f"case pack: {str(e)[:200]}"}
 
     # ---- final tool sweep: nothing keeps running after the pipeline ----
     results["cleanup"] = _final_sweep(cfg, dynamic=enable_dynamic,
@@ -1429,18 +1993,24 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
     # Verdict line: never print a bare "unknown" that could be either a real
     # unknown verdict or a deep stage that produced nothing (RevAI handoff
     # item 6) — the two are different facts.
-    _verdict = (audit_res or {}).get("static_verdict")
-    if _verdict:
-        _vs = str(_verdict)
+    _mode_verdict = (audit_res or {}).get("static_verdict")
+    if _mode_verdict:
+        _mode_vs = str(_mode_verdict)
     else:
-        _vs = ("none (deep stage produced no verdict)"
+        _mode_vs = ("none (deep stage produced no verdict)"
                if any("verdict" in str(u) for u in
                       (audit_res.get("unmet_expectations") or []))
                else "none")
-    print(f"[winre-remote] {sha} verdict={_vs} "
+    _selected_verdict = (results["composite"].get("level")
+                         or audit_res.get("selected_verdict")
+                         or _mode_vs)
+    print(f"[winre-remote] {sha} verdict={_selected_verdict} "
+          f"mode_verdict={_mode_vs} "
           f"dynamic={'ok' if results.get('dynamic',{}).get('ok') else 'not-run'} "
           f"truly_green={audit_res['truly_green']}", flush=True)
-    return {"sha": sha, "results": results}
+    return {"sha": sha, "pack_mode": pack_mode, "run_id": run_id,
+            "verdict": _selected_verdict,
+            "results": results}
 
 
 def _final_sweep(cfg: dict, *, dynamic: bool, debug: bool) -> dict:

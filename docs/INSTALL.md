@@ -37,14 +37,14 @@ Point `FLARE_*` environment variables at your VM (or put them in `.env`):
 | `FLARE_SSH_PORT` | SSH port | `22` |
 | `WINRE_REMOTE_PIPELINE` | repo location on the VM | `C:\WinRE` |
 
-Gate + auto-restore config (optional):
+Snapshot-gate config:
 
 | Variable | Meaning |
 |---|---|
-| `WINRE_SNAPSHOT_GATE` | `enforce` (default - blocks dirty-VM detonation) / `observe` (benign-test override) / `off` |
-| `WINRE_HYPERVISOR` | `vmware` or `vbox` (enables pre-run auto-restore) |
-| `WINRE_VM_PATH` | path of the VM (`.vmx` for VMware) |
-| `WINRE_SNAPSHOT` | snapshot name to restore |
+| `WINRE_SNAPSHOT_GATE` | `enforce` (default - one execution per verified restore) / `observe` (advisory execution budget) / `off` (execution budget disabled); all pipeline runs still require the guest marker and clean control-plane ledger |
+| `WINRE_HYPERVISOR` | `vmware` or `vbox` (report-only; does not enable restore) |
+| `WINRE_VM_PATH` | VM path shown in gate status (report-only) |
+| `WINRE_SNAPSHOT` | snapshot name shown in gate status (report-only) |
 | `WINRE_LLM_CONTEXT_TOKENS` | model context window (default `1000000`) - sizes the evidence budget sent to the LLM |
 | `WINRE_LLM_MAX_OUTPUT_TOKENS` | assistant output cap (default `32768`) |
 | `WINRE_VT_API_KEY` | VirusTotal **hash-only** triage on the control plane (optional; only the SHA256 is sent) |
@@ -55,9 +55,13 @@ Smoke-check connectivity:
 python ops\smoke_flare.py
 ```
 
-`ops\smoke_flare.py` and `install\verify-flarevm.ps1` are **read-only**
-diagnostics: they leave no probe samples, SQL servers, caches or bytecode
-behind (safe to run any number of times, including on a golden image).
+`ops\smoke_flare.py` runs read-only checks and a per-run temporary compile
+helper, which it removes before returning. `install\verify-flarevm.ps1`
+performs live SQL checks using benign probe copies under `%TEMP%`; it isolates their cache,
+logs and ports, disables Python bytecode writes, and stops only SQL processes
+started by that invocation. It does not write to `C:\samples` or the deployed
+cache/log trees. Run it while the VM is idle; its temporary probes and databases
+are removed before it exits.
 
 ## 2. FlareVM (execution VM)
 
@@ -101,7 +105,7 @@ downloads/clones the free tools and stages them to `C:\Tools-staged\`.
 command re-applies everything to a fresh/reverted VM -
 `powershell -ExecutionPolicy Bypass -File ops\reapply_after_revert.ps1`.
 
-1. Build the VM: Windows 10/11 on an **isolated network**, FlareVM base
+1. Build the VM: Windows 10 on an **isolated network**, FlareVM base
    installed, plus the "you provide" list above (commercial tools per
    [`PREREQUISITES.md`](PREREQUISITES.md)). Recommended: the WinRE-patched
    installer + fixture in [`install/flarevm/`](../install/flarevm/README.md)
@@ -119,14 +123,17 @@ command re-applies everything to a fresh/reverted VM -
    powershell -ExecutionPolicy Bypass -File C:\WinRE\install\setup-flarevm.ps1
    ```
 
-4. Verify (read-only PASS/FAIL battery - side-effect free, safe to re-run):
+4. Verify (PASS/FAIL battery; live SQL probes are isolated under `%TEMP%` and
+   safe to re-run while the VM is idle):
 
    ```powershell
    powershell -ExecutionPolicy Bypass -File C:\WinRE\install\verify-flarevm.ps1
    ```
 
 5. **Take/update the VM snapshot** now — setup created
-   `C:\WinRE\.clean_snapshot` and it must be inside the snapshot.
+   `C:\WinRE\.clean_snapshot` and it must be inside the snapshot. The
+   independent VM-state ledger is stored on the control plane and is not reset
+   by restoring this snapshot.
 
    **The GOLD procedure (operator, in this order):**
 
@@ -138,6 +145,9 @@ command re-applies everything to a fresh/reverted VM -
       resumes a session rather than starting fresh.
    3. Take the GOLD snapshot (disk-only, no `.vmss`).
    4. **Start the VM again** so the MCP autostart tasks bring up :9009 / :9097.
+   5. From the separate control plane, verify the restored marker and attest
+      the clean state before running any pipeline mode:
+      `python -m winre.snapshot_gate attest --action verified_clean`.
 
    A running-VM snapshot is a crash-consistent capture of a live guest, which
    is a different thing from a baseline. Prefer the shutdown form.
@@ -154,18 +164,17 @@ python -m winre.ui.app          # http://127.0.0.1:5001
 
 ## 4. First run
 
-> **Fresh-VM validation (benign):** use a **VM-native** benign binary - copy
-> `C:\Windows\System32\notepad.exe` *from the VM* to the control plane and run
-> against that file. Host Windows 11 system binaries do NOT run on the
-> Win10 VM (they exit instantly). This validates setup end-to-end without
-> any sample risk.
+> **Fresh-VM validation (benign):** use a **VM-native** benign binary. Copy
+> `C:\Windows\System32\notepad.exe` from the VM to the control plane, then
+> run it through the remote driver. This checks the configured tool path
+> without using a malware sample.
 
 ```powershell
-# static-only (default, safe) - deterministic engine needs no LLM at all
-python -m winre.pipeline <vm-native-benign.exe> --mode static
+# deterministic static analysis; no LLM calls
+python -m winre.pipeline "C:\samples\notepad.exe" --driver remote --mode static
 
 # or agentic engine (needs the LLM endpoint for llm_judge)
-python -m winre.pipeline <vm-native-benign.exe> --mode agentic
+python -m winre.pipeline "C:\samples\notepad.exe" --driver remote --mode agentic
 
 # or from the UI: Run page -> pick sample -> deep-mode -> Run pipeline
 ```
@@ -176,7 +185,7 @@ Open the Cases page and confirm the section rows (`static` /
 mode honestly shows `deterministic_fallback`. Then see
 [`OPERATE.md`](OPERATE.md).
 
-> **Fresh-VM note:** `setup-flarevm.ps1` is idempotent and was verified
-> against a fully provisioned VM (`--CheckMode` + verify). The cold-start
-> path (bare VM → working platform, first sample in all modes) is part of
-> the release checklist — see `internal/IMPROVEMENT-PLAN.md` P-D.
+> **Verification note:** run `setup-flarevm.ps1` and then
+> `verify-flarevm.ps1` on the revision you deploy. The verifier runs isolated
+> benign SQL probes in `%TEMP%`; a successful tool check does not replace a
+> benign first-run validation through the configured control plane.

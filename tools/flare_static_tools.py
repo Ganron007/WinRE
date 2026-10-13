@@ -95,7 +95,9 @@ def _run(cmd: list[str], timeout: int, env: dict | None = None) -> tuple[int, st
 
 
 def _skipped(tool: str, detail: str = "") -> dict:
-    return {"ok": False, "skipped": f"{tool}: {detail or 'not available'}"}
+    return {"ok": False, "status": "unavailable",
+            "reason_code": "tool_unavailable",
+            "skipped": f"{tool}: {detail or 'not available'}"}
 
 
 def capa(sample: str, timeout: int = 900) -> dict:
@@ -472,7 +474,9 @@ def yarascan(sample: str, timeout: int = 600) -> dict:
     yar_files = sorted(f for f in (rules_dir.glob("*.yar") if rules_dir.is_dir() else [])
                        if not f.name.startswith("_bundle"))
     if not yar_files:
-        return {"ok": True, "tool": "yarascan", "hits": [],
+        return {"ok": False, "status": "unavailable",
+                "reason_code": "curated_rules_missing",
+                "tool": "yarascan", "hits": [],
                 "skipped": "no rules staged in C:\\Tools\\yara-rules (operator adds curated sets)"}
     # Scan per-file: one bad rule must never kill the whole batch.
     # JSON + matched patterns: classify each match as high-signal
@@ -1263,11 +1267,15 @@ def speakeasy_emulate(sample: str, timeout: int = 900) -> dict:
     except OSError as e:
         return {"ok": False, "error": str(e)[:100]}
     if head != b"MZ":
-        return {"ok": False, "skipped": True,
+        return {"ok": False, "status": "not_applicable",
+                "reason_code": "input_not_pe",
+                "skipped": True,
                 "reason": "not_applicable:only PE emulated"}
     if _is_dotnet(sample):
-        return _skipped("speakeasy",
-                        "managed/.NET assembly (native emulation not applicable)")
+        return {"ok": False, "status": "not_applicable",
+                "reason_code": "managed_dotnet_unsupported",
+                "skipped": True,
+                "reason": "native emulation does not apply to managed .NET"}
     script = (
         "import sys\n"
         "import json\n"
@@ -1360,7 +1368,9 @@ def r2_decompile(sample: str, function_addrs: list | None = None,
     size = Path(sample).stat().st_size if Path(sample).is_file() else 0
     out["size_bytes"] = size
     if size >= 30 * 1024 * 1024:
-        return {**out, "skipped": True,
+        return {**out, "ok": False, "status": "budget_exhausted",
+                "reason_code": "sample_size_budget",
+                "skipped": True,
                 "reason": "r2 aaa discovery skipped for large sample"}
     if not function_addrs:
         rc, disc, err = _run([str(exe), "-q", "-c", "aa; afl~[0,3]", sample], 120)
@@ -1372,8 +1382,10 @@ def r2_decompile(sample: str, function_addrs: list | None = None,
             if len(function_addrs) >= 5:
                 break
         if not function_addrs:
-            return {**out, "ok": True, "disassembly": {},
-                    "skipped": "no functions discoverable (stripped/unknown format)"}
+            return {**out, "ok": True, "status": "completed",
+                    "reason_code": "no_functions_discovered",
+                    "disassembly": {},
+                    "note": "no functions discoverable (stripped/unknown format)"}
     for addr in function_addrs[:5]:
         rc, pdf_out, err = _run([str(exe), "-q", "-c", f"pdf @ {addr}", sample],
                                 timeout)
@@ -1524,21 +1536,70 @@ def angr_analyze(sample: str, timeout: int = 300) -> dict:
         return {"ok": False, "error": str(e)[:250], "tool": "angr_analyze"}
 
 
+def _ghidra_install_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    for value in (os.environ.get("GHIDRA_INSTALL_DIR"),
+                  os.environ.get("GHIDRA_HOME")):
+        if value:
+            candidates.append(Path(value))
+    configured_headless = os.environ.get("GHIDRA_ANALYZE_HEADLESS")
+    if configured_headless:
+        headless = Path(configured_headless)
+        if headless.name.lower() == "analyzeheadless.bat":
+            candidates.append(headless.parent.parent)
+    for base in (Path(r"C:\Tools"),
+                 Path(r"C:\ProgramData\chocolatey\lib\ghidra\tools")):
+        try:
+            candidates.extend(sorted(base.glob("ghidra_*_PUBLIC"), reverse=True))
+        except OSError:
+            continue
+    # Preserve order while avoiding repeated env/glob hits.
+    out: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path).casefold()
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+    return out
+
+
+def _address_key(value: str) -> str:
+    value = str(value or "").strip().lower()
+    if value.startswith("fun_"):
+        value = value[4:]
+    if value.startswith("0x"):
+        value = value[2:]
+    return value.lstrip("0") or "0"
+
+
 def ghidra_decompile(sample: str, function_addr: str = "",
                      timeout: int = 1800) -> dict:
     """Ghidra decompile — pyghidra fast-path when configured (needs
     GHIDRA_INSTALL_DIR), headless + post-script fallback otherwise.
     Same method as RevAI's RPC; pyghidra removes the headless cold-start."""
-    # fast-path: pyghidra flat API (much faster than headless per-call)
+    function_addr = str(function_addr or "entry").strip()
+    if (not function_addr or len(function_addr) > 80
+            or any(ord(ch) < 32 for ch in function_addr)):
+        return {"ok": False, "status": "failed",
+                "reason_code": "invalid_function_selector",
+                "error": "function selector must be a short address or name",
+                "tool": "ghidra_decompile"}
+    selector_is_address = bool(re.fullmatch(
+        r"(?i)(?:0x|fun_)?[0-9a-f]+", function_addr))
+    # Fast path: pyghidra flat API (much faster than headless per-call).
+    # Never silently substitute entry when a caller requested another target.
+    pyghidra_error = None
     try:
         gid = os.environ.get("GHIDRA_INSTALL_DIR", "")
         if gid:
             import pyghidra
             pyghidra.start()
             with pyghidra.open_program(sample) as flat:
-                func = (flat.get_function_at(flat.to_addr(function_addr))
-                        if function_addr else None)
-                if func is None:
+                func = None
+                if selector_is_address:
+                    func = flat.get_function_at(flat.to_addr(function_addr))
+                if func is None and function_addr.casefold() == "entry":
                     func = flat.get_function_containing(
                         flat.get_symbol("entry").get_address())
                 if func is not None:
@@ -1546,24 +1607,37 @@ def ghidra_decompile(sample: str, function_addr: str = "",
                     di = DecompInterface()
                     di.openProgram(flat.get_program())
                     res = di.decompileFunction(func, 60, None)
-                    if res and res.getDecompiledFunction():
+                    if (res and res.decompileCompleted()
+                            and res.getDecompiledFunction()):
                         code = res.getDecompiledFunction().getC()
+                        try:
+                            resolved_addr = str(func.getEntryPoint())
+                        except Exception:
+                            resolved_addr = None
                         return {"ok": True, "tool": "ghidra_decompile",
                                 "engine": "pyghidra",
-                                "function": str(func),
+                                "function": str(func.getName()),
+                                "address": resolved_addr,
+                                "requested": function_addr,
                                 "code": code[:12000]}
+                if function_addr.casefold() != "entry":
+                    pyghidra_error = "requested function was not resolved by pyghidra"
     except Exception as e:
-        # graceful fall-through to headless on any pyghidra failure
-        pass
+        pyghidra_error = f"{type(e).__name__}: {str(e)[:220]}"
     import tempfile
-    ghidra = None
-    for g in Path(r"C:\Tools").glob("ghidra_*_PUBLIC"):
-        if (g / "support" / "analyzeHeadless.bat").is_file():
-            ghidra = g
-            break
+    candidates = _ghidra_install_candidates()
+    ghidra = next((g for g in candidates
+                   if (g / "support" / "analyzeHeadless.bat").is_file()), None)
     java = Path(__file__).resolve().parent / "ghidra_scripts" / "DecompileFunc.java"
     if not ghidra or not java.is_file():
-        return _skipped("ghidra_decompile", "ghidra or DecompileFunc.java missing")
+        result = _skipped(
+            "ghidra_decompile",
+            "Ghidra analyzeHeadless or DecompileFunc.java unavailable")
+        result.update(reason_code="ghidra_install_or_script_missing",
+                      pyghidra_error=pyghidra_error,
+                      searched=[str(p) for p in candidates],
+                      script_exists=java.is_file())
+        return result
     proj = tempfile.mkdtemp(prefix="winre-gh-dec-")
     cmd = [str(ghidra / "support" / "analyzeHeadless.bat"), proj, "dec",
            "-import", sample,
@@ -1577,7 +1651,9 @@ def ghidra_decompile(sample: str, function_addr: str = "",
                            timeout=timeout, encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": f"headless decompile timeout {timeout}s",
-                "tool": "ghidra_decompile"}
+                "status": "failed", "reason_code": "ghidra_timeout",
+                "pyghidra_error": pyghidra_error,
+                "ghidra_install": str(ghidra), "tool": "ghidra_decompile"}
     blob = (p.stdout or "")
     # DecompileFunc.java emits {"function": ...} — Ghidra INFO lines may
     # appear before AND after it. raw_decode parses the first complete
@@ -1586,11 +1662,44 @@ def ghidra_decompile(sample: str, function_addr: str = "",
     if start < 0:
         start = blob.rfind("{")
     if start < 0:
-        return {"ok": False, "error": "no JSON from post-script",
-                "tail": blob[-300:], "tool": "ghidra_decompile"}
+        return {"ok": False, "status": "failed",
+                "reason_code": "ghidra_no_json",
+                "error": "no JSON from post-script",
+                "returncode": p.returncode, "stderr": (p.stderr or "")[-500:],
+                "tail": blob[-300:], "pyghidra_error": pyghidra_error,
+                "tool": "ghidra_decompile"}
     try:
         d, _ = json.JSONDecoder().raw_decode(blob[start:])
+        if p.returncode != 0:
+            return {"ok": False, "status": "failed",
+                    "reason_code": "ghidra_nonzero_exit",
+                    "returncode": p.returncode,
+                    "stderr": (p.stderr or "")[-500:], "result": d,
+                    "pyghidra_error": pyghidra_error,
+                    "tool": "ghidra_decompile"}
+        decompiled = str(d.get("decompiled") or "")
+        if d.get("error") or not decompiled or decompiled.strip() == "// decompile failed":
+            return {"ok": False, "status": "failed",
+                    "reason_code": "ghidra_target_or_decompile_failed",
+                    "error": d.get("error") or "decompiler returned no usable code",
+                    "result": d, "pyghidra_error": pyghidra_error,
+                    "tool": "ghidra_decompile"}
+        actual = str(d.get("address") or "")
+        actual_name = str(d.get("function") or "")
+        target_matches = True
+        if selector_is_address:
+            target_matches = _address_key(actual) == _address_key(function_addr)
+        elif function_addr.casefold() != "entry":
+            target_matches = actual_name.casefold() == function_addr.casefold()
+        if not target_matches:
+            return {"ok": False, "status": "failed",
+                    "reason_code": "ghidra_target_mismatch",
+                    "requested": function_addr, "actual_address": actual,
+                    "actual_function": actual_name,
+                    "pyghidra_error": pyghidra_error,
+                    "tool": "ghidra_decompile"}
         return {"ok": True, "tool": "ghidra_decompile", "engine": "headless",
+                "requested": function_addr, "pyghidra_error": pyghidra_error,
                 **d}
     except json.JSONDecodeError as e:
         return {"ok": False, "error": f"parse: {e}", "tail": blob[start:start + 300],
