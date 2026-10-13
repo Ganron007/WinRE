@@ -99,6 +99,67 @@ if (-not (Test-Path "C:\WinRE\winre\summarize_dynamic.py") -and (Test-Path "C:\W
     Info "summarize_dynamic.py found in tools\ (job falls back to C:\tools\reveng-dynamic)"
 }
 
+# --- repo integrity: the analysis plane must actually be there ----------------
+# The checks above confirm the VM's TOOLS. Nothing confirmed that OUR code
+# survived the sync. That is a real gap: a partial sync that dropped
+# winre/manifest.py or winre/emit_analyst_next.py left every check above green
+# while the analysis plane silently degraded - the same "green run, no
+# evidence" failure this project keeps finding, arriving through deployment.
+#
+# So: every module the control plane imports, present AND importable, AND the
+# specific entry points that have gone missing before must resolve. The
+# orchestrator's `from winre.emit_analyst_next import emit` was a name that did
+# not exist; a check that only greps for the filename would not have caught it.
+#
+# The whole section runs under Push-Location C:\WinRE: `winre` is a package in
+# that directory, so it is only importable from there. Running these checks
+# from an arbitrary cwd made every one of them FAIL on a healthy VM - the check
+# was wrong, not the VM.
+Push-Location C:\WinRE
+try {
+Write-Host ""
+Write-Host "--- analysis plane integrity (host-side code, on the VM) ---"
+$planeModules = @("winre.manifest", "winre.emit_analyst_next", "winre.analysis",
+                  "winre.findings", "winre.evidence", "winre.compose",
+                  "winre.reporting", "winre.snapshot_gate", "winre.run_nonce")
+foreach ($mod in $planeModules) {
+    $imp = & $py -c "import importlib; importlib.import_module('$mod'); print('ok')" 2>$null
+    if ($imp -eq "ok") { Ok "module $mod importable" }
+    else { Fail "module $mod NOT importable - the sync is incomplete (ops\sync_to_flare.ps1)" }
+}
+# entry points that must RESOLVE, not merely exist as files
+$planeEntry = [ordered]@{
+    "winre.manifest.build_manifest"              = "the artifact manifest writer"
+    "winre.manifest.incomplete_sources"          = "the coverage gap reader"
+    "winre.emit_analyst_next.emit"               = "the ANALYST-NEXT emitter"
+    "winre.analysis.run"                         = "the control-plane analysis steps"
+    "winre.findings.dynamic_findings"            = "the findings producer"
+    "winre.evidence.archive_stage_for_fresh_run" = "the run-isolation guard"
+}
+foreach ($fq in $planeEntry.Keys) {
+    # LastIndexOf, NOT .Split("."): PowerShell 5.1's String.Split(".") yields an
+    # ARRAY, so `$mod, $attr = $fq.Split(".")` silently produced
+    # $mod='winre', $attr=@('manifest','build_manifest') - which interpolates as
+    # "manifest build_manifest" and made every entry-point check fail while
+    # looking correct. Found by running the section, not by reading it.
+    $i = $fq.LastIndexOf('.')
+    $mod  = $fq.Substring(0, $i)
+    $attr = $fq.Substring($i + 1)
+    $res = & $py -c "import importlib; m=importlib.import_module('$mod'); o=getattr(m,'$attr'); print('ok' if callable(o) else 'not-callable')" 2>$null
+    if ($res -eq "ok") { Ok "entry point $fq" }
+    else { Fail "entry point $fq missing or not callable ($($planeEntry[$fq]))" }
+}
+# the four producers must still be declared, not silently fewer
+$modes = & $py -c "from winre.evidence import MODES; print(','.join(MODES))" 2>$null
+if ($modes -eq "static,agentic,dbg,dynamic") { Ok "four producer modes: $modes" }
+else { Fail "producer modes are '$modes' - expected static,agentic,dbg,dynamic" }
+# NEGATIVE CONTROL: a name that must NOT resolve. If this ever reports OK the
+# check is not actually checking anything.
+$bad = & $py -c "import importlib; m=importlib.import_module('winre.manifest'); print('ok' if callable(getattr(m,'definitely_not_here',None)) else 'no')" 2>$null
+if ($bad -eq "no") { Ok "negative control: a missing name is correctly rejected" }
+else { Fail "negative control returned '$bad' - the check is not checking" }
+} finally { Pop-Location }
+
 Write-Host ""
 Write-Host "--- Ghidra ---"
 $ghidra = Get-ChildItem "C:\Tools" -Directory -ErrorAction SilentlyContinue |
