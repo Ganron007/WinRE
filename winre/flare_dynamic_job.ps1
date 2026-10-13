@@ -13,6 +13,8 @@ param(
   [string]$HollowsHunterExe = "C:\Tools\hollows_hunter\hollows_hunter.exe",
   [string]$ProcdumpExe = "C:\Tools\sysinternals\Procdump64.exe",
   [switch]$EnablePeSieve,
+  # The local Windows orchestrator copies OutDir directly; it does not need an archive.
+  [switch]$SkipZip,
   [switch]$Adaptive,
   [int]$IdleStopSeconds = 0,
   # Behaviour-gated window (RevAI handoff item 9). The 2026-09-11 measurement:
@@ -631,30 +633,37 @@ if (Test-Path $trace) {
 } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $OutDir "META.job.json") -Encoding UTF8
 
 Copy-Item $LogFile (Join-Path $OutDir "job.log") -Force -ErrorAction SilentlyContinue
-# Drop huge PML from zip (CSV is enough); keep PML on disk for optional forensics
-$pmlZip = Join-Path $OutDir "procmon.pml"
-if (Test-Path $pmlZip) {
-  Log "excluding procmon.pml from zip (size large)"
-}
-if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
-Log "zipping artifacts"
-Add-Type -AssemblyName System.IO.Compression
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
-$zip = [System.IO.Compression.ZipFile]::Open($ZipPath, 'Create')
-try {
-  Get-ChildItem $OutDir -Recurse -File | ForEach-Object {
-    # procmon.pml: huge binary, CSV suffices (PML stays on disk).
-    # frida_trace.json: byte-duplicate of frida_trace.jsonl — zip the
-    # canonical .jsonl only, skip the compat copy.
-    if ($_.Name -ieq "procmon.pml") { return }
-    if ($_.Name -ieq "frida_trace.json") { return }
-    $rel = $_.FullName.Substring($OutDir.Length).TrimStart('\', '/').Replace('\', '/')
-    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $rel, 'Optimal') | Out-Null
+if ($SkipZip) {
+  Log "ZIP skipped: local caller collects the output directory directly"
+  Log "DONE ok=true zip_skipped=true"
+} else {
+  # Drop huge PML from zip (CSV is enough); keep PML on disk for optional forensics
+  $pmlZip = Join-Path $OutDir "procmon.pml"
+  if (Test-Path $pmlZip) {
+    Log "excluding procmon.pml from zip (size large)"
   }
-} finally {
-  $zip.Dispose()
+  if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
+  Log "zipping artifacts"
+  Add-Type -AssemblyName System.IO.Compression
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
+  $zip = [System.IO.Compression.ZipFile]::Open($ZipPath, 'Create')
+  try {
+    Get-ChildItem $OutDir -Recurse -File | ForEach-Object {
+      # procmon.pml: huge binary, CSV suffices (PML stays on disk).
+      # frida_trace.json: byte-duplicate of frida_trace.jsonl — zip the
+      # canonical .jsonl only, skip the compat copy.
+      if ($_.Name -ieq "procmon.pml") { return }
+      if ($_.Name -ieq "frida_trace.json") { return }
+      $rel = $_.FullName.Substring($OutDir.Length).TrimStart('\', '/').Replace('\', '/')
+      [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $rel, 'Optimal') | Out-Null
+    }
+  } finally {
+    $zip.Dispose()
+  }
+  $zipSize = (Get-Item $ZipPath).Length
+  Log ("DONE ok=true zip_size={0}" -f $zipSize)
 }
-$zipSize = (Get-Item $ZipPath).Length
-Log ("DONE ok=true zip_size={0}" -f $zipSize)
+# Keep the local caller's copied log current through the terminal record.
+Copy-Item $LogFile (Join-Path $OutDir "job.log") -Force -ErrorAction SilentlyContinue
 exit 0

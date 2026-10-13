@@ -863,6 +863,9 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
     ]
     if enable_pesieve:
         job_args.append("-EnablePeSieve")
+    # This path copies OutDir directly, so archiving the large Procmon CSV
+    # only adds avoidable runtime and can outlive the job timeout.
+    job_args.append("-SkipZip")
     if adaptive:
         job_args += ["-Adaptive", "-IdleStopSeconds", str(int(idle_stop_seconds))]
     if stop_on is not None:

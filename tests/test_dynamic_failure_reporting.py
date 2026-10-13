@@ -1,7 +1,23 @@
+import inspect
+from pathlib import Path
+
 from winre import remote_driver
+from winre import orchestrator
 from winre.evidence import EvidencePack
 from winre.manifest import write_pack_manifests
 from winre.pipeline import _report
+
+
+def test_local_detonation_skips_zip_but_ssh_job_keeps_archive_support():
+    local_runner = inspect.getsource(orchestrator._run_local_windows)
+    job = (Path(orchestrator.LOCAL_JOB_PS1)
+           .read_text(encoding="utf-8"))
+
+    assert 'job_args.append("-SkipZip")' in local_runner
+    assert "[switch]$SkipZip" in job
+    assert 'if ($SkipZip)' in job
+    assert 'Log "DONE ok=true zip_skipped=true"' in job
+    assert "ZipFile]::Open($ZipPath, 'Create')" in job
 
 
 def test_dynamic_label_distinguishes_failed_run_from_not_run():
