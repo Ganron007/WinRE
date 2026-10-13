@@ -63,6 +63,17 @@ def flare_cfg() -> dict:
     }
 
 
+def _dynamic_status_label(result: dict | None) -> str:
+    """Describe whether a requested detonation ran, even when it failed."""
+    if not isinstance(result, dict):
+        return "not-requested"
+    if result.get("ok"):
+        return "ok"
+    if result.get("detonation_ran") is True:
+        return "failed-after-start"
+    return "not-run"
+
+
 def _ssh_base(cfg: dict) -> list[str]:
     return [
         "ssh", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no",
@@ -191,6 +202,28 @@ def local_file_inventory(root: Path) -> dict[str, tuple[int, str]]:
         rel = str(path.relative_to(root)).replace("\\", "/")
         inventory[rel] = (path.stat().st_size, sha256_file(path))
     return inventory
+
+
+def _inventory_diff(remote: dict[str, tuple[int, str]],
+                    received: dict[str, tuple[int, str]],
+                    *, limit: int = 20) -> dict:
+    """Explain which relative paths failed the remote-to-host hash check."""
+    remote_paths, received_paths = set(remote), set(received)
+    missing = sorted(remote_paths - received_paths)
+    unexpected = sorted(received_paths - remote_paths)
+    mismatched = sorted(
+        path for path in remote_paths & received_paths
+        if remote[path] != received[path])
+    return {
+        "missing_local_count": len(missing),
+        "unexpected_local_count": len(unexpected),
+        "content_mismatch_count": len(mismatched),
+        "missing_local": missing[:limit],
+        "unexpected_local": unexpected[:limit],
+        "content_mismatch": mismatched[:limit],
+        "truncated": any(len(items) > limit
+                          for items in (missing, unexpected, mismatched)),
+    }
 
 
 def _remote_staging_destination(sample: Path, sha: str, run_id: str) -> str:
@@ -1022,6 +1055,9 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     inventory_matches = (remote_inventory is not None
                          and local_inventory_error is None
                          and incoming_inventory == remote_inventory)
+    inventory_diff = None
+    if remote_inventory is not None and local_inventory_error is None:
+        inventory_diff = _inventory_diff(remote_inventory, incoming_inventory)
     nonce = run_nonce.check(incoming_meta, run_id)
     metadata_complete = bool(
         incoming_meta.get("sha256") == sha
@@ -1040,10 +1076,16 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
         "fresh_meta": bool(nonce.get("fresh")),
         "metadata_complete": metadata_complete,
         "helper_completed": job_ran,
+        "inventory_diff": inventory_diff,
         "error": transfer_error or inventory_error or local_inventory_error,
     }
     if remote_inventory is not None and not inventory_matches and not transfer["error"]:
-        transfer["error"] = "remote and received file inventories differ"
+        diff = inventory_diff or {}
+        transfer["error"] = (
+            "remote and received file inventories differ "
+            f"(missing={diff.get('missing_local_count', 0)}, "
+            f"unexpected={diff.get('unexpected_local_count', 0)}, "
+            f"content_mismatch={diff.get('content_mismatch_count', 0)})")
 
     if transfer_complete:
         import shutil as _shutil
@@ -1136,7 +1178,11 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     # earlier ordering wrote a verdict over an incomplete evidence view.
     dyn_findings = _findings.build(
         pack.mode or "dynamic", pack.root, sha=sha,
-        evidence_dir=pack.stages["dynamic"], run_id=run_id)
+        evidence_dir=pack.stages["dynamic"], run_id=run_id,
+        run_meta={"sample_pid": meta.get("sample_pid"),
+                  "detonation_ran": meta.get("detonation_ran"),
+                  "job_timeout": meta.get("job_timeout"),
+                  "transfer": transfer, "ok": ok, "error": err})
 
     # ---- the artifact manifest (design §8) ---------------------------------
     # Written AFTER the analysis steps so it covers the derived files too, and
@@ -1167,6 +1213,9 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                               vm_dirty=bool(meta.get("vm_dirty")),
                               frida_events=meta.get("frida_events"),
                               detonation_ran=meta.get("detonation_ran"),
+                              sample_pid=meta.get("sample_pid"),
+                              job_timeout=bool(meta.get("job_timeout")),
+                              job_error=meta.get("error"),
                               verdict=((dyn_findings.get("verdict") or {})
                                        .get("level")) or meta.get("verdict"),
                               findings=dyn_findings,
@@ -1896,7 +1945,8 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
     # Findings are finalized after enrichment and before report/export.
     results["findings"] = _findings.build(
         pack_mode, pack.root, sha=sha,
-        evidence_dir=pack.stages["dynamic"], run_id=run_id)
+        evidence_dir=pack.stages["dynamic"], run_id=run_id,
+        run_meta=results.get("dynamic"))
     if pack_mode == "dynamic":
         dynamic_stage = pack.read("dynamic", "STAGE.json") or {}
         dynamic_stage["findings"] = results["findings"]
@@ -2006,7 +2056,7 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
                          or _mode_vs)
     print(f"[winre-remote] {sha} verdict={_selected_verdict} "
           f"mode_verdict={_mode_vs} "
-          f"dynamic={'ok' if results.get('dynamic',{}).get('ok') else 'not-run'} "
+          f"dynamic={_dynamic_status_label(results.get('dynamic'))} "
           f"truly_green={audit_res['truly_green']}", flush=True)
     return {"sha": sha, "pack_mode": pack_mode, "run_id": run_id,
             "verdict": _selected_verdict,

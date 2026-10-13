@@ -602,6 +602,16 @@ def _apply_detonation_verdict(meta: dict, *, trace, dyn_dir) -> None:
                 "sample process was never observed (no pid): the detonation "
                 "never started. See frida.stderr.txt for the spawn failure.")
         return
+    if meta.get("job_timeout"):
+        # A live PID and a partial trace prove execution, not successful
+        # collection. Do not let observed Frida events turn a timed-out job
+        # green; the missing terminal record can hide unfinished collectors.
+        meta["ok"] = False
+        meta["note"] = (
+            "the sample process was observed, but the collection job timed "
+            "out; returned evidence is partial and cannot support a complete "
+            "dynamic assessment")
+        return
     meta["ok"] = bool(n) or bool(meta.get("job_ok"))
     if not n:
         meta["note"] = (
@@ -611,8 +621,8 @@ def _apply_detonation_verdict(meta: dict, *, trace, dyn_dir) -> None:
 
 
 def _finalize_ok(meta: dict) -> bool:
-    """The stage's ok flag. False unless a sample process was observed."""
-    if not _detonation_ran(meta):
+    """The stage's ok flag; launch alone cannot clear a collection timeout."""
+    if not _detonation_ran(meta) or meta.get("job_timeout"):
         return False
     return bool(meta.get("frida_events")) or bool(meta.get("job_ok"))
 

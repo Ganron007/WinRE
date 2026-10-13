@@ -201,7 +201,8 @@ def _verdict(level: str, confidence: str, basis: list[str],
 
 # ------------------------------------------------------- dynamic findings
 
-def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
+def dynamic_findings(dyn_dir: Path, *, sha: str = "",
+                     run_meta: dict | None = None) -> dict:
     """Findings from a detonation's PULLED evidence.
 
     Reads what the VM collected (frida summary, procmon summary, network
@@ -219,6 +220,15 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
     job = _read(dyn_dir / "META.job.json") or {}
     if job:
         used.append("META.job.json")
+    else:
+        # A timeout can kill the PowerShell job before it writes its terminal
+        # META.job.json, while the host orchestrator still writes META.json
+        # with the observed sample PID and detonation status. This is a
+        # run-scoped fallback, not a substitute for the required collectors.
+        job = _read(dyn_dir / "META.json") or {}
+        if job:
+            used.append("META.json")
+    stage_status = run_meta or _read(dyn_dir / "STAGE.json") or {}
     fs = _read(dyn_dir / "frida_summary.json") or {}
     ps = _read(dyn_dir / "procmon_summary.json") or {}
     ni = _read(dyn_dir / "network_intel.json") or {}
@@ -234,11 +244,24 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
             "not a trusted analysis host; no off-box comparison is available yet")
 
     # --- did it even run? ------------------------------------------------
-    ran = bool(job.get("sample_pid"))
+    ran = bool(job.get("sample_pid") or job.get("detonation_ran")
+               or stage_status.get("sample_pid")
+               or stage_status.get("detonation_ran"))
+    transfer = stage_status.get("transfer")
+    transfer_incomplete = (
+        (isinstance(transfer, dict) and transfer.get("complete") is False)
+        or job.get("job_timeout") is True
+        or stage_status.get("job_timeout") is True
+        or (ran and stage_status.get("ok") is False))
     if not ran:
         limitations.append(
             "the detonation never spawned the sample process - the findings "
             "below are instrumentation-only and cannot speak to behaviour")
+    elif transfer_incomplete:
+        limitations.append(
+            "the sample process was observed, but current-run collection or "
+            "evidence transfer was incomplete; behavior findings are not "
+            "promoted")
     loader = job.get("loader") or "direct"
     if loader == "rundll32":
         basis.append(f"loader:rundll32:{job.get('loader_entry')}")
@@ -662,7 +685,7 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
 
     # --- verdict ----------------------------------------------------------
     level, conf = UNKNOWN, "low"
-    if not ran:
+    if not ran or transfer_incomplete:
         level, conf = UNKNOWN, "low"
     elif device_writes:
         level, conf = MALICIOUS, "high"
@@ -676,11 +699,12 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
         level, conf = SUSPICIOUS, "low"
     else:
         level, conf = UNKNOWN, "low"
-        limitations.append(
-            "the detonation ran and the sample did nothing the instruments "
-            "could see: no drops, no C2, no injection. That is a real "
-            "observation, not a failure - but it does not support a verdict "
-            "on its own.")
+        if not transfer_incomplete:
+            limitations.append(
+                "the detonation ran and the sample did nothing the instruments "
+                "could see: no drops, no C2, no injection. That is a real "
+                "observation, not a failure - but it does not support a verdict "
+                "on its own.")
 
     tools = _host_tools()
     if not tools["tshark"]:
@@ -691,7 +715,10 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "") -> dict:
             "analysis host (it lives on the VM, which is not a trusted "
             "analyst after detonation)")
 
-    return _frame("dynamic", sha, ok=ran, verdict=_verdict(level, conf, basis),
+    evidence_complete = bool(ran and not transfer_incomplete)
+    return _frame("dynamic", sha, ok=ran and evidence_complete,
+                  run_observed=ran, evidence_complete=evidence_complete,
+                  verdict=_verdict(level, conf, basis),
                   findings=findings, evidence_used=used, limitations=limitations)
 
 
@@ -1375,7 +1402,8 @@ _DISPATCH = {
 
 def build(mode: str, pack_root: Path, *, sha: str = "",
           evidence_dir: Path | None = None,
-          run_id: str | None = None) -> dict:
+          run_id: str | None = None,
+          run_meta: dict | None = None) -> dict:
     """Extract findings for one mode and write <pack_root>/findings.json.
 
     `pack_root` is the MODE root (logs/<sha>/<mode>/): that is where the pack
@@ -1398,6 +1426,8 @@ def build(mode: str, pack_root: Path, *, sha: str = "",
     try:
         if mode == "dbg":
             out = dbg_findings(pack_root, sha=sha, run_id=run_id)
+        elif mode == "dynamic":
+            out = dynamic_findings(pack_root, sha=sha, run_meta=run_meta)
         else:
             out = _DISPATCH[mode](pack_root, sha=sha)
         # The mode is THIS function's parameter, authoritative. The extractors

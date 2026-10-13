@@ -123,6 +123,20 @@ def test_the_verdict_helper_counts_the_trace(tmp_path):
     assert m["frida_events"] == 2 and m["ok"] is True
 
 
+def test_a_timed_out_job_stays_failed_even_with_a_live_pid_and_trace(tmp_path):
+    trace = tmp_path / "frida_trace.jsonl"
+    trace.write_text('{"event":"observed"}\n', encoding="utf-8")
+    m = _meta(job_timeout=True, job_ok=True)
+
+    orchestrator._apply_detonation_verdict(m, trace=trace, dyn_dir=tmp_path)
+
+    assert m["detonation_ran"] is True
+    assert m["frida_events"] == 1
+    assert m["ok"] is False
+    assert "timed out" in m["note"]
+    assert orchestrator._finalize_ok(m) is False
+
+
 def test_detonation_ran_is_recorded_either_way():
     assert orchestrator._detonation_ran(_meta(sample_pid=None)) is False
     assert orchestrator._detonation_ran(_meta(sample_pid=7)) is True

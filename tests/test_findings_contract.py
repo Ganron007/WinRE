@@ -206,6 +206,65 @@ def test_dynamic_findings_takes_the_mode_root_and_descends_itself(tmp_path):
     assert "META.job.json" in f["evidence_used"]
 
 
+def test_dynamic_findings_reports_observed_run_with_incomplete_transfer(tmp_path):
+    """A timed-out guest job can still prove launch without proving behavior."""
+    from winre import findings as F
+    mode_root = tmp_path / "dynamic"
+    stage = mode_root / "dynamic"
+    stage.mkdir(parents=True)
+    run_meta = {
+        "sample_pid": 5536,
+        "detonation_ran": True,
+        "transfer": {"complete": False},
+    }
+
+    f = F.dynamic_findings(mode_root, sha="d" * 64, run_meta=run_meta)
+
+    assert f["run_observed"] is True
+    assert f["ok"] is False
+    assert f["evidence_complete"] is False
+    assert f["verdict"]["level"] == "unknown"
+    assert any("transfer was incomplete" in x for x in f["limitations"])
+    assert not any("never spawned" in x or "did nothing" in x
+                   for x in f["limitations"])
+
+
+def test_dynamic_findings_uses_host_meta_when_job_terminal_record_is_missing(
+        tmp_path):
+    from winre import findings as F
+    mode_root = tmp_path / "dynamic"
+    stage = mode_root / "dynamic"
+    stage.mkdir(parents=True)
+    (stage / "META.json").write_text(
+        '{"sample_pid": 5536, "detonation_ran": true}', encoding="utf-8")
+
+    f = F.dynamic_findings(mode_root, sha="e" * 64)
+
+    assert f["run_observed"] is True
+    assert f["ok"] is True
+    assert "META.json" in f["evidence_used"]
+    assert not any("never spawned" in x for x in f["limitations"])
+
+
+def test_dynamic_findings_treats_job_timeout_as_incomplete(tmp_path):
+    from winre import findings as F
+    mode_root = tmp_path / "dynamic"
+    stage = mode_root / "dynamic"
+    stage.mkdir(parents=True)
+    (stage / "META.json").write_text(
+        '{"sample_pid": 5536, "detonation_ran": true, '
+        '"job_timeout": true}', encoding="utf-8")
+
+    f = F.dynamic_findings(mode_root, sha="f" * 64)
+
+    assert f["run_observed"] is True
+    assert f["ok"] is False
+    assert f["evidence_complete"] is False
+    assert f["verdict"]["level"] == "unknown"
+    assert any("collection or evidence transfer was incomplete" in x
+               for x in f["limitations"])
+
+
 def test_the_route_is_recorded_not_left_as_a_silent_unknown(tmp_path):
     """A .NET assembly has no native OEP. Reporting the debug section as
     'unknown' for it reads as 'we never tried', which is how this mode looked

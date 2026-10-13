@@ -86,6 +86,13 @@ deterministic engine, or a deterministic fallback. Static mode has no LLM
 analysis. An agentic run with `--dry-llm` records `deterministic_fallback` so
 the fallback is visible to the operator and audit.
 
+Dynamic findings separate process launch from evidence quality. `run_observed`
+records whether the sample PID was observed, while `evidence_complete` and
+`ok` remain false if the guest job or evidence transfer was incomplete. In that
+case the findings remain unknown and the report must not describe the sample as
+having done nothing; an absent signal may reflect a missing collector or an
+unaccepted transfer.
+
 ## Audit contract
 
 `audit.json → truly_green` evaluates workflow quality, not malware
