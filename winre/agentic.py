@@ -1354,6 +1354,22 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
     state["seen"].add(json.dumps(("decrypt_gate", {}), sort_keys=True,
                                  default=str))
 
+    # Capa is part of the required static evidence contract. Do not leave this
+    # deterministic operation to the planner: an otherwise successful agentic
+    # run could omit it and fail the quality gate after producing a verdict.
+    try:
+        capa_preflight = registry.call("capa", {})
+    except Exception as e:
+        capa_preflight = {"status": "failed", "reason_code": "tool_exception",
+                          "error": f"capa failed: {str(e)[:180]}"}
+    history.append({"step": len(history) + 1, "tool": "capa",
+                    "args": {}, "result": capa_preflight,
+                    "reason": "mandatory deterministic capa evidence preflight"})
+    findings["capa_preflight"] = capa_preflight
+    state["calls"] += 1
+    state["seen"].add(json.dumps(("capa", {}), sort_keys=True,
+                                 default=str))
+
     def _debug_run_record() -> dict:
         calls = [h for h in history if h.get("tool") in {
             "x64dbg_oep", "x64dbg_wpm_dump", "x64dbg_crypt_dump",
@@ -1481,9 +1497,10 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
                                             description=_runner.__doc__,
                                             args_schema=model)
 
-    # decrypt_gate already ran as a mandatory preflight; do not spend a
-    # planner turn repeating it.
-    names = [name for name in TOOL_NAMES if name != "decrypt_gate"]
+    # These deterministic required operations already ran as preflight; do not
+    # spend planner turns repeating them.
+    names = [name for name in TOOL_NAMES
+             if name not in {"decrypt_gate", "capa"}]
     if available_tools is not None:
         names = [n for n in names if n in set(available_tools)]
     tools = [_make(n) for n in names]
@@ -1794,6 +1811,8 @@ to your final answer immediately.
             {"messages": [HumanMessage(content=(
                 f"Analyze sample {sha}. Mandatory decrypt_gate preflight result: "
                 f"{json.dumps(readiness_gate, default=str)[:12000]}\n"
+                f"Mandatory capa preflight result: "
+                f"{json.dumps(capa_preflight, default=str)[:12000]}\n"
                 f"{brief}{packer_note}{debug_note}{windbg_note}Use SQL + Malcat to "
                 "deepen, then produce the final flat JSON verdict."))]},
             config={"recursion_limit": recursion_limit},

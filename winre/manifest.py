@@ -39,10 +39,12 @@ IN_GUEST = "in_guest"      # collected inside the analysis VM
 OFF_BOX = "off_box"        # collected outside the analysis guest
 DERIVED = "derived"        # produced by the control plane from the above
 
-# Files that are our own bookkeeping, not evidence from a source.
+# Files that are our own bookkeeping, not evidence from a source. META.job.json
+# is intentionally excluded from this list: it is the job collector's primary
+# terminal record and is classified as an in-guest run-metadata artifact.
 _WRAPPERS = ("STAGE.json", "SKIP.json", "manifest.json",
              "artifact-manifest.json", "META.json",
-             "META.job.json", "SCHEMA.md", "findings.json")
+             "SCHEMA.md", "findings.json")
 
 # rel-path (posix, lower) -> (source, domain, kind)
 # Derived from an inventory of every path that actually appears in the packs on

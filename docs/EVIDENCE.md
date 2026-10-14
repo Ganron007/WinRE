@@ -50,6 +50,8 @@ requested and effective time window, stop reason, execution gate, and run ID.
 The run ID, rather than clock comparison, binds the guest result to the
 control-plane request. `previous_runs/` may preserve earlier dynamic evidence
 when a later run in the same section does not request detonation.
+The guest's `META.job.json` is inventoried as in-guest run metadata and is the
+primary terminal record for job-level collection coverage.
 
 Debugger-assisted runs also record `deep/debug_monitor/process.etl`, the raw
 kernel-process ETW trace, and a derived `process_events.jsonl` with process

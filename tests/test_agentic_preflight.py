@@ -3,7 +3,7 @@ from __future__ import annotations
 from winre import agentic
 
 
-def test_langgraph_mode_runs_required_decrypt_gate_before_planning(monkeypatch):
+def test_langgraph_mode_runs_required_static_preflights_before_planning(monkeypatch):
     calls: list[tuple[str, dict]] = []
 
     class FakeRegistry:
@@ -20,9 +20,10 @@ def test_langgraph_mode_runs_required_decrypt_gate_before_planning(monkeypatch):
     result = agentic.run_langgraph_deep_dive(
         "sample.exe", "a" * 64, dry=True, mode="remote")
 
-    assert calls == [("decrypt_gate", {})]
+    assert calls == [("decrypt_gate", {}), ("capa", {})]
     failures = result["capability_census"]["required_failures"]
     assert not any(failure.startswith("decrypt_gate:") for failure in failures)
+    assert not any(failure.startswith("capa:") for failure in failures)
     gate = next(row for row in result["capability_census"]["summary"]
                 if row["tool"] == "decrypt_gate")
     assert gate["status"] == "completed"
@@ -31,6 +32,14 @@ def test_langgraph_mode_runs_required_decrypt_gate_before_planning(monkeypatch):
     assert len(readiness) == 1
     assert readiness[0]["reason"] == (
         "mandatory deterministic analysis-readiness preflight")
+    capa = next(row for row in result["capability_census"]["summary"]
+                if row["tool"] == "capa")
+    assert capa["status"] == "completed"
+    capa_preflight = [event for event in result["history"]
+                      if event.get("tool") == "capa"]
+    assert len(capa_preflight) == 1
+    assert capa_preflight[0]["reason"] == (
+        "mandatory deterministic capa evidence preflight")
 
 
 def test_agentic_dbg_runs_a_deterministic_oep_probe_when_no_packer_signal(monkeypatch):
@@ -51,6 +60,8 @@ def test_agentic_dbg_runs_a_deterministic_oep_probe_when_no_packer_signal(monkey
             if name == "decrypt_gate":
                 return {"ok": True, "status": "clear",
                         "reason_code": "clear"}
+            if name == "capa":
+                return {"ok": True, "capabilities": []}
             if name == "x64dbg_oep":
                 return {"ok": True, "oep": "0x401000"}
             if name == "x64dbg_run_window":
@@ -66,7 +77,7 @@ def test_agentic_dbg_runs_a_deterministic_oep_probe_when_no_packer_signal(monkey
         "sample.exe", "a" * 64, dry=True, mode="remote", dynamic=True)
 
     assert [name for name, _ in calls] == [
-        "decrypt_gate", "x64dbg_oep", "x64dbg_run_window",
+        "decrypt_gate", "capa", "x64dbg_oep", "x64dbg_run_window",
         "windbg_analyze_dump"]
     probe = next(row for row in result["history"]
                  if row.get("tool") == "x64dbg_oep")

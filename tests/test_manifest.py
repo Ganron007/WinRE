@@ -73,6 +73,21 @@ def test_a_source_that_produced_nothing_is_not_complete(tmp_path):
     assert completed["coverage"]["procmon"]["status"] == "complete"
 
 
+def test_job_terminal_record_is_indexed_as_a_job_artifact(tmp_path):
+    """The job record is evidence for required job coverage, not a wrapper."""
+    d = _stage(tmp_path, [("META.job.json", '{"ok": true}')])
+    m = M.build_manifest(
+        d, run_id="r", sha256=SHA,
+        requested={"job": {"requested": True, "required": True}},
+    )
+
+    assert m["coverage"]["job"]["status"] == "complete"
+    assert m["coverage"]["job"]["present"] == ["META.job.json"]
+    record = next(a for a in m["artifacts"] if a["path"] == "META.job.json")
+    assert record["source"] == "job"
+    assert record["kind"] == "run_metadata"
+
+
 def test_debug_monitor_coverage_is_run_pinned_and_required(tmp_path):
     root = tmp_path / "sample" / "agentic-dbg"
     for stage in ("intake", "quick", "deep", "yara", "report", "dynamic"):
