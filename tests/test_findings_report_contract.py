@@ -121,8 +121,47 @@ def test_debug_report_shows_selected_verdict_observation_and_unpack_gap(tmp_path
     assert "Deep-stage assessment (MALICIOUS" in md
     assert "ETW process monitor" in md and "starts=382; stops=384" in md
     assert "process starts and stops only" in md
-    assert "no usable OEP dump was recovered" in md
+    assert "no unpacked OEP dump was recovered" in md
     assert "No dynamic detonation was observed in this debugger-assisted run" in md
+
+
+def test_debug_report_distinguishes_entrypoint_observation_from_unpack_dump(
+        tmp_path):
+    pack_root = tmp_path / SHA / "dbg"
+    for stage in ("deep", "dynamic", "report"):
+        (pack_root / stage).mkdir(parents=True, exist_ok=True)
+    (pack_root / "deep" / "deep.json").write_text(json.dumps({
+        "agent": {"source": "llm_judge", "verdict": {
+            "verdict": "benign", "confidence": "medium",
+            "summary": "A native GUI application was observed."}}}),
+        encoding="utf-8")
+    (pack_root / "dynamic" / "STAGE.json").write_text(json.dumps({
+        "ok": True, "ran": False, "skipped": "not requested",
+        "summary": "dynamic not requested"}), encoding="utf-8")
+    (pack_root / "findings.json").write_text(json.dumps({
+        "verdict": {"level": "unknown", "confidence": "low"},
+        "findings": {
+            "debug_observation": {
+                "window_completed": True, "observed_seconds": 3.51,
+                "requested_seconds": 30, "exit_observed": True,
+                "monitor_status": "collected", "target_observed": True,
+                "process_starts": 513, "process_stops": 516,
+                "scope": "process starts and stops only"},
+            "unpack": {"ok": False, "debugger_probe": {
+                "status": "completed", "method": "entrypoint_observation",
+                "address": "0x401680"}}},
+        "limitations": [
+            "the debugger observed the original image entry point 0x401680; "
+            "no unpacked image dump was produced"]}), encoding="utf-8")
+    (pack_root / "composite.json").write_text(json.dumps({
+        "level": "suspicious", "confidence": "low",
+        "deciding_mode": "dbg", "basis": ["debug:target-process-observed"]}),
+        encoding="utf-8")
+
+    md = _report(pack_root)
+    assert "original image entry point `0x401680`" in md
+    assert "no unpacked dump was produced" in md
+    assert "no unpacked OEP dump was recovered" not in md
 
 
 def test_no_consumer_reads_the_stage_dir_for_findings():

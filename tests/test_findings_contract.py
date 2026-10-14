@@ -362,6 +362,62 @@ def test_completed_debug_window_remains_a_valid_mode_without_an_oep(tmp_path):
     assert selection["dbg"]["selected"] is True
 
 
+def test_observed_image_entrypoint_is_not_reported_as_missing_oep(tmp_path):
+    """A loaded-image entrypoint observation is distinct from an unpack dump."""
+    import json
+
+    from winre import findings as F
+
+    sha = "1" * 64
+    run_id = "entrypoint-observation-run"
+    mode_root = tmp_path / sha / "dbg"
+    (mode_root / "quick").mkdir(parents=True)
+    (mode_root / "deep" / "debug_monitor").mkdir(parents=True)
+    (mode_root / "quick" / "quick.json").write_text(
+        '{"evidence": {"pe": {"is_dotnet": false}}}', encoding="utf-8")
+    (mode_root / "deep" / "deep.json").write_text(json.dumps({
+        "agent": {
+            "dbg_ensure": {"arch": 32, "launched": True},
+            "debug_run": {
+                "requested": True, "attempted": True, "status": "completed",
+                "evidence": [
+                    {"tool": "x64dbg_oep", "result": {
+                        "ok": True, "status": "completed",
+                        "method": "entrypoint_observation",
+                        "entrypoint": 4200064}},
+                    {"tool": "x64dbg_run_window", "result": {
+                        "ok": True, "status": "completed",
+                        "requested_seconds": 30, "observed_seconds": 3.51,
+                        "exit_observed": True, "natural_exit_observed": True,
+                        "completion_reason": "target_exited",
+                        "stopped_after_window": False,
+                        "final_state": {"isDebugging": "false",
+                                        "status": "NO_TARGET"}}},
+                ],
+            },
+        },
+    }), encoding="utf-8")
+    (mode_root / "deep" / "debug_monitor" / "META.json").write_text(
+        json.dumps({"ok": True, "status": "collected", "run_id": run_id,
+                    "summary": {"target_observed": True,
+                                "process_starts": 513, "process_stops": 516,
+                                "scope": "process starts and stops only"},
+                    "cleanup": {"ok": True, "status": "clean",
+                                "terminated_process_ids": []}}),
+        encoding="utf-8")
+
+    record = F.dbg_findings(mode_root, sha=sha, run_id=run_id)
+    observed = record["findings"]["unpack"]["debugger_probe"]
+    assert record["ok"] is True
+    assert observed == {"status": "completed",
+                        "method": "entrypoint_observation",
+                        "address": "0x401680", "target": None}
+    assert any("original image entry point 0x401680" in item
+               and "no unpacked image dump" in item
+               for item in record["limitations"])
+    assert not any("no OEP" in item for item in record["limitations"])
+
+
 def test_failed_debug_window_is_not_a_completed_dbg_producer(tmp_path):
     import json
     from winre import findings as F

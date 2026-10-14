@@ -1064,6 +1064,27 @@ def dbg_findings(mode_root: Path, *, sha: str = "",
     dbg_ensure = deep.get("dbg_ensure") or dbg
     debug_run = agent.get("debug_run") or {}
     debug_evidence = debug_run.get("evidence") or []
+    oep_probe = next((item.get("result") or {} for item in debug_evidence
+                      if isinstance(item, dict)
+                      and item.get("tool") == "x64dbg_oep"
+                      and isinstance(item.get("result"), dict)), {})
+    probe_address = (oep_probe.get("entrypoint")
+                     if oep_probe.get("method") == "entrypoint_observation"
+                     else oep_probe.get("oep"))
+    if isinstance(probe_address, int) and not isinstance(probe_address, bool):
+        probe_address = hex(probe_address)
+    elif isinstance(probe_address, str):
+        probe_address = probe_address.strip() or None
+    else:
+        probe_address = None
+    debugger_probe = None
+    if oep_probe.get("status") == "completed":
+        debugger_probe = {
+            "status": "completed",
+            "method": oep_probe.get("method"),
+            "address": probe_address,
+            "target": oep_probe.get("oep_target"),
+        }
     window = next((item.get("result") or {} for item in debug_evidence
                    if isinstance(item, dict)
                    and item.get("tool") == "x64dbg_run_window"
@@ -1215,6 +1236,7 @@ def dbg_findings(mode_root: Path, *, sha: str = "",
         "parses": parse.get("parses"),
         "imports": parse.get("imports"),
         "machine": parse.get("machine"),
+        "debugger_probe": debugger_probe,
     }
     if unpack_ok and oep:
         basis.append(f"unpack:oep:{oep}")
@@ -1222,9 +1244,30 @@ def dbg_findings(mode_root: Path, *, sha: str = "",
         basis.append(f"unpacked:parses:imports={parse.get('imports')}")
 
     if not up.get("ok"):
-        limitations.append(
-            "the debugger ran but produced no usable dump: "
-            f"{str(up.get('error'))[:160] if up.get('error') else 'no OEP'}")
+        if (debugger_probe
+                and debugger_probe.get("method") == "entrypoint_observation"
+                and debugger_probe.get("address")):
+            limitations.append(
+                "the debugger observed the original image entry point "
+                f"{debugger_probe['address']}; no unpacked image "
+                "dump was produced")
+        elif (debugger_probe
+              and debugger_probe.get("method") == "memory_execute_oep"
+              and debugger_probe.get("address")):
+            limitations.append(
+                "the debugger observed a candidate unpacked OEP at "
+                f"{debugger_probe['address']}, but no unpacked image dump "
+                "was produced")
+        elif up.get("error"):
+            limitations.append(
+                "the unpack prepass produced no usable dump: "
+                f"{str(up.get('error'))[:160]}")
+        elif debug_window_ok:
+            limitations.append(
+                "the bounded debugger observation completed, but no unpacked "
+                "OEP or dump result was recorded")
+        else:
+            limitations.append("no unpacked OEP or dump result was recorded")
     # A debugger route, a packer hint, an unpacked image, or proof that the
     # target executed describes analysis coverage. None of those facts alone
     # establishes malicious intent. The deep-stage assessment and other

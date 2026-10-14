@@ -446,8 +446,22 @@ def build_report_v3(pack_root: Path) -> dict:
             A(f"- Unpack result: OEP `{unpack.get('oep')}`; "
               f"dump parses={unpack.get('parses')}; imports={unpack.get('imports')}.")
         else:
-            A("- Unpack result: no usable OEP dump was recovered; this does not "
-              "invalidate a completed debugger observation.")
+            debugger_probe = unpack.get("debugger_probe") or {}
+            if (debugger_probe.get("method") == "entrypoint_observation"
+                    and debugger_probe.get("address")):
+                A("- Unpack result: the debugger observed the original image "
+                  f"entry point `{debugger_probe['address']}`; no unpacked dump "
+                  "was produced. This does not invalidate a completed "
+                  "debugger observation.")
+            elif (debugger_probe.get("method") == "memory_execute_oep"
+                  and debugger_probe.get("address")):
+                A("- Unpack result: the debugger observed a candidate unpacked "
+                  f"OEP at `{debugger_probe['address']}`, but no unpacked dump "
+                  "was produced. This does not invalidate a completed "
+                  "debugger observation.")
+            else:
+                A("- Unpack result: no unpacked OEP dump was recovered; this "
+                  "does not invalidate a completed debugger observation.")
         for limitation in (finding_record.get("limitations") or [])[:5]:
             A(f"- Limitation: {limitation}")
         A("")
