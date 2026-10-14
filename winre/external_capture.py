@@ -37,6 +37,11 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _nft_command() -> list[str]:
+    """nft ruleset inspection requires CAP_NET_ADMIN on the REMnux worker."""
+    return ["nft"] if os.geteuid() == 0 else ["sudo", "-n", "nft"]
+
+
 def load_config(env: dict[str, str] | None = None) -> dict[str, Any] | None:
     """Return enabled gateway settings, or None when off-box capture is absent."""
     source = os.environ if env is None else env
@@ -80,6 +85,8 @@ def verify_gateway(config: dict[str, Any]) -> None:
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RuntimeError(f"gateway preflight command failed ({argv[0]}): {exc}") from exc
 
+    nft = _nft_command()
+
     addr = run(["ip", "-o", "-4", "addr", "show", "dev", str(config["interface"])])
     if addr.returncode or str(config.get("gateway_ip", "")) not in addr.stdout:
         raise RuntimeError(f"gateway address is not bound to {config['interface']}")
@@ -104,10 +111,31 @@ def verify_gateway(config: dict[str, Any]) -> None:
         raise RuntimeError("WinRE DNS simulator is not active")
     for family, table in (("inet", "winre_guest_guard"),
                           ("ip", "winre_guest_nat")):
-        result = run(["nft", "list", "table", family, table])
+        result = run([*nft, "list", "table", family, table])
         if result.returncode:
-            raise RuntimeError(f"nftables containment table is missing: {family} {table}")
-    guard_json = run(["nft", "-j", "list", "table", "inet", "winre_guest_guard"])
+            detail = result.stderr.strip()[:240]
+            raise RuntimeError(
+                f"nftables containment table is missing or unreadable: {family} {table}"
+                + (f" ({detail})" if detail else ""))
+    interface = str(config["interface"])
+    input_guard = run([*nft, "list", "chain", "inet", "winre_guest_guard", "input"])
+    if (input_guard.returncode or f'iifname "{interface}" drop' not in input_guard.stdout or
+            "ct state established,related accept" not in input_guard.stdout):
+        raise RuntimeError("nftables guest input guard is missing its peer-drop or established-flow rule")
+    management_ip = str(config.get("management_ip", ""))
+    if (management_ip and
+            f'iifname "{interface}" ip saddr {management_ip} tcp dport 22 accept'
+            not in input_guard.stdout):
+        raise RuntimeError("nftables gateway management SSH exception is missing")
+    nat = run([*nft, "list", "chain", "ip", "winre_guest_nat", "prerouting"])
+    gateway_ip = str(config.get("gateway_ip", ""))
+    if (nat.returncode or
+            f"udp dport 53 dnat to {gateway_ip}:53" not in nat.stdout or
+            f"tcp dport 53 dnat to {gateway_ip}:53" not in nat.stdout or
+            "tcp dport { 21, 25, 80" not in nat.stdout or
+            f"dnat to {gateway_ip}" not in nat.stdout):
+        raise RuntimeError("nftables gateway DNS/HTTP simulator redirects are missing")
+    guard_json = run([*nft, "-j", "list", "table", "inet", "winre_guest_guard"])
     try:
         guard = json.loads(guard_json.stdout)
         chains = [item["chain"] for item in guard["nftables"] if "chain" in item]
@@ -118,7 +146,6 @@ def verify_gateway(config: dict[str, Any]) -> None:
             and chain.get("policy") == "drop" for chain in chains):
         raise RuntimeError("nftables guest forwarding policy is not drop")
     listeners = run(["ss", "-H", "-lntup"])
-    gateway_ip = str(config.get("gateway_ip", ""))
     if listeners.returncode or f"{gateway_ip}:53" not in listeners.stdout:
         raise RuntimeError(f"INetSim DNS is not listening on {gateway_ip}:53")
     if f"{gateway_ip}:80" not in listeners.stdout:
