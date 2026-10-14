@@ -20,9 +20,10 @@ def test_langgraph_mode_runs_required_static_preflights_before_planning(monkeypa
     result = agentic.run_langgraph_deep_dive(
         "sample.exe", "a" * 64, dry=True, mode="remote")
 
-    assert calls == [("decrypt_gate", {}), ("capa", {})]
+    assert calls == [("decrypt_gate", {}), ("pe_parse", {}), ("capa", {})]
     failures = result["capability_census"]["required_failures"]
     assert not any(failure.startswith("decrypt_gate:") for failure in failures)
+    assert not any(failure.startswith("pe_parse:") for failure in failures)
     assert not any(failure.startswith("capa:") for failure in failures)
     gate = next(row for row in result["capability_census"]["summary"]
                 if row["tool"] == "decrypt_gate")
@@ -32,6 +33,14 @@ def test_langgraph_mode_runs_required_static_preflights_before_planning(monkeypa
     assert len(readiness) == 1
     assert readiness[0]["reason"] == (
         "mandatory deterministic analysis-readiness preflight")
+    pe_parse = next(row for row in result["capability_census"]["summary"]
+                    if row["tool"] == "pe_parse")
+    assert pe_parse["status"] == "completed"
+    pe_parse_preflight = [event for event in result["history"]
+                          if event.get("tool") == "pe_parse"]
+    assert len(pe_parse_preflight) == 1
+    assert pe_parse_preflight[0]["reason"] == (
+        "mandatory deterministic PE parse preflight")
     capa = next(row for row in result["capability_census"]["summary"]
                 if row["tool"] == "capa")
     assert capa["status"] == "completed"
@@ -60,6 +69,8 @@ def test_agentic_dbg_runs_a_deterministic_oep_probe_when_no_packer_signal(monkey
             if name == "decrypt_gate":
                 return {"ok": True, "status": "clear",
                         "reason_code": "clear"}
+            if name == "pe_parse":
+                return {"ok": True, "format": "pe"}
             if name == "capa":
                 return {"ok": True, "capabilities": []}
             if name == "x64dbg_oep":
@@ -77,7 +88,8 @@ def test_agentic_dbg_runs_a_deterministic_oep_probe_when_no_packer_signal(monkey
         "sample.exe", "a" * 64, dry=True, mode="remote", dynamic=True)
 
     assert [name for name, _ in calls] == [
-        "decrypt_gate", "capa", "x64dbg_oep", "x64dbg_run_window",
+        "decrypt_gate", "pe_parse", "capa", "x64dbg_oep",
+        "x64dbg_run_window",
         "windbg_analyze_dump"]
     probe = next(row for row in result["history"]
                  if row.get("tool") == "x64dbg_oep")

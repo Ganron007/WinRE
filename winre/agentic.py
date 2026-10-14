@@ -1354,6 +1354,22 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
     state["seen"].add(json.dumps(("decrypt_gate", {}), sort_keys=True,
                                  default=str))
 
+    # PE parsing is also a required static capability. Run it before the
+    # planner so a final verdict cannot conceal that the core format analysis
+    # was skipped.
+    try:
+        pe_parse_preflight = registry.call("pe_parse", {})
+    except Exception as e:
+        pe_parse_preflight = {"status": "failed", "reason_code": "tool_exception",
+                              "error": f"pe_parse failed: {str(e)[:180]}"}
+    history.append({"step": len(history) + 1, "tool": "pe_parse",
+                    "args": {}, "result": pe_parse_preflight,
+                    "reason": "mandatory deterministic PE parse preflight"})
+    findings["pe_parse_preflight"] = pe_parse_preflight
+    state["calls"] += 1
+    state["seen"].add(json.dumps(("pe_parse", {}), sort_keys=True,
+                                 default=str))
+
     # Capa is part of the required static evidence contract. Do not leave this
     # deterministic operation to the planner: an otherwise successful agentic
     # run could omit it and fail the quality gate after producing a verdict.
@@ -1500,7 +1516,7 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
     # These deterministic required operations already ran as preflight; do not
     # spend planner turns repeating them.
     names = [name for name in TOOL_NAMES
-             if name not in {"decrypt_gate", "capa"}]
+             if name not in {"decrypt_gate", "pe_parse", "capa"}]
     if available_tools is not None:
         names = [n for n in names if n in set(available_tools)]
     tools = [_make(n) for n in names]
@@ -1811,6 +1827,8 @@ to your final answer immediately.
             {"messages": [HumanMessage(content=(
                 f"Analyze sample {sha}. Mandatory decrypt_gate preflight result: "
                 f"{json.dumps(readiness_gate, default=str)[:12000]}\n"
+                f"Mandatory pe_parse preflight result: "
+                f"{json.dumps(pe_parse_preflight, default=str)[:12000]}\n"
                 f"Mandatory capa preflight result: "
                 f"{json.dumps(capa_preflight, default=str)[:12000]}\n"
                 f"{brief}{packer_note}{debug_note}{windbg_note}Use SQL + Malcat to "

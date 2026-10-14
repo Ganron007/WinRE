@@ -42,11 +42,11 @@ The evidence root is `logs/<sha256>/<section>/`. The four section names are
 directories and run metadata. See [Evidence Packs](EVIDENCE.md) for the
 artifact and manifest layout.
 
-Agentic deep analysis runs `decrypt_gate` and `capa` as deterministic
-preflights before the LLM planner starts. Their structured results are kept in
-the deep-stage history and opening context, so the planner cannot omit either
-required operation. A failed or unavailable preflight remains visible to the
-capability census and can keep the quality audit red.
+Agentic deep analysis runs `decrypt_gate`, `pe_parse`, and `capa` as
+deterministic preflights before the LLM planner starts. Their structured
+results are kept in the deep-stage history and opening context, so the planner
+cannot omit required operations. A failed or unavailable preflight remains
+visible to the capability census and can keep the quality audit red.
 
 The report and pack-level `META.json` expose two verdict fields: `verdict` is
 the selected composite across current, identity-validated mode findings;
