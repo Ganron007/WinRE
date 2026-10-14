@@ -24,6 +24,7 @@ param(
   # sample does something notable, then lets it settle.
   [string]$StopOn = "network,file",
   [int]$StopOnSettle = 20,
+  [ValidateSet("fakenet", "gateway")][string]$NetworkMode = "fakenet",
   # A DLL cannot be spawned - Frida refuses it with "unsupported file
   # format". It is loaded through a host instead (rundll32 -<File>,<Entry>).
   # Empty means: derive the entry point from the file's own export directory.
@@ -32,6 +33,8 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+$networkModeEnv = ($env:WINRE_NETWORK_MODE -as [string]).Trim().ToLowerInvariant()
+if ($networkModeEnv -eq "gateway") { $NetworkMode = "gateway" }
 $Sha256 = $Sha256.Trim().ToLower()
 if (-not $WorkRoot) { $WorkRoot = "C:\samples\$Sha256" }
 if (-not $SamplePath) { $SamplePath = Join-Path $WorkRoot "sample.exe" }
@@ -134,6 +137,7 @@ if ((Test-Path $LogFile) -and ((Get-Item $LogFile).Length -gt 5MB)) {
 }
 if (Test-Path $LogFile) { Remove-Item $LogFile -Force }
 Log "START sha=$Sha256 max_seconds=$MaxSeconds"
+Log "network_mode=$NetworkMode"
 Log "sample=$SamplePath"
 
 if (-not (Test-Path $SamplePath)) {
@@ -141,11 +145,15 @@ if (-not (Test-Path $SamplePath)) {
   @{ ok = $false; error = "sample missing"; sha256 = $Sha256 } | ConvertTo-Json | Set-Content (Join-Path $OutDir "META.job.json")
   exit 2
 }
-foreach ($req in @(@{p=$Python;n="python"},@{p=$FridaScript;n="frida"},@{p=$FakeNetExe;n="fakenet"},@{p=$ProcmonExe;n="procmon"})) {
+foreach ($req in @(@{p=$Python;n="python"},@{p=$FridaScript;n="frida"},@{p=$ProcmonExe;n="procmon"})) {
   if (-not (Test-Path $req.p)) {
     Log ("FATAL: {0} missing: {1}" -f $req.n, $req.p)
     exit 3
   }
+}
+if ($NetworkMode -eq "fakenet" -and -not (Test-Path $FakeNetExe)) {
+  Log ("FATAL: fakenet missing: {0}" -f $FakeNetExe)
+  exit 3
 }
 
 Kill-Stale
@@ -156,21 +164,25 @@ Log ("pre_snapshot processes={0}" -f $pre.Count)
 
 $fnWork = Join-Path $WorkRoot "fakenet"
 New-Item -ItemType Directory -Force -Path $fnWork | Out-Null
-Copy-Item "C:\Tools\fakenet\fakenet3.5\configs\default.ini" (Join-Path $fnWork "default.ini") -Force
-Log "starting FakeNet..."
 $fnProc = $null
-try {
-  $fnProc = Start-Process -FilePath $FakeNetExe -WorkingDirectory $fnWork -PassThru -WindowStyle Minimized
-  Start-Sleep -Seconds 4
-  if ($fnProc.HasExited) {
-    Log ("WARN: FakeNet exited early rc={0}" -f $fnProc.ExitCode)
+if ($NetworkMode -eq "gateway") {
+  Log "gateway mode: FakeNet is disabled; .43 provides DNS/service simulation and off-box capture"
+} else {
+  Copy-Item "C:\Tools\fakenet\fakenet3.5\configs\default.ini" (Join-Path $fnWork "default.ini") -Force
+  Log "starting FakeNet..."
+  try {
+    $fnProc = Start-Process -FilePath $FakeNetExe -WorkingDirectory $fnWork -PassThru -WindowStyle Minimized
+    Start-Sleep -Seconds 4
+    if ($fnProc.HasExited) {
+      Log ("WARN: FakeNet exited early rc={0}" -f $fnProc.ExitCode)
+      $fnProc = $null
+    } else {
+      Log ("FakeNet pid={0}" -f $fnProc.Id)
+    }
+  } catch {
+    Log "WARN: FakeNet start failed: $_"
     $fnProc = $null
-  } else {
-    Log ("FakeNet pid={0}" -f $fnProc.Id)
   }
-} catch {
-  Log "WARN: FakeNet start failed: $_"
-  $fnProc = $null
 }
 
 $pml = Join-Path $OutDir "procmon.pml"
@@ -548,7 +560,11 @@ Log ("new_processes={0}" -f $newProcs.Count)
 
 $summaryPy = Join-Path $PSScriptRoot "summarize_dynamic.py"
 if (-not (Test-Path $summaryPy)) { $summaryPy = "C:\tools\reveng-dynamic\summarize_dynamic.py" }
-if (Test-Path $summaryPy) {
+if ($NetworkMode -eq "gateway") {
+  @{ status = "delegated_external"; collector = "REMnux gateway capture";
+     reason = "guest FakeNet is disabled in gateway mode" } |
+    ConvertTo-Json -Depth 3 | Set-Content (Join-Path $OutDir "network.json") -Encoding UTF8
+} elseif (Test-Path $summaryPy) {
   Log "running summarize_dynamic.py"
   & $Python $summaryPy --out-dir $OutDir --sample-name "$SampleProcName.exe" 2>&1 | ForEach-Object { Log "$_" }
 } else {
@@ -619,6 +635,8 @@ if (Test-Path $trace) {
   }
   frida_exit = $fridaExit
   fakenet_started = [bool]$fnProc
+  network_mode = $NetworkMode
+  external_capture_requested = ($NetworkMode -eq "gateway")
   procmon_pml = (Test-Path $pml)
   procmon_csv = (Test-Path $csv)
   pe_sieve_enabled = [bool]$EnablePeSieve

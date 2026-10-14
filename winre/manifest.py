@@ -71,9 +71,10 @@ _PATH_MAP: dict[str, tuple[str, str, str]] = {
     "debug_monitor/process_summary.json": ("debug_monitor", DERIVED, "derived_summary"),
     # ---- memory: procdump of the live process, in-guest ---------------------
     "post_mortem.json":             ("memory", IN_GUEST, "raw_observation"),
-    # ---- network: FakeNet today, in-guest; the design moves it off-box ------
+    # ---- network: guest FakeNet or off-box gateway capture ------------------
     "network.json":                 ("network", IN_GUEST, "raw_observation"),
     "network_intel.json":           ("network_enrichment", DERIVED, "derived_summary"),
+    "external_capture.json":        ("external_capture", OFF_BOX, "collector_status"),
     "emu_diff.json":                ("network", DERIVED, "derived_comparison"),
     # ---- WinDbg: cdb on the control plane over the pulled dump -------------
     "windbg_analysis.json":         ("windbg", DERIVED, "derived_analysis"),
@@ -581,6 +582,32 @@ def _terminal(source: str, stage_dir: Path, meta: dict, job: dict,
             return {"status": "failed", "reason": ni.get("error") or
                     ni.get("reason") or "pcap enrichment did not report success"}
         return {"status": "unknown", "reason": "network enrichment record absent"}
+    if source == "external_capture":
+        capture_path = stage_dir / "off_box" / "capture.json"
+        capture = _load_json(capture_path) if capture_path.is_file() else (
+            meta.get("external_capture") if isinstance(meta, dict) else None)
+        if not isinstance(capture, dict):
+            return {"status": "unknown", "reason": "external capture terminal record absent"}
+        if run_id and capture.get("run_id") and capture.get("run_id") != run_id:
+            return {"status": "failed", "reason": "external capture belongs to another run"}
+        status = capture.get("status")
+        if status == "collected":
+            pcap = stage_dir / "off_box" / "network_raw" / "gateway.pcapng"
+            if not pcap.is_file():
+                return {"status": "failed", "reason": "capture reports collected but pcap is absent"}
+            expected_hash = capture.get("promoted_sha256") or capture.get("pcap_sha256")
+            if expected_hash:
+                digest = hashlib.sha256()
+                with pcap.open("rb") as fh:
+                    for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                if digest.hexdigest() != expected_hash:
+                    return {"status": "failed", "reason": "pcap hash differs from capture terminal record"}
+            return {"status": "completed", "reason": "off-box packet capture closed and hashed"}
+        if status in {"partial", "failed", "unavailable"}:
+            return {"status": status, "reason": str(capture.get("reason") or
+                    capture.get("stderr_tail") or f"capture status={status}")[:240]}
+        return {"status": "unknown", "reason": "external capture has no terminal status"}
     if source == "windbg":
         path = _find_path(stage_dir, "windbg_analysis.json")
         record = _load_json(path) if path else {}
@@ -638,8 +665,6 @@ def _terminal(source: str, stage_dir: Path, meta: dict, job: dict,
         post = _find_path(stage_dir, "process_snapshot_post.json")
         if pre and post:
             return {"status": "completed", "reason": "pre/post snapshots produced"}
-    if source == "external_capture":
-        return {"status": "unknown", "reason": "external collector terminal status not recorded"}
     return {"status": "unknown", "reason": "collector terminal status not recorded"}
 
 
@@ -742,10 +767,19 @@ def write_pack_manifests(pack_root: Path, *, run_id: str, sha256: str,
     dynamic_stage = (_load_json(pack_root / "dynamic" / "STAGE.json")
                      or dynamic_meta)
     job_meta = _load_json(pack_root / "dynamic" / "META.job.json")
+    capture_record = _load_json(pack_root / "dynamic" / "off_box" / "capture.json")
+    if not capture_record:
+        capture_record = _load_json(pack_root / "dynamic" / "external_capture.json")
+    if capture_record and capture_record.get("requested"):
+        dynamic_meta["external_capture_requested"] = True
+        dynamic_meta["external_capture"] = capture_record
+        dynamic_meta["network_mode"] = "gateway"
+    gateway_mode = dynamic_meta.get("network_mode") == "gateway"
     dynamic_sources = {
         "frida": {"requested": dynamic_requested, "required": dynamic_requested},
         "procmon": {"requested": dynamic_requested, "required": dynamic_requested},
-        "network": {"requested": dynamic_requested, "required": dynamic_requested},
+        "network": {"requested": dynamic_requested and not gateway_mode,
+                     "required": dynamic_requested and not gateway_mode},
         "network_enrichment": {"requested": dynamic_requested, "required": False},
         "job": {"requested": dynamic_requested, "required": dynamic_requested},
         "process_snapshot": {"requested": dynamic_requested, "required": False},
@@ -762,7 +796,7 @@ def write_pack_manifests(pack_root: Path, *, run_id: str, sha256: str,
                          (mode == "agentic-dbg" or dynamic_meta.get("x64dbg_dump", {}).get("attempted"))),
                    "required": False},
         "external_capture": {"requested": bool(dynamic_meta.get("external_capture_requested")),
-                              "required": False},
+                              "required": bool(dynamic_meta.get("external_capture_requested"))},
     }
     static_sources = {
         "intake": {"requested": True, "required": True},

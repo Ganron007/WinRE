@@ -130,15 +130,28 @@ choco install temurin21 -y
 
 ## Safety requirements
 
-- After provisioning, attach Flare to a private, non-routed network and verify
-  that it has no path to the public Internet. Do not rely on FakeNet-NG to
-  contain egress; enforce the boundary at the hypervisor and network layer.
-- The normal Windows detonation path runs FakeNet-NG inside Flare and collects
-  its guest-side PCAPs. It does not configure a DNS service or start a packet
-  capture worker on the control plane. Pointing Flare's DNS at the control
-  plane alone does not make all sample traffic visible there; an external
-  simulator/capture path needs an explicit route, interface binding, and a
-  benign visibility test before detonation.
+- Keep Flare on the private VMnet2 network. In the paired RevAI/WinRE lab,
+  setup configures REMnux `.43` as Flare's default gateway and DNS server while
+  disabling IPv4/IPv6 forwarding on REMnux. Windows Firewall blocks inbound
+  traffic by default and blocks every on-link VMnet2 peer except `.43`,
+  including `.41` and the workstation host. Only `.43` can administer Flare
+  over SSH; workstation sync and reapply use `.43` as an SSH jump host. Routed
+  outbound packets reach `.43` so literal-IP
+  traffic can be captured. REMnux redirects DNS to no-upstream dnsmasq,
+  supported service ports to INetSim, and drops all forwarding. Do not add a
+  NAT or bridged adapter to Flare.
+- Standalone WinRE runs retain guest-side FakeNet-NG. Remote-driver runs from
+  the configured REMnux host use gateway mode: FakeNet is disabled for that
+  run, `dumpcap` records the guest traffic outside the VM, and the gateway
+  simulator handles DNS and supported common protocols. The manifest marks
+  off-box capture as required in gateway mode. Packets remain sample-controlled;
+  the capture file and interpretation are still subject to coverage and parser
+  limitations.
+- After first setup or a snapshot restore, verify the guest route/DNS, firewall
+  profiles, INetSim service, REMnux no-forward policy, and a benign packet
+  exchange before running a sample. See
+  [Dynamic Orchestrator](DYNAMIC-ORCHESTRATOR.md) for the two-mode contract and
+  limitations.
 - **Snapshot discipline**: after setup creates `C:\WinRE\.clean_snapshot`,
   take/update the VM snapshot. After restoring it, verify the guest and attest
   the clean state from the separate control plane with

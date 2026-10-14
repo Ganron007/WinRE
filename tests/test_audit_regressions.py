@@ -219,6 +219,26 @@ def test_setup_and_verify_agree_on_required_python_modules():
         assert "angr" not in re.findall(r'"([a-z0-9_]+)"', cm.group(1))
 
 
+def test_flare_isolation_enables_the_effective_public_firewall_profile():
+    setup, verify = _src("install/setup-flarevm.ps1"), _src("install/verify-flarevm.ps1")
+    assert "HKLM:\\SOFTWARE\\Policies\\Microsoft\\WindowsFirewall" in setup
+    assert "AllowLocalPolicyMerge" in setup and "gpupdate.exe /target:computer /force" in setup
+    assert "Get-NetFirewallProfile -PolicyStore ActiveStore" in setup
+    assert "Get-NetFirewallProfile -PolicyStore ActiveStore" in verify
+    assert "Get-NetRoute -PolicyStore PersistentStore" in setup
+    assert "only persistent IPv4 default route" in verify
+    assert "Test-NetConnection -ComputerName $peer -Port 22" in verify
+    assert "ManagementHostAddress" not in setup and "ManagementHostAddress" not in verify
+
+
+def test_host_side_flare_sync_and_reapply_use_the_revai_gateway_jump():
+    sync, reapply = _src("ops/sync_to_flare.ps1"), _src("ops/reapply_after_revert.ps1")
+    for src in (sync, reapply):
+        assert "WINRE_GATEWAY_SSH_KEY" in src
+        assert "ProxyCommand=" in src
+        assert "-W %h:%p" in src
+
+
 def test_verify_does_not_warn_about_census_required_items():
     """Nothing we own may be WARN-only: that is how a 0 FAIL lied."""
     src = _src("install/verify-flarevm.ps1")

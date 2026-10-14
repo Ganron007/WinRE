@@ -462,6 +462,12 @@ def build_report_v3(pack_root: Path) -> dict:
                       and row.get("status") != "complete"]
     A(f"- Artifact inventory: {inventory.get('artifact_count', 0)} files; "
       f"coverage gaps={len(requested_gaps)}.")
+    capture = (_load(pack_root / "dynamic" / "off_box" / "capture.json")
+               or _load(pack_root / "dynamic" / "external_capture.json") or {})
+    if capture.get("requested"):
+        A(f"- Off-box network capture: status=`{capture.get('status')}`; "
+          f"interface=`{capture.get('interface', 'unknown')}`; "
+          f"pcap SHA256=`{capture.get('pcap_sha256', 'unavailable')}`.")
     for name, row in requested_gaps[:8]:
         A(f"  - `{name}`: {row.get('status')} — {row.get('reason')}")
 

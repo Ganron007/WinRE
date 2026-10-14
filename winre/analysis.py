@@ -56,8 +56,9 @@ def _tool(dyn_dir: Path, name: str) -> Path | None:
 def enrich_pcap(dyn_dir: Path) -> dict:
     """tshark enrichment of the pulled pcaps. Runs here, where tshark is OUR
     tshark - not the VM's, which the sample could have replaced."""
-    if not (dyn_dir / "network_raw").is_dir():
-        return {"skipped": True, "reason": "no network_raw pulled"}
+    if not any((dyn_dir / rel).is_dir() for rel in
+               ("network_raw", "off_box/network_raw")):
+        return {"skipped": True, "reason": "no guest or off-box network capture pulled"}
     exe = shutil.which("tshark") or shutil.which("tshark.exe")
     if not exe:
         return {"skipped": True,

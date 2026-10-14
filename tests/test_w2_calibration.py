@@ -127,7 +127,7 @@ def test_the_enrichment_tool_is_found():
 
 def test_the_enrichment_reports_the_honest_reason_when_it_cannot_run():
     from winre import analysis
-    # no network_raw pulled: that IS the honest reason, and it must be said
+    # no guest or off-box capture pulled: that IS the honest reason, and it must be said
     r = analysis.enrich_pcap(pathlib.Path(tempfile.mkdtemp()))
     assert r.get("skipped") is True
-    assert r.get("reason") == "no network_raw pulled"
+    assert r.get("reason") == "no guest or off-box network capture pulled"

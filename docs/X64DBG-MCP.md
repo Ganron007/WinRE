@@ -6,7 +6,7 @@
 > failures as errors instead of success text).
 > **Binary:** Zig single-file plugin `x64dbg-MCP-Server.dp64/.dp32` (`build.zig:5`); setup-flarevm.ps1 auto-provisions the toolchain from `C:\Tools-staged\zig-*.zip` (zig 0.14+, `build.zig.zon` minimum) and builds from `C:\WinRE\integrations\x64dbg-mcp-server*`.
 > **Setup:** setup automates the build/deploy flow for both architectures and
-> installs a firewall rule scoped to `LocalSubnet`. Verify the plugin and
+> installs a firewall rule scoped to the configured REMnux gateway address. Verify the plugin and
 > exposed tool list on the revision and guest where it will run.
 > **Audience:** integrators and agent authors using the debugger MCP.
 

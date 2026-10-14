@@ -87,7 +87,7 @@ repo `C:\WinRE` + layout, snapshot marker, `.env.template`; pip deps
 `C:\Tools\zig` -> build -> deploy BOTH arches (`release\x64\plugins\x64dbg-MCP-Server.dp64`
 + `release\x32\plugins\x64dbg-MCP-Server.dp32` - x64dbg.exe loads only the dp64, the old
 single-select check silently shipped dp32-only and :9094 never bound); a firewall allow
-rule then scopes `:9094` to `LocalSubnet`);
+rule then scopes `:9094` to the REMnux gateway address);
 the **SQL-first Ghidra/IDA stack** (staged `LibGhidraHost.zip` +
 `ghidrasql.exe` + `idasql.exe`; per-project HTTP servers with a reuse
 registry and end-of-run sweep - see [`SQL-GHIDRA.md`](SQL-GHIDRA.md))
@@ -100,6 +100,24 @@ logon/BinDiff cleanup.
 Rules: `C:\Tools\capa-rules` (clone `mandiant/capa-rules`) and
 `C:\Tools\yara-rules` (curated set - operator stages). `ops\provision_tools.ps1`
 downloads/clones the free tools and stages them to `C:\Tools-staged\`.
+
+For the paired RevAI/WinRE topology, run RevAI's `install/setup-remnux.sh` on
+the control plane with WinRE installed. It binds no-upstream dnsmasq, INetSim,
+and the capture guard to the private VMnet2 interface and keeps IP forwarding
+disabled. Host-side sync and reapply reach Flare through `.43` as an SSH jump
+host; configure `WINRE_GATEWAY_HOST`, `WINRE_GATEWAY_USER`, and
+`WINRE_GATEWAY_SSH_KEY` in the operator-host `.env`. Then run
+`setup-flarevm.ps1` (or `ops/reapply_after_revert.ps1`) on Flare. The guest
+setup persists `.43` as its gateway and DNS, blocks inbound traffic by default,
+allows routed outbound packets to the gateway, blocks all other on-link VMnet2
+peers (including `.41` and the workstation host), and restricts SSH/x64dbg
+inbound access to `.43`. Direct host-to-Flare access is blocked; all VM
+administration and source synchronization pass through the gateway.
+REMnux captures those packets and never forwards them to its NAT interface. The
+remote driver uses off-box gateway capture; standalone Flare runs retain
+FakeNet. See
+[`DYNAMIC-ORCHESTRATOR.md`](DYNAMIC-ORCHESTRATOR.md) for validation and
+protocol coverage limits.
 
 **Operator with staged assets** (`internal\reapply\`, air-gap safe): one
 command re-applies everything to a fresh/reverted VM -

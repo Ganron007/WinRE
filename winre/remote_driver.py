@@ -850,7 +850,8 @@ def _requested_sources(pack, meta: dict) -> dict:
     req = {
         "frida": {"requested": dyn, "required": dyn},
         "procmon": {"requested": dyn, "required": dyn},
-        "network": {"requested": dyn, "required": dyn},
+        "network": {"requested": dyn and meta.get("network_mode") != "gateway",
+                    "required": dyn and meta.get("network_mode") != "gateway"},
         "network_enrichment": {"requested": dyn, "required": False},
         "process_snapshot": {"requested": dyn, "required": False},
         "memory": {"requested": dyn, "required": False},
@@ -863,7 +864,7 @@ def _requested_sources(pack, meta: dict) -> dict:
                    "required": False},
         "windbg": {"requested": dyn, "required": False},
         "external_capture": {"requested": bool(meta.get("external_capture_requested")),
-                              "required": False},
+                              "required": bool(meta.get("external_capture_requested"))},
     }
     return req
 
@@ -997,7 +998,31 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     # carried a stage result as though it had. ssh_ps() exists precisely for
     # this ("inline -Command strings get mangled by the nesting") and the rest
     # of the VM plumbing already uses it.
-    _script = (f"$env:WINRE_SNAPSHOT_GATE='{_sg.mode()}'; "
+    capture_session = None
+    capture_record: dict | None = None
+    capture_requested = False
+    try:
+        from .external_capture import CaptureSession, load_config
+        capture_config = load_config()
+        if capture_config:
+            capture_requested = True
+            capture_session = CaptureSession.start(capture_config)
+    except Exception as e:
+        capture_requested = True
+        failed_capture = {"schema": "winre-external-capture/v1",
+                          "requested": True, "status": "failed",
+                          "reason": f"capture startup failed: {type(e).__name__}: {e}"[:300],
+                          "run_id": run_id}
+        failed = stage_result("dynamic", False, error=failed_capture["reason"],
+                              elapsed_s=round(time.time() - t0, 1),
+                              run_id=run_id, gate=gate.get("gate"),
+                              external_capture=failed_capture)
+        pack.write("dynamic", "external_capture.json", failed_capture)
+        pack.write("dynamic", "STAGE.json", failed)
+        return failed
+
+    _capture_env = "$env:WINRE_NETWORK_MODE='gateway'; " if capture_session else ""
+    _script = (_capture_env + f"$env:WINRE_SNAPSHOT_GATE='{_sg.mode()}'; "
                + _marker_fwd
                + f"& '{py}' "
                f"'{cfg['remote_pipeline']}\\winre\\_remote_dynamic_helper.py' "
@@ -1015,6 +1040,16 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
         r = subprocess.CompletedProcess(
             args=[], returncode=-1, stdout="",
             stderr=f"dynamic helper SSH failed: {type(e).__name__}: {e}")
+    finally:
+        if capture_session:
+            try:
+                capture_record = capture_session.stop()
+                capture_record["run_id"] = run_id
+            except Exception as e:
+                capture_record = {"schema": "winre-external-capture/v1",
+                                  "requested": True, "status": "failed",
+                                  "reason": f"capture shutdown failed: {type(e).__name__}: {e}"[:300],
+                                  "run_id": run_id}
     # honest RC check: the helper prints RC=<code> as its last line
     helper_rc = None
     for line in reversed((r.stdout or "").splitlines()):
@@ -1149,6 +1184,37 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
         meta = incoming_meta
     else:
         meta = pack.read("dynamic", "META.json") or {}
+    if capture_requested:
+        meta["network_mode"] = "gateway"
+        meta["external_capture_requested"] = True
+        meta["external_capture"] = capture_record or {
+            "schema": "winre-external-capture/v1", "requested": True,
+            "status": "failed", "reason": "capture did not produce a terminal record",
+            "run_id": run_id}
+        if capture_session:
+            try:
+                meta["external_capture"] = capture_session.promote(
+                    local_dyn, meta["external_capture"])
+            except Exception as e:
+                meta["external_capture"] = {**meta["external_capture"],
+                    "status": "failed",
+                    "reason": f"capture promotion failed: {type(e).__name__}: {e}"[:300]}
+            finally:
+                capture_session.cleanup()
+        try:
+            (local_dyn / "external_capture.json").write_text(
+                json.dumps(meta["external_capture"], indent=2) + "\n",
+                encoding="utf-8")
+            remote_meta_path = local_dyn / "META.json"
+            if remote_meta_path.is_file():
+                remote_meta = json.loads(remote_meta_path.read_text(encoding="utf-8"))
+                if remote_meta.get("run_id") == run_id:
+                    remote_meta.update({key: meta[key] for key in (
+                        "network_mode", "external_capture_requested", "external_capture")})
+                    remote_meta_path.write_text(json.dumps(remote_meta, indent=2) + "\n",
+                                                encoding="utf-8")
+        except (OSError, json.JSONDecodeError) as e:
+            meta["external_capture_metadata_error"] = str(e)[:200]
     # Freshness = the orchestrator stamped OUR nonce (value comparison).
     # No clocks in the decision: a skewed VM clock can neither make a fresh
     # run look stale nor an old pack look fresh (RevAI handoff item 5).
@@ -1157,7 +1223,11 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     gate_mode = snapshot_gate.mode()
     gate_pass = (gate_mode != "enforce") or bool(meta.get("gate_marker_consumed"))
     # ok=sample-ran without the tracer surviving is not a green detonation.
-    ok = bool(transfer_complete and fresh and meta.get("ok"))
+    capture_ok = (not capture_requested or
+                  (meta.get("external_capture") or {}).get("status") == "collected")
+    ok = bool(transfer_complete and fresh and meta.get("ok") and capture_ok)
+    if capture_requested and not capture_ok and err is None:
+        err = "requested external packet capture did not complete cleanly"
     # A stage can be "not green" for two different reasons, and only one of
     # them is a product failure. Say which, so the pack is auditable:
     #   no detonation      -> the sample never ran (DLL, spawn refused)

@@ -28,6 +28,12 @@ Conventions used below (no lab specifics committed — set these per lab):
 | Python on Flare | `C:\Python313\python.exe` |
 | Repo on Flare | `C:\WinRE\` (synced via `ops/sync_to_flare.ps1`) |
 
+In the paired lab, Flare accepts SSH only from REMnux `.43`. The RevAI control
+plane connects directly because it runs on `.43`; workstation-side sync and
+reapply scripts use `.43` as an SSH jump host. Do not configure a direct
+workstation-to-Flare firewall exception: Flare blocks all other VMnet2 peers,
+including the workstation host adapter.
+
 **Non-interactive rules (learned the hard way):**
 - Always `-File` with a script file. Never nest `powershell -Command "..."` strings
   inside an SSH command string — quoting mangles `*`, `(`, `"`.
@@ -117,7 +123,8 @@ for the per-run index):
 | `frida_trace.json[l]` | API trace (Frida 17+) |
 | `frida_summary.json` | top APIs, decoded paths |
 | `procmon.csv` + `procmon_summary.json` | Sysinternals Procmon capture + summary |
-| `network.json` + `network_intel.json` | FakeNet capture + tshark enrichment |
+| `network.json` + `network_intel.json` | FakeNet guest capture or REMnux gateway capture + tshark enrichment |
+| `off_box/network_raw/` + `off_box/capture.json` | run-scoped gateway pcap, source interface, status, and hash (remote-driver gateway mode) |
 | `process_snapshot.json` | pre/post process diff |
 | `memory/` | pe-sieve / hollows_hunter dumps (only with `--pesieve`) |
 | `ANALYST-NEXT.md` + `analyst_next.json` | human next steps |
@@ -166,7 +173,7 @@ Notes:
 
 | Server | Port | Bind | Reachable from caller VM? |
 |---|---|---|---|
-| x64dbg-MCP | 9094 | `0.0.0.0` (firewall: LocalSubnet only) | **Yes, direct** |
+| x64dbg-MCP | 9094 | `0.0.0.0` (firewall: configured REMnux gateway only) | **Yes, direct** |
 | idasql HTTP | 19300 | `127.0.0.1` | No — SSH-exec CLI or `ssh -L` tunnel |
 | ghidrasql HTTP | 18080 | `127.0.0.1` | No — SSH-exec CLI or `ssh -L` tunnel |
 | LibGhidraHost RPC | 18090 | `127.0.0.1` | No — SSH-exec CLI or `ssh -L` tunnel |

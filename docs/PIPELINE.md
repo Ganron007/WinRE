@@ -57,8 +57,10 @@ and static-only findings provide context. Disagreements are named in
 more conservative label until execution evidence is available. An unknown
 dynamic or debugger result does not erase a definite static result.
 
-Dynamic collection uses Frida, Procmon, FakeNet-NG, and optional memory and
-debugger tooling. The default detonation cap is 150 seconds. `--stop-on`
+Dynamic collection uses Frida, Procmon, and optional memory and debugger
+tooling. Standalone Flare runs use FakeNet-NG; configured remote-driver runs use
+INetSim plus run-scoped off-box packet capture through the REMnux gateway.
+The default detonation cap is 150 seconds. `--stop-on`
 controls the behavior gate and `--stop-on-settle` controls how long collection
 continues after it fires. `--adaptive` enables an idle-based stop; because a
 sleeping sample can appear idle, it is off by default. Requested and effective

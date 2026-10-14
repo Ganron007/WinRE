@@ -52,12 +52,14 @@ def _run_tshark(args: list[str], timeout: int = 300) -> str:
 
 
 def analyze_pcaps(dyn_dir: Path) -> dict:
-    raw = dyn_dir / "network_raw"
-    pcaps = sorted(raw.glob("*.pcap*")) if raw.is_dir() else []
-    if not pcaps and not list(dyn_dir.glob("*.pcap*")):
-        return {"ok": False, "error": "no pcaps found"}
+    raw_dirs = [dyn_dir / "network_raw", dyn_dir / "off_box" / "network_raw"]
+    pcaps = sorted({p for raw in raw_dirs if raw.is_dir()
+                    for p in raw.rglob("*")
+                    if p.suffix.lower() in (".pcap", ".pcapng")})
     if not pcaps:
-        pcaps = sorted(dyn_dir.glob("*.pcap*"))
+        pcaps = sorted(p for p in dyn_dir.glob("*.pcap*") if p.is_file())
+    if not pcaps:
+        return {"ok": False, "error": "no pcaps found"}
     if _tshark() is None:
         return {"ok": False, "error": "tshark not installed"}
 

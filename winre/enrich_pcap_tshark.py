@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Light tshark enrich over dynamic/network_raw/*.pcap -> network_intel.json.
+"""Light tshark enrichment over guest and off-box dynamic pcaps.
 
 Does not replace analyst Wireshark deep-dive (see ANALYST-NEXT).
 
@@ -70,7 +70,7 @@ def main() -> int:
     ap.add_argument("dynamic_dir", type=Path)
     args = ap.parse_args()
     dyn = args.dynamic_dir.resolve()
-    raw = dyn / "network_raw"
+    raw_dirs = [dyn / "network_raw", dyn / "off_box" / "network_raw"]
     if not tshark_available():
         out = {
             "schema": "v6.2.1-network-intel",
@@ -83,22 +83,24 @@ def main() -> int:
         (dyn / "network_intel.json").write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
         print("tshark missing - wrote stub network_intel.json")
         return 1
-    if not raw.is_dir():
+    present_dirs = [raw for raw in raw_dirs if raw.is_dir()]
+    if not present_dirs:
         out = {"schema": "v6.2.1-network-intel", "status": "failed",
                "reason_code": "capture_directory_missing", "ok": False,
-               "error": f"missing {raw}"}
+               "error": "missing guest and off-box capture directories"}
         (dyn / "network_intel.json").write_text(
             json.dumps(out, indent=2) + "\n", encoding="utf-8")
         return 1
-    pcaps = sorted(p for p in raw.rglob("*") if p.suffix.lower() in (".pcap", ".pcapng"))
+    pcaps = sorted(p for raw in present_dirs for p in raw.rglob("*")
+                   if p.suffix.lower() in (".pcap", ".pcapng"))
     if not pcaps:
         out = {"schema": "v6.2.1-network-intel", "status": "failed",
                "reason_code": "capture_file_missing", "ok": False,
-               "error": f"no pcap in {raw}"}
+               "error": "no pcap in guest or off-box capture directories"}
         (dyn / "network_intel.json").write_text(
             json.dumps(out, indent=2) + "\n", encoding="utf-8")
         return 1
-    captures = [enrich_one(p) for p in pcaps]
+    captures = [enrich_one(p) | {"path": p.relative_to(dyn).as_posix()} for p in pcaps]
     failures = [f"{capture['pcap']}:{name}:{result.get('error')}"
                 for capture in captures
                 for name, result in capture["filter_results"].items()
