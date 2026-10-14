@@ -27,7 +27,7 @@ sys.path.insert(0, str(REPO))
 
 from winre.envfile import load_dotenv  # noqa: F401  (loads .env)
 from winre.remote_driver import (flare_cfg, ssh_run, ssh_ps, _remote_py,
-                                 malcat_remote_is_up)
+                                 malcat_remote_is_up, scp_to)
 from winre import snapshot_gate
 
 PY_COMPILE_HELPER = r'''
@@ -93,14 +93,7 @@ def run_smoke() -> list[dict]:
         remote_name = f"winre-smoke-{uuid.uuid4().hex}.py"
         remote_helper = rf"C:\Windows\Temp\{remote_name}"
         helper.write_text(PY_COMPILE_HELPER, encoding="utf-8")
-        import subprocess
-        scp = subprocess.run(
-            ["scp", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no",
-             "-o", "ConnectTimeout=15", str(helper),
-             f"{cfg['user']}@{cfg['host']}:C:/Windows/Temp/{remote_name}"],
-            capture_output=True, text=True, timeout=120)
-        if scp.returncode != 0:
-            raise RuntimeError(f"scp helper: {scp.stderr[:150]}")
+        scp_to(cfg, helper, f"C:/Windows/Temp/{remote_name}")
         r = ssh_run(cfg, f'"{py}" "{remote_helper}"',
                     timeout=300)
         lines = [ln for ln in (r.stdout or "").splitlines() if ln.strip()]

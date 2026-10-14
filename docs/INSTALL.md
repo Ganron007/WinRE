@@ -35,6 +35,9 @@ Point `FLARE_*` environment variables at your VM (or put them in `.env`):
 | `FLARE_USER` | SSH user on the VM | `FLARE-VM` |
 | `FLARE_SSH_KEY` | path to your private key | `~/.ssh/<your-key>` |
 | `FLARE_SSH_PORT` | SSH port | `22` |
+| `WINRE_GATEWAY_HOST` | optional SSH jump host for callers that cannot reach Flare directly | `.43` in the paired lab |
+| `WINRE_GATEWAY_USER` | SSH user on the jump host | `remnux` |
+| `WINRE_GATEWAY_SSH_KEY` | operator-host private key used to reach the jump host | *set yours; leave unset on `.43`* |
 | `WINRE_REMOTE_PIPELINE` | repo location on the VM | `C:\WinRE` |
 
 Snapshot-gate config:
@@ -55,8 +58,12 @@ Smoke-check connectivity:
 python ops\smoke_flare.py
 ```
 
-`ops\smoke_flare.py` runs read-only checks and a per-run temporary compile
-helper, which it removes before returning. `install\verify-flarevm.ps1`
+`ops\smoke_flare.py` uses the configured SSH jump host for its SSH and SCP
+checks. From the workstation, set `WINRE_GATEWAY_HOST`, `WINRE_GATEWAY_USER`,
+and `WINRE_GATEWAY_SSH_KEY` as described above; the x64dbg HTTP probe remains
+advisory because its firewall rule accepts the `.43` control plane only. The
+smoke check runs read-only checks and a per-run temporary compile helper, which
+it removes before returning. `install\verify-flarevm.ps1`
 performs live SQL checks using benign probe copies under `%TEMP%`; it isolates their cache,
 logs and ports, disables Python bytecode writes, and stops only SQL processes
 started by that invocation. It does not write to `C:\samples` or the deployed

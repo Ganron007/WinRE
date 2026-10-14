@@ -27,7 +27,7 @@ import time
 
 from winre import remote_driver
 from winre.mcp import X64DbgClient
-from winre.mcp.x64dbg_client import module_name_is_safe, safe_module_filename
+from winre.mcp.x64dbg_client import safe_module_filename
 
 # --- which debugger can load this sample? (P1-F1, finding of 2026-10-06) ---
 #
@@ -59,30 +59,40 @@ _lock = threading.Lock()
 
 def stage_safe_sample(cfg: dict, remote_sample: str,
                       tag: str = "") -> str:
-    """Return an x64dbg-expression-safe VM path for the sample.
+    """Create a private, expression-safe debug copy on the VM.
 
     x64dbg module lookups parse names as expressions — a hyphenated sample
     (`notepad-sys32.exe`) never resolves (`Module "notepad-sys32" not found`,
     verified live), so DetectOEP/DumpModule/AnalyzeModule silently fail.
-    Unsafe names are copied beside the run-specific staged sample, preserving
-    the verified run directory and avoiding a shared mutable debug copy.
-    Safe names are returned unchanged (no copy).
+    Always copy beside the run-specific staged sample, even when its name is
+    already safe. Malware can delete or overwrite its execution image; keeping
+    that image separate preserves the verified staged file for later tools.
     """
     name = remote_sample.replace("/", "\\").rsplit("\\", 1)[-1]
-    stem = os.path.splitext(name)[0]
-    if module_name_is_safe(stem):
-        return remote_sample
-    safe_name = safe_module_filename(name, tag)
     remote_sample = remote_sample.replace("/", "\\")
     parent = remote_sample.rsplit("\\", 1)[0]
+    safe_name = safe_module_filename(name, tag or "debug")
     safe_path = rf"{parent}\{safe_name}"
+    source_literal = remote_sample.replace("'", "''")
+    destination_literal = safe_path.replace("'", "''")
     try:
-        remote_driver.ssh_ps(
+        result = remote_driver.ssh_ps(
             cfg,
-            f"if (-not (Test-Path '{safe_path}')) {{ "
-            f"Copy-Item -Force '{remote_sample}' '{safe_path}' }}")
-    except Exception:
-        return remote_sample  # fall through; caller reports the real error
+            "$ErrorActionPreference='Stop'; "
+            f"$src='{source_literal}'; $dst='{destination_literal}'; "
+            "if (-not (Test-Path -LiteralPath $src -PathType Leaf)) "
+            "{ throw 'source sample is missing' }; "
+            "Copy-Item -LiteralPath $src -Destination $dst -Force; "
+            "$a=(Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash; "
+            "$b=(Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash; "
+            "if ($a -ne $b) { throw 'debug copy hash mismatch' }; "
+            "Write-Output 'DEBUG_COPY_OK'",
+            timeout=60)
+        if result.returncode != 0 or "DEBUG_COPY_OK" not in (result.stdout or ""):
+            detail = result.stderr or result.stdout or "copy verification failed"
+            raise RuntimeError(detail.strip()[-240:])
+    except Exception as e:
+        raise RuntimeError(f"could not stage isolated x64dbg copy: {e}") from e
     return safe_path
 
 

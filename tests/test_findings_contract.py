@@ -283,6 +283,7 @@ def test_the_route_is_recorded_not_left_as_a_silent_unknown(tmp_path):
         encoding="utf-8")
     (mode_root / "deep" / "deep.json").write_text(
         '{"agent": {"dbg_ensure": {"arch": 64, "launched": true},'
+        ' "verdict": {"verdict": "benign", "confidence": "high"},'
         ' "unpack_prepass": {}}}', encoding="utf-8")
 
     f = F.dbg_findings(mode_root, sha="e" * 64)
@@ -291,8 +292,10 @@ def test_the_route_is_recorded_not_left_as_a_silent_unknown(tmp_path):
     assert route["native_unpack_applies"] is False
     assert "dotnet" in route["method"]
     assert f["ok"] is True
-    assert f["verdict"]["level"] != F.UNKNOWN
+    assert f["verdict"]["level"] == F.UNKNOWN
     assert any(".NET" in x for x in f["limitations"])
+    assert any("does not establish malicious intent" in x
+               for x in f["limitations"])
 
 
 def test_native_route_still_reports_a_missing_oep():
@@ -324,8 +327,10 @@ def test_completed_debug_window_remains_a_valid_mode_without_an_oep(tmp_path):
                 "requested": True, "attempted": True, "status": "completed",
                 "evidence": [{"tool": "x64dbg_run_window", "result": {
                     "ok": True, "status": "completed",
-                    "requested_seconds": 30, "observed_seconds": 30,
-                    "exit_observed": True, "stopped_after_window": True,
+                    "requested_seconds": 30, "observed_seconds": 4.8,
+                    "exit_observed": True, "natural_exit_observed": True,
+                    "completion_reason": "target_exited",
+                    "stopped_after_window": False,
                     "final_state": {"isDebugging": "false",
                                     "status": "NO_TARGET"}}}],
             },
@@ -336,7 +341,9 @@ def test_completed_debug_window_remains_a_valid_mode_without_an_oep(tmp_path):
                     "summary": {"target_observed": True,
                                 "process_starts": 12, "process_stops": 12,
                                 "related_process_ids": [55],
-                                "scope": "process starts and stops only"}}),
+                                "scope": "process starts and stops only"},
+                    "cleanup": {"ok": True, "status": "terminated",
+                                "terminated_process_ids": [55]}}),
         encoding="utf-8")
 
     record = F.dbg_findings(mode_root, sha=sha, run_id=run_id)
@@ -344,7 +351,10 @@ def test_completed_debug_window_remains_a_valid_mode_without_an_oep(tmp_path):
     assert record["ok"] is True
     assert record["findings"]["unpack"]["ok"] is False
     assert record["findings"]["debug_observation"]["target_observed"] is True
+    assert record["verdict"]["level"] == F.UNKNOWN
     assert "debug:target-process-observed" in record["verdict"]["basis"]
+    assert any("do not independently establish malicious intent" in item
+               for item in record["limitations"])
     assert any("no usable dump" in item for item in record["limitations"])
 
     _, selection = compose.load_selection(

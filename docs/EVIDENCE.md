@@ -63,10 +63,16 @@ dynamic collection sources. `deep.json` records the debugger OEP/unpack probe
 and bounded observation window, including requested and observed seconds,
 pause count, final debugger state, and whether the target exited or was stopped.
 The mode-level `findings.json` keeps the window result, current-run ETW summary,
-and unpack result as separate fields. A completed debugger window can be
-selected in the mode composite even when no OEP dump exists; the report states
-that limitation and keeps the selected composite verdict distinct from the
-deep-stage agent assessment.
+process cleanup result, and unpack result as separate fields. The debug copy is
+separate from the staged source and is hash-checked before execution. Cleanup
+uses the ETW active-process identities and confirms PID, image name, and
+creation time before terminating a process. A completed debugger window can be
+selected in the mode composite without an OEP dump only when ETW observed the
+target and process cleanup completed. The report states missing-dump limits
+and keeps the selected composite verdict distinct from the deep-stage agent
+assessment. Debugger availability, process observation, and unpack success are
+coverage evidence, not independent evidence of malicious intent. An incomplete
+trace or unconfirmed cleanup keeps the mode red.
 
 The control-plane snapshot ledger is stored in the ignored operator state file
 `internal/_vm_state.json`; it is not a sample finding and is not part of the

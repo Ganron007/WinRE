@@ -10,7 +10,7 @@ Day-2 operation of the WinRE lab. Install first: [`INSTALL.md`](INSTALL.md).
 |---|---|---|
 | **Agentic engine (default)** | `python -m winre.pipeline "C:\samples\s.exe" --driver remote --mode agentic` | intake → quick → deep (LangGraph and configured LLM) → YARA → report → audit → `logs/<sha>/agentic/` |
 | **Deterministic engine** | add `--mode static` | same analysis stages; deep uses the fixed checklist and deterministic verdict, with no LLM calls → `logs/<sha>/static/` |
-| **Debugger execution** | add `--agentic-dbg` to an agentic run | x64dbg OEP/unpack probe, up to 30 seconds of target execution, and an independent ETW process-start/stop trace → `logs/<sha>/dbg/` |
+| **Debugger execution** | add `--agentic-dbg` to an agentic run from an active FlareVM desktop session | entry-point or packed-file OEP probe, up to 30 seconds of x64dbg execution, ETW process trace, and scoped cleanup → `logs/<sha>/dbg/` |
 | **Dynamic capability** | add `--dynamic --max-seconds 150` to an agentic run | static stages first, then gated detonation → `logs/<sha>/dynamic/` |
 | **Dry LLM** | add `--dry-llm` (agentic mode) | no LLM calls; deep stays `deterministic_fallback` (honest, not green) |
 | **Publish case** | add `--publish` | sanitized case → `docs/case-studies/<section>/<sha>/` (no binaries) |
@@ -350,7 +350,7 @@ RevAI inherits this automatically — it runs the same `winre.remote_driver` cod
 ## Health & diagnostics
 
 ```powershell
-python ops\smoke_flare.py          # 9-check PASS/FAIL battery (SSH, py_compile, layout, MCP, gate, LLM)
+python ops\smoke_flare.py          # PASS/FAIL battery (SSH, py_compile, layout, MCP, gate, LLM)
 python -m winre.snapshot_gate status
 ```
 

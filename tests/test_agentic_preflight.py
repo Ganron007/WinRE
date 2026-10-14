@@ -93,7 +93,7 @@ def test_agentic_dbg_runs_a_deterministic_oep_probe_when_no_packer_signal(monkey
         "windbg_analyze_dump"]
     probe = next(row for row in result["history"]
                  if row.get("tool") == "x64dbg_oep")
-    assert probe["reason"] == "agentic-dbg deterministic target-load/OEP probe"
+    assert probe["reason"] == "agentic-dbg deterministic load/OEP probe"
     assert result["debug_run"]["attempted"] is True
     assert result["debug_run"]["status"] == "completed"
     window = next(row for row in result["history"]

@@ -454,6 +454,9 @@ def run_debug_window(xc: X64DbgClient | None = None, *, seconds: int = 30,
     return {"ok": True, "status": "completed",
             "reason_code": "completed", "requested_seconds": requested,
             "observed_seconds": observed_s, "exit_observed": bool(exited),
+            "natural_exit_observed": bool(exited and stop is None),
+            "completion_reason": ("target_exited" if exited and stop is None
+                                  else "window_elapsed"),
             "pause_count": len(pauses), "pauses": pauses,
             "initial_state": initial, "final_state": final,
             "stopped_after_window": bool(stop and stop.get("ok"))}

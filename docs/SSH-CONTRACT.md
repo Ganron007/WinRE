@@ -30,9 +30,15 @@ Conventions used below (no lab specifics committed — set these per lab):
 
 In the paired lab, Flare accepts SSH only from REMnux `.43`. The RevAI control
 plane connects directly because it runs on `.43`; workstation-side sync and
-reapply scripts use `.43` as an SSH jump host. Do not configure a direct
-workstation-to-Flare firewall exception: Flare blocks all other VMnet2 peers,
-including the workstation host adapter.
+reapply scripts use `.43` as an SSH jump host. Workstation-side control-plane
+commands that use `winre.remote_driver` can use the same path by setting
+`WINRE_GATEWAY_HOST`, `WINRE_GATEWAY_USER`, and `WINRE_GATEWAY_SSH_KEY`; the
+SSH and SCP helpers then apply that ProxyCommand consistently. Leave those
+variables unset on `.43`, where direct Flare access is available. The x64dbg
+MCP HTTP endpoint remains restricted to `.43`, so a workstation smoke check
+may report that on-demand endpoint as an advisory warning. Do not configure a
+direct workstation-to-Flare firewall exception: Flare blocks all other VMnet2
+peers, including the workstation host adapter.
 
 **Non-interactive rules (learned the hard way):**
 - Always `-File` with a script file. Never nest `powershell -Command "..."` strings

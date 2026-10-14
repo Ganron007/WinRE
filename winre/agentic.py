@@ -163,6 +163,7 @@ class ToolRegistry:
         self._dbg_ensure_error: dict | None = None
         self._dbg_ensure_info: dict | None = None
         self._dbg_sample_path: str | None = None
+        self.packed_signal: dict | None = None
 
     def call(self, name: str, args: dict) -> dict:
         fn = getattr(self, name, None)
@@ -644,19 +645,16 @@ class ToolRegistry:
         return X64DbgClient(host=self.cfg["host"])
 
     def _dbg_sample(self) -> str:
-        """Expression-safe VM sample path for x64dbg tools (staged once).
+        """Private expression-safe VM copy for x64dbg tools (staged once).
 
         x64dbg resolves module names via its expression parser: hyphens become
         subtraction and hex-looking stems become numbers, so DumpModule /
         DetectOEP / AnalyzeModule fail on names like `notepad-sys32.exe`.
         """
         if self._dbg_sample_path is None:
-            try:
-                from winre.mcp.x64dbg_manager import stage_safe_sample
-                self._dbg_sample_path = stage_safe_sample(
-                    self.cfg, self.remote_sample, tag=(self.sha or "")[:12])
-            except Exception:
-                self._dbg_sample_path = self.remote_sample
+            from winre.mcp.x64dbg_manager import stage_safe_sample
+            self._dbg_sample_path = stage_safe_sample(
+                self.cfg, self.remote_sample, tag=(self.sha or "")[:12])
         return self._dbg_sample_path
 
     def _dbg_gate(self) -> dict | None:
@@ -697,16 +695,31 @@ class ToolRegistry:
         return None
 
     def x64dbg_oep(self) -> dict:
-        """Find the unpack OEP via memory-execute BP (verified method)."""
+        """Load at the entry point, then find a later OEP only for packed files."""
         gate = self._dbg_gate()
         if gate:
             return gate
         try:
             from winre import debug_loops
-            r = debug_loops.oep_by_section(self._dbg_sample(),
-                                           xc=self._dbg_client())
-            return {"ok": r.get("ok"), "oep": r.get("oep"),
-                    "error": r.get("error")}
+            sample = self._dbg_sample()
+            client = self._dbg_client()
+            if not self.packed_signal:
+                r = debug_loops.ep_break(sample, xc=client)
+                return {"ok": r.get("ok"),
+                        "status": "completed" if r.get("ok") else "failed",
+                        "method": "entrypoint_observation",
+                        "entrypoint": r.get("oep"),
+                        "error": r.get("error"),
+                        "diagnostics": r.get("diagnostics"),
+                        "evidence": r.get("evidence") or []}
+            r = debug_loops.oep_by_section(sample, xc=client)
+            return {"ok": r.get("ok"),
+                    "status": "completed" if r.get("ok") else "failed",
+                    "method": "memory_execute_oep", "oep": r.get("oep"),
+                    "oep_target": r.get("target"),
+                    "error": r.get("error"),
+                    "diagnostics": r.get("diagnostics"),
+                    "evidence": r.get("evidence") or []}
         except Exception as e:
             return {"error": str(e)}
 
@@ -1411,10 +1424,11 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
             # Keep the terminal summary reviewable and bounded; the full
             # result remains in the history entry it cites.
             detail = {k: result.get(k) for k in (
-                "ok", "status", "oep", "oep_target", "method", "hits", "hit",
+                "ok", "status", "oep", "entrypoint", "oep_target", "method", "hits", "hit",
                 "dump_path", "dump_kind", "dump_source", "rebuild_hint",
                 "error", "reason_code", "requested_seconds", "observed_seconds",
-                "exit_observed", "pause_count", "stopped_after_window",
+                "exit_observed", "natural_exit_observed", "completion_reason",
+                "pause_count", "stopped_after_window",
                 "final_state") if k in result}
             evidence.append({"tool": h.get("tool"), "step": h.get("step"),
                              "source_ref": f"deep.json#/agent/history/{h.get('step')}",
@@ -1554,6 +1568,7 @@ process observer closes. Do not start another sample session.
     # says packed, run the unpack primitive BEFORE the agent instead of
     # hoping the LLM picks it (0/14 calls on a packed sample happened).
     packed_sig = _packer_signal(quick)
+    registry.packed_signal = packed_sig
     unpack_prepass: dict | None = None
     debug_prepass: dict | None = None
     if dynamic and packed_sig and not managed:
@@ -1588,10 +1603,12 @@ process observer closes. Do not start another sample session.
             r = registry.call("x64dbg_oep", {})
         except Exception as e:
             r = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
-        debug_prepass = {k: r.get(k) for k in ("ok", "oep", "error") if k in r}
+        debug_prepass = {k: r.get(k) for k in
+                         ("ok", "status", "method", "oep", "entrypoint", "error")
+                         if k in r}
         history.append({"step": len(history) + 1, "tool": "x64dbg_oep",
                         "args": {}, "result": r,
-                        "reason": "agentic-dbg deterministic target-load/OEP probe"})
+                        "reason": "agentic-dbg deterministic load/OEP probe"})
         findings[f"x64dbg_oep_{len(history)}"] = r
         state["calls"] += 1
         state["seen"].add(json.dumps(("x64dbg_oep", {}), sort_keys=True))
@@ -1634,9 +1651,10 @@ process observer closes. Do not start another sample session.
     debug_note = ""
     if debug_prepass is not None:
         debug_note = (
-            "\nDEBUG PREFLIGHT: deterministic x64dbg_oep already ran before "
-            f"the planner: {json.dumps(debug_prepass, default=str)[:2000]}. "
-            "Use this result as evidence and do not repeat the same OEP probe.")
+            "\nDEBUG PREFLIGHT: deterministic x64dbg load/entrypoint observation "
+            "already ran before the planner: "
+            f"{json.dumps(debug_prepass, default=str)[:2000]}. "
+            "Use this result as evidence and do not repeat the same probe.")
     if managed:
         packer_note = ("\nPACKER SIGNAL (managed): packer/compression signals on a "
                        ".NET assembly do NOT route to native unpack - use "

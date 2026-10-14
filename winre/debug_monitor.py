@@ -48,6 +48,23 @@ def _session_name(run_id: str) -> str:
     return _SESSION_PREFIX + run_id[:12]
 
 
+def _stop_matches_active_image(active_image: str, stopped_image: str) -> bool:
+    """Match an ETW stop event to its start, including truncated image names.
+
+    Kernel-Process stop events can contain only the first 14 characters of the
+    image basename even when the start event has the full path. A PID is unique
+    for the current active instance in event order, so accept that distinctive
+    prefix while continuing to reject unrelated image names after PID reuse.
+    """
+    active_name = PureWindowsPath(active_image or "").name.casefold()
+    stopped_name = PureWindowsPath(stopped_image or "").name.casefold()
+    if not active_name or not stopped_name:
+        return True
+    if stopped_name == active_name:
+        return True
+    return len(stopped_name) >= 14 and active_name.startswith(stopped_name)
+
+
 def _remote_paths(run_id: str) -> tuple[str, str, str]:
     run_dir = _REMOTE_ROOT + "\\" + run_id
     return (run_dir + r"\process.etl", run_dir + r"\process.xml",
@@ -92,6 +109,10 @@ def _parse_events(xml_path: Path, target_image: str | None = None) -> tuple[list
     events: list[dict] = []
     target_pids: set[int] = set()
     related_pids: set[int] = set()
+    # Track process *instances* for the duration of this trace. A PID can be
+    # reused; a historical set of related PIDs incorrectly attributes a later
+    # unrelated process (and its children) to the sample.
+    active: dict[int, dict] = {}
     q = lambda name: f"{{{_NS}}}{name}"
 
     for _, elem in ET.iterparse(xml_path, events=("end",)):
@@ -125,22 +146,52 @@ def _parse_events(xml_path: Path, target_image: str | None = None) -> tuple[list
             ppid = None
         image = data.get("ImageName", "")
         basename = PureWindowsPath(image).name.casefold()
-        is_target = bool(target and basename == target)
+        timestamp_node = system.find(q("TimeCreated"))
+        timestamp = (timestamp_node.get("SystemTime")
+                     if timestamp_node is not None else None)
         if event_id_node.text == "1":
+            parent = active.get(ppid) if ppid is not None else None
+            is_target = bool(target and basename == target)
+            is_related = bool(parent and
+                              (parent.get("target_process")
+                               or parent.get("descendant_of_target")))
             if is_target:
                 target_pids.add(pid)
-            if ppid in target_pids or ppid in related_pids:
+            if is_related:
                 related_pids.add(pid)
+            depth = (int(parent.get("depth", 0)) + 1
+                     if is_related and parent else 0)
+            instance = {"process_id": pid, "parent_process_id": ppid,
+                        "image_name": image, "timestamp_utc": timestamp,
+                        "target_process": is_target,
+                        "descendant_of_target": is_related,
+                        "depth": depth}
+            active[pid] = instance
         events.append({
             "event": "process_start" if event_id_node.text == "1" else "process_stop",
-            "timestamp_utc": (system.find(q("TimeCreated")).get("SystemTime")
-                               if system.find(q("TimeCreated")) is not None else None),
+            "timestamp_utc": timestamp,
             "process_id": pid,
             "parent_process_id": ppid,
             "image_name": image,
-            "target_process": pid in target_pids,
-            "descendant_of_target": pid in related_pids,
+            "target_process": (active.get(pid, {}).get("target_process", False)
+                               if event_id_node.text == "1" else False),
+            "descendant_of_target": (active.get(pid, {}).get(
+                "descendant_of_target", False)
+                if event_id_node.text == "1" else False),
         })
+        if event_id_node.text == "2":
+            instance = active.get(pid)
+            if instance:
+                # Keep the active identity on a genuine image mismatch (for
+                # example, a late stop event after PID reuse), but normalize
+                # the 14-character basename truncation used by ETW stop rows.
+                if _stop_matches_active_image(
+                        str(instance.get("image_name") or ""), image):
+                    events[-1]["target_process"] = bool(
+                        instance.get("target_process"))
+                    events[-1]["descendant_of_target"] = bool(
+                        instance.get("descendant_of_target"))
+                    active.pop(pid, None)
         elem.clear()
 
     starts = sum(e["event"] == "process_start" for e in events)
@@ -155,9 +206,141 @@ def _parse_events(xml_path: Path, target_image: str | None = None) -> tuple[list
         "target_observed": bool(target_pids),
         "target_process_ids": sorted(target_pids),
         "related_process_ids": sorted(related_pids),
+        "active_sample_processes": sorted(
+            [{k: v.get(k) for k in ("process_id", "parent_process_id",
+                                     "image_name", "timestamp_utc",
+                                     "target_process", "descendant_of_target",
+                                     "depth")}
+             for v in active.values()
+             if v.get("target_process") or v.get("descendant_of_target")],
+            key=lambda v: (v.get("depth", 0), v.get("process_id", 0)),
+            reverse=True),
         "unique_images": sorted({e["image_name"] for e in events if e["image_name"]})[:100],
     }
     return events, summary
+
+
+def cleanup_active_processes(cfg: dict, run_id: str, summary: dict) -> dict:
+    """Stop only the target/descendant process instances still active at trace end.
+
+    The ETW process tree supplies candidate PIDs. Before terminating one, the
+    guest checks its current image name and creation time against the captured
+    start event so a PID reused by an unrelated process is left alone.
+    """
+    if not _RUN_ID.fullmatch(str(run_id or "")):
+        return {"ok": False, "status": "failed", "reason": "invalid_run_id"}
+    candidates = summary.get("active_sample_processes") or []
+    if not candidates:
+        return {"ok": True, "status": "clean", "checked": 0,
+                "terminated_process_ids": [], "results": []}
+
+    normalized = []
+    for item in candidates:
+        try:
+            pid = int(item.get("process_id"))
+            image = PureWindowsPath(str(item.get("image_name") or "")).name
+            started = str(item.get("timestamp_utc") or "")
+            if pid <= 0 or not image or not started:
+                raise ValueError("incomplete active process identity")
+            normalized.append({"process_id": pid, "image_name": image,
+                               "timestamp_utc": started})
+        except (TypeError, ValueError, AttributeError) as e:
+            return {"ok": False, "status": "failed",
+                    "reason": f"invalid_active_process_identity: {e}",
+                    "checked": len(normalized), "results": []}
+
+    payload = json.dumps(normalized, separators=(",", ":")).encode("utf-8")
+    import base64
+    encoded = base64.b64encode(payload).decode("ascii")
+    script = f"""
+$ErrorActionPreference='Stop'
+$runId='{run_id}'
+$raw=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))
+$candidates=ConvertFrom-Json -InputObject $raw
+$results=@()
+foreach ($candidate in $candidates) {{
+  $processId=[int]$candidate.process_id
+  $name=[string]$candidate.image_name
+  $actual=Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue
+  if (-not $actual) {{
+    $results+=@{{process_id=$processId;image_name=$name;status='already_exited'}}
+    continue
+  }}
+  if ([IO.Path]::GetFileName([string]$actual.Name) -ine $name) {{
+    $results+=@{{process_id=$processId;image_name=$name;status='identity_mismatch_skipped'}}
+    continue
+  }}
+  try {{
+    if ($actual.CreationDate -is [DateTime]) {{
+      $created=([DateTime]$actual.CreationDate).ToUniversalTime()
+    }} else {{
+      $created=[Management.ManagementDateTimeConverter]::ToDateTime([string]$actual.CreationDate).ToUniversalTime()
+    }}
+    $expected=[DateTimeOffset]::Parse([string]$candidate.timestamp_utc).UtcDateTime
+    $delta=[Math]::Abs(($created-$expected).TotalSeconds)
+  }} catch {{
+    $results+=@{{process_id=$processId;image_name=$name;status='identity_unverified';error=$_.Exception.Message}}
+    continue
+  }}
+  if ($delta -gt 5) {{
+    $results+=@{{process_id=$processId;image_name=$name;status='identity_mismatch_skipped';creation_delta_seconds=[Math]::Round($delta,3)}}
+    continue
+  }}
+  try {{
+    Stop-Process -Id $processId -Force -ErrorAction Stop
+    Start-Sleep -Milliseconds 300
+    $remaining=Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue
+    if (-not $remaining) {{
+      $results+=@{{process_id=$processId;image_name=$name;status='terminated'}}
+    }} else {{
+      $results+=@{{process_id=$processId;image_name=$name;status='termination_unconfirmed'}}
+    }}
+  }} catch {{
+    $results+=@{{process_id=$processId;image_name=$name;status='failed';error=$_.Exception.Message}}
+  }}
+}}
+$bad=@($results | Where-Object {{ $_.status -in @('identity_unverified','termination_unconfirmed','failed') }})
+$terminated=@($results | Where-Object status -eq 'terminated' | ForEach-Object {{ $_.process_id }})
+[pscustomobject]@{{run_id=$runId;ok=($bad.Count -eq 0);status=$(if($bad.Count -eq 0){{if($terminated.Count -gt 0){{'terminated'}}else{{'clean'}}}}else{{'failed'}});checked=$results.Count;terminated_process_ids=$terminated;results=$results}} | ConvertTo-Json -Depth 5 -Compress
+"""
+    remote_script = (_REMOTE_SCRIPT_ROOT + "\\WinRE-debug-cleanup-"
+                     + run_id + ".ps1")
+    local_script: Path | None = None
+    response: dict = {}
+    errors: list[str] = []
+    from .remote_driver import scp_to, ssh_ps, ssh_run
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".ps1", encoding="utf-8",
+                                         delete=False, newline="\n") as fh:
+            fh.write(script)
+            local_script = Path(fh.name)
+        scp_to(cfg, local_script, remote_script.replace("\\", "/"))
+        response = _json_response(
+            ssh_run(cfg, "powershell -NoProfile -ExecutionPolicy Bypass -File "
+                    + remote_script, timeout=120), "debug process cleanup")
+    except Exception as e:
+        errors.append(f"{type(e).__name__}: {str(e)[:220]}")
+    finally:
+        if local_script:
+            try:
+                local_script.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            ssh_ps(cfg, f"Remove-Item -LiteralPath '{remote_script}' -Force "
+                   "-ErrorAction SilentlyContinue; Write-Output 'CLEANUP_OK'",
+                   timeout=30)
+        except Exception:
+            pass
+    if response.get("run_id") not in (None, run_id):
+        errors.append("cleanup result belongs to another run")
+    if errors:
+        return {"ok": False, "status": "failed", "reason": "; ".join(errors),
+                "checked": 0, "terminated_process_ids": [], "results": []}
+    if response.get("ok") is not True:
+        response.setdefault("status", "failed")
+        response.setdefault("reason", "guest did not confirm process cleanup")
+    return response
 
 
 def stop_and_pull(cfg: dict, started: dict, destination: Path,

@@ -53,6 +53,19 @@ LOCAL_LOGS = _evidence_root()
 def flare_cfg() -> dict:
     """Execution-plane connection config. All values from env/.env —
     no lab defaults in code (see .env.template for the full block)."""
+    gateway_host = os.environ.get("WINRE_GATEWAY_HOST", "").strip()
+    gateway_user = os.environ.get("WINRE_GATEWAY_USER", "remnux").strip()
+    gateway_key = os.environ.get("WINRE_GATEWAY_SSH_KEY", "").strip()
+    proxy_command = ""
+    if gateway_host:
+        if not gateway_key:
+            raise ValueError(
+                "WINRE_GATEWAY_SSH_KEY is required when "
+                "WINRE_GATEWAY_HOST is configured")
+        proxy_command = (
+            f'ssh -i "{gateway_key}" -o IdentitiesOnly=yes '
+            f'-o BatchMode=yes -o StrictHostKeyChecking=no '
+            f'-W %h:%p {gateway_user}@{gateway_host}')
     return {
         "host": os.environ.get("FLARE_HOST", ""),
         "user": os.environ.get("FLARE_USER", "FLARE-VM"),
@@ -60,6 +73,7 @@ def flare_cfg() -> dict:
                               str(Path.home() / ".ssh" / "id_ed25519")),
         "port": int(os.environ.get("FLARE_SSH_PORT", "22")),
         "remote_pipeline": os.environ.get("WINRE_REMOTE_PIPELINE", r"C:\WinRE"),
+        "proxy_command": proxy_command,
     }
 
 
@@ -75,12 +89,28 @@ def _dynamic_status_label(result: dict | None) -> str:
 
 
 def _ssh_base(cfg: dict) -> list[str]:
-    return [
+    cmd = [
         "ssh", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no",
         "-o", "ConnectTimeout=15", "-o", "BatchMode=yes",
         "-p", str(cfg["port"]),
-        f"{cfg['user']}@{cfg['host']}",
     ]
+    proxy = str(cfg.get("proxy_command") or "").strip()
+    if proxy:
+        cmd += ["-o", f"ProxyCommand={proxy}"]
+    cmd.append(f"{cfg['user']}@{cfg['host']}")
+    return cmd
+
+
+def _scp_base(cfg: dict) -> list[str]:
+    cmd = [
+        "scp", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no",
+        "-o", "ConnectTimeout=15", "-o", "BatchMode=yes",
+        "-P", str(cfg["port"]),
+    ]
+    proxy = str(cfg.get("proxy_command") or "").strip()
+    if proxy:
+        cmd += ["-o", f"ProxyCommand={proxy}"]
+    return cmd
 
 
 def ssh_run(cfg: dict, remote_cmd: str, timeout: int = 600) -> subprocess.CompletedProcess:
@@ -103,9 +133,8 @@ def ssh_ps(cfg: dict, script: str, timeout: int = 120) -> subprocess.CompletedPr
 
 
 def scp_to(cfg: dict, local: Path, remote: str) -> None:
-    cmd = ["scp", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no",
-           "-o", "ConnectTimeout=15", "-P", str(cfg["port"]),
-           str(local), f"{cfg['user']}@{cfg['host']}:{remote}"]
+    cmd = _scp_base(cfg) + [
+        str(local), f"{cfg['user']}@{cfg['host']}:{remote}"]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if r.returncode != 0:
         raise RuntimeError(f"scp to flare failed: {r.stderr[:300]}")
@@ -118,8 +147,7 @@ def scp_from(cfg: dict, remote: str, local: Path,
     # in the remote path -> "No such file or directory". Normalize here so
     # every download call site is safe (uploads are left as-is).
     remote = remote.replace("\\", "/")
-    cmd = ["scp", "-i", cfg["key"], "-o", "StrictHostKeyChecking=no",
-           "-o", "ConnectTimeout=15", "-P", str(cfg["port"])]
+    cmd = _scp_base(cfg)
     if recursive:
         cmd.append("-r")
     cmd += [f"{cfg['user']}@{cfg['host']}:{remote}", str(local)]
@@ -1529,13 +1557,16 @@ def _debug_target_image(agent_result: dict | None, fallback: str) -> str:
 
 
 def _debug_monitor_failure(capture: dict) -> str | None:
-    """A collected host trace is useful only if it observed the requested target."""
+    """Require a run-matched trace, target observation, and confirmed cleanup."""
     if capture.get("status") != "collected":
         return str(capture.get("error") or capture.get("reason")
                    or capture.get("status") or "collection_failed")
     summary = capture.get("summary") or {}
     if summary.get("target_observed") is not True:
         return "target_process_not_observed"
+    cleanup = capture.get("cleanup")
+    if not isinstance(cleanup, dict) or cleanup.get("ok") is not True:
+        return "active_process_cleanup_failed"
     return None
 
 
@@ -1710,13 +1741,29 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
         failures.append(f"agent:{e}")
         agent_result = None
 
+    # Close the debugger before sealing the ETW stream. This captures any
+    # target termination caused by debugger teardown, then lets the monitor's
+    # run-scoped process identities drive the final descendant cleanup.
+    if dynamic:
+        try:
+            from .mcp.x64dbg_manager import teardown, keep_debugger
+            if not keep_debugger():
+                out["x64dbg_teardown"] = teardown()
+        except Exception as e:
+            out["x64dbg_teardown"] = {"error": str(e)[:150]}
+
     if debug_monitor_started:
         try:
-            from .debug_monitor import stop_and_pull
+            from .debug_monitor import (cleanup_active_processes,
+                                        stop_and_pull)
             debug_capture = stop_and_pull(
                 cfg, debug_monitor_started, debug_monitor_dir,
                 target_image=_debug_target_image(agent_result, sample_name))
             debug_capture["run_id"] = run_id
+            debug_capture["cleanup"] = cleanup_active_processes(
+                cfg, run_id, debug_capture.get("summary") or {})
+            debug_capture["ok"] = bool(debug_capture.get("ok")
+                                       and debug_capture["cleanup"].get("ok"))
             (debug_monitor_dir / "META.json").write_text(
                 json.dumps(debug_capture, indent=2, default=str) + "\n",
                 encoding="utf-8")
@@ -1731,6 +1778,8 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
         out["debug_monitor"] = debug_capture
         if out.get("agent"):
             out["agent"]["debug_monitor"] = debug_capture
+            if out.get("x64dbg_teardown") is not None:
+                out["agent"]["x64dbg_teardown"] = out["x64dbg_teardown"]
         monitor_failure = _debug_monitor_failure(debug_capture)
         if monitor_failure:
             failures.append("debug_monitor:" + monitor_failure)
@@ -1791,16 +1840,6 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
         debug_monitor=debug_capture,
         verdict=verdict_label, no_verdict=no_verdict,
         elapsed_s=round(time.time() - t0, 1)))
-    # neat closure: if the agent had debug tools, x64dbg + the sample must
-    # not outlive this stage (covers manual single-stage runs; the full
-    # pipeline's final sweep is idempotent on top of this)
-    if dynamic:
-        try:
-            from .mcp.x64dbg_manager import teardown, keep_debugger
-            if not keep_debugger():
-                out["x64dbg_teardown"] = teardown()
-        except Exception as e:
-            out["x64dbg_teardown"] = {"error": str(e)[:150]}
     # surface the agent block so _report can source-tag correctly
     return {"ok": True, "fallback": fallback, "failures": failures, "mcp": mcp,
             "agent": out.get("agent"), "llm_analysis": out.get("llm_analysis"),

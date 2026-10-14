@@ -1070,17 +1070,29 @@ def dbg_findings(mode_root: Path, *, sha: str = "",
                    and isinstance(item.get("result"), dict)), {})
     monitor = _read(mode_root / "deep" / "debug_monitor" / "META.json") or {}
     monitor_summary = monitor.get("summary") or {}
+    process_cleanup = monitor.get("cleanup") or {}
     monitor_matches_run = (not run_id or monitor.get("run_id") == run_id)
     monitor_ok = (monitor.get("ok") is True
                   and monitor.get("status") == "collected"
-                  and monitor_matches_run)
+                  and monitor_matches_run
+                  and process_cleanup.get("ok") is True)
+    requested_window_s = window.get("requested_seconds")
+    observed_window_s = window.get("observed_seconds")
+    natural_exit = (window.get("natural_exit_observed") is True
+                    or (window.get("exit_observed") is True
+                        and window.get("stopped_after_window") is not True
+                        and isinstance(requested_window_s, (int, float))
+                        and isinstance(observed_window_s, (int, float))
+                        and observed_window_s < requested_window_s))
+    target_closed_cleanly = (window.get("stopped_after_window") is True
+                             or natural_exit)
     debug_window_ok = (
         debug_run.get("requested") is True
         and debug_run.get("attempted") is True
         and debug_run.get("status") == "completed"
         and window.get("ok") is True
         and window.get("status") == "completed"
-        and window.get("stopped_after_window") is True
+        and target_closed_cleanly
         and window.get("exit_observed") is True
         and str((window.get("final_state") or {}).get("isDebugging", "")).lower()
             == "false"
@@ -1110,7 +1122,8 @@ def dbg_findings(mode_root: Path, *, sha: str = "",
         "native_unpack_applies": (not managed),
         "method": ("dotnet_analyze (managed IL) + windbg dumps"
                    if managed else
-                   "x64dbg memory-execute BP unpack (native)"),
+                   "x64dbg memory-execute BP for packed native samples; "
+                   "entry-point observation otherwise"),
     }
 
     findings: dict = {
@@ -1125,6 +1138,8 @@ def dbg_findings(mode_root: Path, *, sha: str = "",
             "requested_seconds": window.get("requested_seconds"),
             "observed_seconds": window.get("observed_seconds"),
             "exit_observed": window.get("exit_observed"),
+            "natural_exit_observed": natural_exit,
+            "completion_reason": window.get("completion_reason"),
             "stopped_after_window": window.get("stopped_after_window"),
             "final_state": window.get("final_state"),
             "monitor_status": monitor.get("status"),
@@ -1137,6 +1152,13 @@ def dbg_findings(mode_root: Path, *, sha: str = "",
                               if monitor_ok else None),
             "related_process_ids": (monitor_summary.get("related_process_ids")
                                     if monitor_ok else []),
+            "active_sample_processes_before_cleanup": (
+                monitor_summary.get("active_sample_processes")
+                if monitor_ok else []),
+            "process_cleanup_status": process_cleanup.get("status"),
+            "process_cleanup_ok": process_cleanup.get("ok"),
+            "terminated_process_ids": process_cleanup.get(
+                "terminated_process_ids") or [],
             "scope": monitor_summary.get("scope") if monitor_ok else None,
         },
         "unpack": {},
@@ -1169,9 +1191,10 @@ def dbg_findings(mode_root: Path, *, sha: str = "",
             "a .NET assembly has no native OEP to recover, so the x64dbg "
             "memory-execute-bp unpack does not apply by design. The debug "
             "section's evidence is the dotnet_analyse IL/metadata read plus "
-            "any windbg memory dump, not an OEP.")
+            "any windbg memory dump, not an OEP. Debugger availability or "
+            "execution alone does not establish malicious intent.")
         return _frame("dbg", sha, ok=True,
-                      verdict=_verdict(SUSPICIOUS, "medium", basis),
+                      verdict=_verdict(UNKNOWN, "low", basis),
                       findings=findings, evidence_used=used,
                       limitations=limitations)
 
@@ -1181,7 +1204,8 @@ def dbg_findings(mode_root: Path, *, sha: str = "",
     # Keep that mode eligible in the composite and report the absent dump as a
     # limitation instead of treating the entire producer as absent.
     unpack_ok = bool(up.get("ok"))
-    producer_ok = bool(unpack_ok or debug_window_ok)
+    producer_ok = bool((unpack_ok or debug_window_ok) and monitor_ok
+                       and monitor_summary.get("target_observed") is True)
     oep = up.get("oep")
     dump = up.get("dump_path")
     parse = up.get("dump_parse") or {}
@@ -1201,10 +1225,14 @@ def dbg_findings(mode_root: Path, *, sha: str = "",
         limitations.append(
             "the debugger ran but produced no usable dump: "
             f"{str(up.get('error'))[:160] if up.get('error') else 'no OEP'}")
-        level, conf = SUSPICIOUS, "low"
-    else:
-        # a successful unpack raises confidence in any static conclusion
-        level, conf = SUSPICIOUS, "medium"
+    # A debugger route, a packer hint, an unpacked image, or proof that the
+    # target executed describes analysis coverage. None of those facts alone
+    # establishes malicious intent. The deep-stage assessment and other
+    # behavior-specific findings remain separate inputs to the composite.
+    limitations.append(
+        "debugger and process observations describe execution coverage; "
+        "they do not independently establish malicious intent")
+    level, conf = UNKNOWN, "low"
 
     # packed_signal is a route hint, and the section it names is evidence
     ps = agent.get("packed_signal") or {}

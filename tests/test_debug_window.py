@@ -66,3 +66,31 @@ def test_bounded_debug_window_requires_a_loaded_target(monkeypatch):
     assert result["reason_code"] == "no_debug_target"
     assert client.run_calls == 0
     assert client.stop_calls == 0
+
+
+def test_natural_target_exit_completes_the_observation_window(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(debug_loops.time, "monotonic", lambda: now[0])
+
+    def fake_sleep(seconds):
+        now[0] += seconds
+
+    monkeypatch.setattr(debug_loops.time, "sleep", fake_sleep)
+
+    class ExitingClient(FakeX64Dbg):
+        def get_state(self):
+            if self.run_calls:
+                self.debugging = False
+                self.running = False
+            return super().get_state()
+
+    client = ExitingClient()
+    result = debug_loops.run_debug_window(client, seconds=30, poll_s=1)
+
+    assert result["ok"] is True
+    assert result["status"] == "completed"
+    assert result["natural_exit_observed"] is True
+    assert result["completion_reason"] == "target_exited"
+    assert result["stopped_after_window"] is False
+    assert result["observed_seconds"] < result["requested_seconds"]
+    assert client.stop_calls == 0

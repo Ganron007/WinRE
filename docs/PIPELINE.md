@@ -18,7 +18,7 @@ overwrite evidence produced by another capability.
 |---|---|---|---|
 | `--mode static` | Fixed deterministic checklist; zero LLM calls | None | `static/` |
 | `--mode agentic` | LangGraph tool loop and configured judgment role | None | `agentic/` |
-| `--mode agentic --agentic-dbg` | Agentic | x64dbg OEP/unpack probe, followed by a bounded 30-second target run with ETW process observation | `dbg/` |
+| `--mode agentic --agentic-dbg` | Agentic | Entry-point or packed-file OEP probe; bounded x64dbg execution with ETW observation and scoped process cleanup | `dbg/` |
 | `--mode agentic --dynamic` | Agentic | Gated detonation after the static stages | `dynamic/` |
 
 The engine defaults to `agentic`; detonation and debugger execution are
@@ -115,22 +115,30 @@ writes to the `dynamic/` section:
 python -m winre.pipeline "C:\samples\sample.exe" --driver remote --mode agentic --dynamic --max-seconds 150
 ```
 
-Run debugger-assisted analysis from its own verified restore. The agent can
-launch or resume the target under x64dbg. WinRE probes the entry point or
-unpack OEP, continues the target for up to 30 seconds, then stops it before
-closing the independent ETW process-start/stop trace. This is an
-execution-consuming pass. The observer can correlate the target and its child
-processes but does not cover file, registry, network, or memory activity:
+Run debugger-assisted analysis from its own verified restore and an active
+interactive FlareVM desktop session (the x64dbg mode needs the logged-in GUI).
+WinRE creates a hash-checked, run-local copy for x64dbg so a self-deleting
+sample cannot erase the staged source used by later analysis tools. For ordinary
+native files, x64dbg pauses at the entry point; a positive packer signal routes
+to the memory-execute OEP/unpack probe. WinRE continues the target for up to 30
+seconds, closes the debugger, then uses the independent ETW trace to identify
+any target or descendant processes still active. Cleanup checks each process
+ID, image name, and creation time before terminating it. The pass is
+execution-consuming. ETW observes process lifecycles only; it does not cover
+file, registry, network, or memory activity. Debugger availability, process
+observation, and successful unpacking describe coverage; they do not by
+themselves establish malicious intent:
 
 ```powershell
 python -m winre.pipeline "C:\samples\sample.exe" --driver remote --mode agentic --agentic-dbg
 ```
 
-A completed debugger window remains a valid debugger finding when an ordinary
-unpacked program never hits the OEP breakpoint. The mode records the missing
-dump as a limitation, keeps the debugger result in the composite, and reports
-the ETW observation separately. A failed or incomplete debugger window is not
-treated as completed evidence.
+A completed debugger window remains a valid debugger finding when no unpacked
+dump is produced, provided ETW observed the target and confirmed cleanup. The
+report records the missing dump as a limitation and keeps the execution
+observation separate. Missing target observation, incomplete ETW collection,
+or unconfirmed process cleanup keeps the debugger mode out of the composite
+and the quality audit red.
 
 Do not combine `--dynamic` and `--agentic-dbg` in one pipeline invocation;
 they have separate pack roots and execution paths. Each execution-consuming
