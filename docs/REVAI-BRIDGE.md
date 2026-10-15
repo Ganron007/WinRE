@@ -120,8 +120,7 @@ the machine that runs the driver process:
 **Same key or different keys — both are first-class.** Same model/endpoint on
 both sides is expected; whether the API key is shared is the operator's choice:
 
-- **Same key** (simplest): put the same value in both surfaces, or map it at
-  the spawn site (§5).
+- **Same key**: configure the same value independently in both surfaces.
 - **Different keys** (independent quotas/rotation): keep each key in its own
   surface; WinRE traffic uses the WinRE key only.
 
@@ -163,47 +162,26 @@ export WINRE_ENV=/etc/winre.env     # file holding the 4 lines
 
 ## 5. If the driver box also has RevAI config
 
-When the box that runs the WinRE driver already resolves an LLM configuration
-(e.g. a RevAI install), WinRE still imports nothing implicitly: map the values
-into `WINRE_LLM_*` at the **spawn site** — the process that launches the
-driver. Substitute your own variable names on the right-hand side.
+Maintain two independent configurations on that host: RevAI's `llm.env` and
+WinRE's own env file (§3.1), or their respective process exports. The RevAI
+bridge resolves only `WINRE_LLM_*` settings and removes `REVAI_LLM_*` values
+from the WinRE child environment. A missing WinRE key is reported rather than
+filled from RevAI. This applies to ordinary agentic, debugger and detonation
+modes; deterministic static mode makes no LLM calls.
 
-**Same key for both projects** (simplest):
-
-```bash
-export WINRE_LLM_BASE_URL="$REVAI_LLM_BASE_URL"
-export WINRE_LLM_MODEL="$REVAI_LLM_MODEL"
-export WINRE_LLM_API_KEY="$REVAI_LLM_API_KEY"
-export WINRE_LLM_REASONING="$REVAI_LLM_REASONING"
-cd /opt/winre
-python3 -m winre.pipeline <sample> --driver remote --mode agentic
-```
-
-**Different keys per project** (independent rotation/quotas): reuse the
-endpoint/model mapping, but source the key from WinRE's own surface (§3.1):
+When updating a Linux driver from an operator's Windows checkout, sync the
+package and LLM fields separately. Preserve that driver's native `FLARE_*`,
+SSH key paths, gateway settings and execution gates. After securely transferring
+the operator env file to a private location on the driver, run:
 
 ```bash
-export WINRE_LLM_BASE_URL="$REVAI_LLM_BASE_URL"
-export WINRE_LLM_MODEL="$REVAI_LLM_MODEL"
-export WINRE_LLM_REASONING="$REVAI_LLM_REASONING"
-export WINRE_LLM_API_KEY="$WINRE_KEY"   # the WinRE key - not RevAI's
-cd /opt/winre
-python3 -m winre.pipeline <sample> --driver remote --mode agentic
+python3 ops/sync_llm_config.py /secure/operator-winre.env /opt/winre/.env
 ```
 
-Warning: never map `$REVAI_LLM_API_KEY` into `WINRE_LLM_API_KEY` when the
-projects use separate keys — that silently routes WinRE traffic onto the
-RevAI key.
-
-Notes:
-
-- The mapping happens wherever the driver process is spawned. Today that is
-  typically the operator host with a local WinRE checkout; installing the
-  WinRE package on the RevAI VM (any Linux host with SSH to the FlareVM)
-  works the same way — package + the 4 variables (or a `WINRE_ENV` file),
-  nothing else.
-- WinRE's side of the contract is only: *the 4 variables must be present in
-  the driver process*. There is no implicit import of RevAI config.
+The destination must already contain that host's transport settings. The helper
+replaces only `WINRE_LLM_*` entries, removes stale role pins absent from the new
+source, creates a backup (mode 600 on Unix), and prints no values. It does not copy RevAI
+settings or operator-host SSH paths. The FlareVM receives no LLM env file.
 
 ## 6. What each mode needs (driver box / VM)
 
@@ -240,7 +218,7 @@ python3 -m winre.pipeline <local-sample-path> --driver remote --mode agentic --d
 | `WINRE_LLM_API_KEY not set for remote endpoint` in deep META | variables not in the driver process env | wire §4/§5; re-check the spawn environment |
 | `agent error: Connection error` | driver box cannot reach the endpoint | DNS/NAT/internet on the **driver box** (never the VM) |
 | Deep source `deterministic_fallback` with a key configured | endpoint returned an error or timed out | test §7; check provider status |
-| RevAI works, WinRE agentic falls back | RevAI config not translated | apply §5 at the spawn site |
+| RevAI works, WinRE agentic falls back | WinRE's independent settings are missing or its endpoint failed | check WinRE's own env file and driver connectivity (§5) |
 | Keys present on the VM | leftover from testing phase | delete `C:\WinRE\.env` (and from the snapshot, then re-snapshot) |
 
 ## 9. Artifacts RevAI consumes

@@ -938,15 +938,12 @@ def _truncate(s: str, n: int) -> str:
 def _ctx_budget_chars() -> int:
     """Chars we may feed the LLM, derived from the model context window.
 
-    The configured model supports 1M tokens (WINRE_LLM_CONTEXT_TOKENS).
-    Do not starve the interpreter: ~3.6 chars/token, 30% reserved for the
-    system prompt, history and the final answer.
+    Use the configured window, capped by the provider's published limit.
+    This is an estimate at ~3.6 chars/token, with 30% reserved for the
+    system prompt, planner history and the final answer.
     """
-    try:
-        toks = int(os.environ.get("WINRE_LLM_CONTEXT_TOKENS", "1000000"))
-    except ValueError:
-        toks = 1000000
-    return max(200_000, int(toks * 3.6 * 0.7))
+    from winre.llm_client import context_window_tokens
+    return max(1, int(context_window_tokens() * 3.6 * 0.7))
 
 
 def _quick_brief(quick: dict | None) -> str:
@@ -1333,6 +1330,7 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
     from langgraph.prebuilt import create_react_agent
     from langchain_core.tools import StructuredTool
     from langchain_core.messages import HumanMessage
+    from winre import llm_client
 
     cfg = remote_driver.flare_cfg()
     registry = ToolRegistry(sample_name, sha, cfg, mode=mode,
@@ -1549,7 +1547,11 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
             # full-context policy: send as much of the raw tool result as the
             # model window allows (was a hard 2000-char cap)
             payload = json.dumps(result, default=str)
-            remaining = max(20_000, budget_chars - int(state.get("chars") or 0))
+            remaining = max(0, budget_chars - int(state.get("chars") or 0))
+            if not remaining:
+                return ("[BUDGET] evidence context exhausted; the full tool result "
+                        "is preserved in the run artifacts. Submit your final "
+                        "answer from the evidence already supplied.")
             cap = min(240_000, remaining)
             sent = _truncate(payload, cap)
             state["chars"] = int(state.get("chars") or 0) + len(sent)
@@ -1767,7 +1769,8 @@ process observer closes. Do not start another sample session.
     llm_roles = _llm_roles()
     _mk = lambda role: ChatOpenAI(          # noqa: E731 - one-line factory
         model=llm_roles[role], api_key=api_key or "none",
-        base_url=api_url, temperature=0.0, max_tokens=_max_out)
+        base_url=api_url, temperature=0.0,
+        **llm_client.chat_openai_options(_max_out, api_url))
     llm = _mk("planner")        # tool selection / investigation
     judge = _mk("judgment")     # verdict + finalize pass
     system_prompt = f"""You are an agentic malware reverse-engineering assistant on a Windows

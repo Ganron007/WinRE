@@ -71,10 +71,10 @@ negotiation with the VM. On import, `winre/envfile.py` loads *that box's*
 WINRE_LLM_BASE_URL=https://<your-provider>/v1
 WINRE_LLM_MODEL=<model-name-your-provider-exposes>
 WINRE_LLM_API_KEY=<key>
-WINRE_LLM_REASONING=high
+WINRE_LLM_REASONING=high          # mapped to the configured provider's supported reasoning control
 WINRE_VT_API_KEY=<virustotal-key>   # hash-only triage (optional)
-WINRE_LLM_CONTEXT_TOKENS=1000000     # model window - evidence budget (default)
-WINRE_LLM_MAX_OUTPUT_TOKENS=32768    # assistant output cap (default)
+WINRE_LLM_CONTEXT_TOKENS=1000000     # generic context default; provider limits clamp the effective budget
+WINRE_LLM_MAX_OUTPUT_TOKENS=32768    # assistant output cap (default; clamped to the provider/model limit)
 # optional role pins (blank = use WINRE_LLM_MODEL for that role)
 #WINRE_LLM_PLANNER_MODEL=            # agent tool loop
 #WINRE_LLM_VERDICT_MODEL=            # final judge (verdict + finalize pass)

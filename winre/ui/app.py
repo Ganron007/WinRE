@@ -1296,6 +1296,7 @@ def create_app() -> "Flask":
         """Config state (read-only; secrets masked, never shown)."""
         import os as _os
         from winre import envfile as _env  # noqa: F401  (ensures .env loaded)
+        from winre import llm_client as _llm
         from winre import snapshot_gate as _sg
         env_path = Path(_os.environ.get(
             "WINRE_ENV", str(REPO / ".env")))
@@ -1316,10 +1317,9 @@ def create_app() -> "Flask":
                 "model": _llm_default_model(),
                 "roles": _llm_roles_view(),
                 "reasoning": _os.environ.get("WINRE_LLM_REASONING", ""),
-                "context_tokens": _os.environ.get(
-                    "WINRE_LLM_CONTEXT_TOKENS", "1000000"),
-                "max_output_tokens": _os.environ.get(
-                    "WINRE_LLM_MAX_OUTPUT_TOKENS", "32768"),
+                "context_tokens": _llm.context_window_tokens(),
+                "max_output_tokens": _llm.max_output_tokens(_os.environ.get(
+                    "WINRE_LLM_MAX_OUTPUT_TOKENS", "32768")),
                 "key_set": bool(_os.environ.get("WINRE_LLM_API_KEY")),
             },
             "gate": {

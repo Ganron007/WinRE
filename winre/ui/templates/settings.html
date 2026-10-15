@@ -44,8 +44,8 @@
         <tr><td class="mono">WINRE_LLM_PLANNER_MODEL</td><td class="mono">{{ (cfg.llm.roles.raw or {}).get('WINRE_LLM_PLANNER_MODEL') or '— (defaults to WINRE_LLM_MODEL)' }}</td></tr>
         <tr><td class="mono">WINRE_LLM_VERDICT_MODEL</td><td class="mono">{{ (cfg.llm.roles.raw or {}).get('WINRE_LLM_VERDICT_MODEL') or '— (defaults to WINRE_LLM_MODEL)' }}</td></tr>
         <tr><td class="mono">WINRE_LLM_REASONING</td><td class="mono">{{ cfg.llm.reasoning or '—' }}</td></tr>
-        <tr><td class="mono">WINRE_LLM_CONTEXT_TOKENS</td><td class="mono">{{ cfg.llm.context_tokens }}</td></tr>
-        <tr><td class="mono">WINRE_LLM_MAX_OUTPUT_TOKENS</td><td class="mono">{{ cfg.llm.max_output_tokens }}</td></tr>
+        <tr><td class="mono">WINRE_LLM_CONTEXT_TOKENS (effective)</td><td class="mono">{{ cfg.llm.context_tokens }}</td></tr>
+        <tr><td class="mono">WINRE_LLM_MAX_OUTPUT_TOKENS (effective)</td><td class="mono">{{ cfg.llm.max_output_tokens }}</td></tr>
         <tr><td class="mono">WINRE_LLM_API_KEY</td><td>{% if cfg.llm.key_set %}
           <span class="badge up">set (masked)</span>{% else %}<span class="badge warn">not set</span>{% endif %}</td></tr>
       </tbody></table></div>

@@ -36,6 +36,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from typing import Any
 
 from .envfile import load_dotenv  # noqa: F401  (ensures .env is loaded)
@@ -108,6 +109,38 @@ class LLMError(RuntimeError):
     """Raised when the LLM is unreachable or returns a bad response."""
 
 
+def _is_agnes_endpoint(base_url: str | None = None) -> bool:
+    """Whether the configured base URL is Agnes AI's documented API host."""
+    try:
+        return urlsplit(base_url or BASE_URL).hostname == "apihub.agnes-ai.com"
+    except ValueError:
+        return False
+
+
+def max_output_tokens(value: int | str, base_url: str | None = None) -> int:
+    """Keep Agnes Chat Completions output requests within its documented cap."""
+    try:
+        tokens = int(value)
+    except (TypeError, ValueError):
+        tokens = 32768
+    if _is_agnes_endpoint(base_url):
+        return min(65536, max(1, tokens))
+    return tokens
+
+
+def context_window_tokens(value: int | str | None = None,
+                          base_url: str | None = None) -> int:
+    """Effective context window for evidence budgeting, including provider cap."""
+    configured = (os.environ.get("WINRE_LLM_CONTEXT_TOKENS", "1000000")
+                  if value is None else value)
+    try:
+        tokens = max(1, int(configured))
+    except (TypeError, ValueError):
+        tokens = 1000000
+    # Use the conservative decimal interpretation of the documented 512K.
+    return min(tokens, 512000) if _is_agnes_endpoint(base_url) else tokens
+
+
 def _post(path: str, payload: dict, timeout: int = 120) -> dict:
     url = BASE_URL.rstrip("/") + path
     data = json.dumps(payload).encode("utf-8")
@@ -124,17 +157,34 @@ def _post(path: str, payload: dict, timeout: int = 120) -> dict:
         raise LLMError(f"LLM returned non-JSON: {e}") from e
 
 
-def _reasoning_field() -> dict:
-    """Map WINRE_LLM_REASONING to the provider field if set.
+def _reasoning_field(base_url: str | None = None) -> dict:
+    """Map configured reasoning to the selected provider's documented field.
 
-    OpenAI-compatible APIs accept either `reasoning_effort`
-    (low/medium/high) or a `reasoning_level`-style field. We send
-    `reasoning_effort` only when a value is configured and the field is
-    supported; otherwise omit (provider default applies).
+    Agnes exposes Thinking mode through ``chat_template_kwargs`` and does not
+    document a numeric/string effort field. Other configured OpenAI-compatible
+    providers retain the existing ``reasoning_effort`` behavior.
     """
+    if _is_agnes_endpoint(base_url):
+        if REASONING in ("low", "medium", "high", "max"):
+            return {"chat_template_kwargs": {"enable_thinking": True}}
+        if REASONING in ("disabled", "none", "off"):
+            return {"chat_template_kwargs": {"enable_thinking": False}}
+        return {}
     if REASONING in ("low", "medium", "high", "max"):
         return {"reasoning_effort": REASONING}
     return {}
+
+
+def chat_openai_options(max_tokens: int, base_url: str | None = None) -> dict:
+    """LangChain options that retain the documented provider fields on the wire."""
+    if not _is_agnes_endpoint(base_url):
+        return {"max_tokens": max_tokens}
+    # ChatOpenAI renames its max_tokens option to max_completion_tokens.
+    # Leave that option unset and merge the supported field at the SDK layer.
+    return {"extra_body": {
+        "max_tokens": max_output_tokens(max_tokens, base_url),
+        **_reasoning_field(base_url),
+    }}
 
 
 def chat(messages: list[dict[str, str]], *, model: str | None = None,
@@ -145,7 +195,7 @@ def chat(messages: list[dict[str, str]], *, model: str | None = None,
         "model": m,
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": max_tokens,
+        "max_tokens": max_output_tokens(max_tokens),
     }
     payload.update(_reasoning_field())
     out = _post("/chat/completions", payload, timeout=timeout)

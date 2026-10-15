@@ -48,8 +48,8 @@ Snapshot-gate config:
 | `WINRE_HYPERVISOR` | `vmware` or `vbox` (report-only; does not enable restore) |
 | `WINRE_VM_PATH` | VM path shown in gate status (report-only) |
 | `WINRE_SNAPSHOT` | snapshot name shown in gate status (report-only) |
-| `WINRE_LLM_CONTEXT_TOKENS` | model context window (default `1000000`) - sizes the evidence budget sent to the LLM |
-| `WINRE_LLM_MAX_OUTPUT_TOKENS` | assistant output cap (default `32768`) |
+| `WINRE_LLM_CONTEXT_TOKENS` | model context window (generic default `1000000`); provider-specific published limits clamp the effective window used to estimate the evidence budget, with 30% reserved for prompts, history and output |
+| `WINRE_LLM_MAX_OUTPUT_TOKENS` | assistant output cap (default `32768`); clamped to the configured provider/model's published output limit where supported |
 | `WINRE_VT_API_KEY` | VirusTotal **hash-only** triage on the control plane (optional; only the SHA256 is sent) |
 
 Smoke-check connectivity:

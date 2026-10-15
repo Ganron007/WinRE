@@ -5,8 +5,9 @@ Reads KEY=VAL lines from a .env file (gitignored) into os.environ, WITHOUT
 overwriting real environment variables (env wins — lets an operator override
 per-run without touching the file). Also strips surrounding quotes.
 
-Location: the .env sits next to this package (repo root: C:\\WinRE\\.env on
-the VM, <repo>\\.env on the control plane). Set WINRE_ENV to override.
+Location: the .env sits at the driver-host repo root (the operator's checkout
+or /opt/winre/.env on a Linux control plane). FlareVM stores no LLM config.
+Set WINRE_ENV to override the driver-host path.
 """
 from __future__ import annotations
 
