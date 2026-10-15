@@ -78,10 +78,10 @@ def _parse_csv(path: Path, max_rows: int = 3_000_000) -> list[dict]:
 def build_procmon_report(dyn_dir: Path) -> dict:
     csv_path = dyn_dir / "procmon.csv"
     if not csv_path.is_file():
-        return {"ok": False, "error": "no procmon.csv"}
+        return {"status": "missing", "ok": False, "error": "no procmon.csv"}
     rows = _parse_csv(csv_path)
     if not rows:
-        return {"ok": False, "error": "procmon.csv empty"}
+        return {"status": "error", "ok": False, "error": "procmon.csv empty"}
 
     persistence: dict[str, dict] = {}
     drops: list[str] = []
@@ -150,6 +150,12 @@ def build_procmon_report(dyn_dir: Path) -> dict:
             w.writerow(e)
 
     report = {
+        # Keep the shared summary contract intact: the guest summary uses
+        # `status=ok`, and UI/manifest consumers gate on this field. This
+        # host-side enrichment overwrites procmon_summary.json after transfer,
+        # so omitting status here made a successfully parsed capture look
+        # unavailable in the finalized pack.
+        "status": "ok",
         "ok": True,
         "rows_scanned": len(rows),
         "persistence": persistence,
