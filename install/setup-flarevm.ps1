@@ -651,6 +651,8 @@ if ($CheckMode) {
         Set-NetIPInterface -InterfaceIndex $ifIndex -AddressFamily IPv4 `
             -AutomaticMetric Disabled -InterfaceMetric 5 -Forwarding Disabled `
             -ErrorAction Stop
+        Set-NetIPInterface -InterfaceIndex $ifIndex -AddressFamily IPv6 `
+            -Forwarding Disabled -ErrorAction Stop
         # Some FlareVM images disable the Windows DNS Client service. Its
         # protected service ACL can reject Set-Service even for an elevated
         # administrator. Stage the supported service startup and per-interface
@@ -694,6 +696,13 @@ if ($CheckMode) {
             Warn "DNS Client is $($dnsClientService.State) ($($dnsClientService.StartMode)); .43 resolver and automatic startup are staged; reboot required"
         }
         $ruleSpecs = @(
+            # The simulator contract is IPv4-only. IPv4 peer ranges do not
+            # constrain IPv6 link-local peers, multicast, or a later IPv6 route.
+            # Block IPv6 on all interfaces without disabling the Windows stack.
+            # Windows 10's NetSecurity provider rejects ::/0. The two /1
+            # prefixes cover the same complete IPv6 address space.
+            @{ Name = "$networkRulePrefix - block IPv6 Inbound"; Direction = "Inbound"; Action = "Block"; RemoteAddress = @("::/1", "8000::/1"); Protocol = "Any" },
+            @{ Name = "$networkRulePrefix - block IPv6 Outbound"; Direction = "Outbound"; Action = "Block"; RemoteAddress = @("::/1", "8000::/1"); Protocol = "Any" },
             @{ Name = "$networkRulePrefix - outbound to gateway"; Direction = "Outbound"; Action = "Allow"; RemoteAddress = $AnalysisGatewayAddress; Protocol = "Any" },
             @{ Name = "$networkRulePrefix - DHCP outbound"; Direction = "Outbound"; Action = "Allow"; Protocol = "UDP"; LocalPort = "68"; RemotePort = "67"; RemoteAddress = "LocalSubnet" },
             @{ Name = "$networkRulePrefix - DHCP inbound"; Direction = "Inbound"; Action = "Allow"; Protocol = "UDP"; LocalPort = "68"; RemotePort = "67"; RemoteAddress = "LocalSubnet" },
@@ -774,6 +783,7 @@ if ($CheckMode) {
         Ok "network policy: $ifAlias ($($guestAddress.IPAddress)/24), gateway/DNS $AnalysisGatewayAddress, forwarding disabled"
         Ok "firewall: only gateway $AnalysisGatewayAddress is exempt from VMnet2 peer blocks; other peer traffic blocked both ways"
         Ok "firewall: all effective profiles enabled with local rule merge; inbound default blocked, routed outbound permitted to no-forward gateway"
+        Ok "firewall: IPv6 blocked in both directions on all interfaces (IPv4-only simulator)"
         if ($BlockedPeerAddresses.Count) { Ok "firewall: explicitly blocked peer(s) $($BlockedPeerAddresses -join ', ')" }
     } catch {
         Fail "isolated analysis network configuration failed: $($_.Exception.Message)"

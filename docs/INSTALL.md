@@ -117,7 +117,8 @@ host; configure `WINRE_GATEWAY_HOST`, `WINRE_GATEWAY_USER`, and
 `setup-flarevm.ps1` (or `ops/reapply_after_revert.ps1`) on Flare. The guest
 setup persists `.43` as its gateway and DNS, blocks inbound traffic by default,
 allows routed outbound packets to the gateway, blocks all other on-link VMnet2
-peers (including `.41` and the workstation host), and restricts SSH/x64dbg
+  IPv4 peers (including `.41` and the workstation host), blocks IPv6 in both
+  directions on all guest interfaces, and restricts SSH/x64dbg
 inbound access to `.43`. Direct host-to-Flare access is blocked; all VM
 administration and source synchronization pass through the gateway.
 REMnux captures those packets and never forwards them to its NAT interface. The

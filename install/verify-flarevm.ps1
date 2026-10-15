@@ -441,6 +441,30 @@ $standardPolicy = if (Test-Path -LiteralPath $standardProfilePath) {
 if (-not $standardPolicy -or $standardPolicy.EnableFirewall -ne 1) { $policyFailures += "StandardProfile" }
 if ($policyFailures.Count -eq 0) { Ok "persistent policy enables firewall and local-rule merge for all profiles" }
 else { Fail "firewall policy registry settings missing or incorrect: $($policyFailures -join ', ') (rerun setup-flarevm.ps1)" }
+
+# Check effective filters, not merely a matching display name. Disabled,
+# wrong-direction or port-scoped rules must not certify IPv6 isolation.
+$ipv6Failures = @()
+foreach ($direction in @("Inbound", "Outbound")) {
+    $name = "WinRE isolated analysis network - block IPv6 $direction"
+    $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -DisplayName $name -ErrorAction SilentlyContinue)
+    if ($rules.Count -ne 1) { $ipv6Failures += $direction; continue }
+    $rule = $rules[0]
+    $address = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue
+    $port = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue
+    $interface = Get-NetFirewallInterfaceFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue
+    if ($rule.Enabled -ne "True" -or $rule.Action -ne "Block" -or
+        $rule.Direction -ne $direction -or [string]$rule.Profile -ne "Any" -or
+        $address.RemoteAddress -notcontains "::/1" -or
+        $address.RemoteAddress -notcontains "8000::/1" -or
+        $address.LocalAddress -notcontains "Any" -or
+        $port.Protocol -ne "Any" -or $port.LocalPort -notcontains "Any" -or
+        $port.RemotePort -notcontains "Any" -or $interface.InterfaceAlias -notcontains "Any") {
+        $ipv6Failures += $direction
+    }
+}
+if ($ipv6Failures.Count -eq 0) { Ok "IPv6 blocked in both directions on all interfaces (IPv4-only simulator)" }
+else { Fail "IPv6 isolation missing or ineffective: $($ipv6Failures -join ', ') (rerun setup-flarevm.ps1)" }
 if ($analysisAddress) {
     $octets = $analysisGateway.Split('.')
     $prefix = ($octets[0..2] -join '.') + '.'
@@ -486,6 +510,10 @@ if ($analysisAddress) {
         -AddressFamily IPv4 -ErrorAction SilentlyContinue
     if ($ipInterface -and $ipInterface.Forwarding -eq "Disabled") { Ok "guest IPv4 forwarding disabled" }
     else { Fail "guest IPv4 forwarding must be disabled on the analysis interface" }
+    $ipv6Interface = Get-NetIPInterface -InterfaceIndex $analysisAddress.InterfaceIndex `
+        -AddressFamily IPv6 -ErrorAction SilentlyContinue
+    if ($ipv6Interface -and $ipv6Interface.Forwarding -eq "Disabled") { Ok "guest IPv6 forwarding disabled" }
+    else { Fail "guest IPv6 forwarding must be disabled on the analysis interface" }
 }
 foreach ($peer in $BlockedPeerAddresses) {
     $peerRules = @()
