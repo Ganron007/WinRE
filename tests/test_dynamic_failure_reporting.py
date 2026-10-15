@@ -16,7 +16,8 @@ def test_local_detonation_skips_zip_but_ssh_job_keeps_archive_support():
     assert 'job_args.append("-SkipZip")' in local_runner
     assert "[switch]$SkipZip" in job
     assert 'if ($SkipZip)' in job
-    assert 'Log "DONE ok=true zip_skipped=true"' in job
+    assert 'Log ("DONE ok={0} zip_skipped=true" -f $jobOk)' in job
+    assert 'Log ("DONE ok={0} zip_size={1}" -f $jobOk, $zipSize)' in job
     assert "ZipFile]::Open($ZipPath, 'Create')" in job
     assert "CompressionLevel]::Fastest" in job
     assert 'Log "META.job.json written"' in job

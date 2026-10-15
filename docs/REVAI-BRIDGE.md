@@ -76,7 +76,8 @@ per-driver keypair.
 WINRE_LLM_BASE_URL=https://<your-provider>/v1
 WINRE_LLM_MODEL=<model-name-your-provider-exposes>
 WINRE_LLM_API_KEY=<key>
-WINRE_LLM_REASONING=high          # low|medium|high|max — optional
+WINRE_LLM_REASONING=enabled       # Agnes endpoint: enabled|disabled; effort labels are on aliases
+WINRE_LLM_TIMEOUT=600             # per-request HTTP timeout in seconds (default 120)
 ```
 
 Two **optional** role pins split the two
@@ -138,7 +139,7 @@ Any of these is sufficient — pick one per deployment:
 export WINRE_LLM_BASE_URL="https://<your-provider>/v1"
 export WINRE_LLM_MODEL="<model>"
 export WINRE_LLM_API_KEY="<key>"
-export WINRE_LLM_REASONING="high"
+export WINRE_LLM_REASONING="enabled"
 cd /opt/winre          # parent directory of the winre/ package
 python3 -m winre.pipeline <sample> --driver remote --mode agentic
 ```

@@ -388,6 +388,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--sample-name", default="sample.exe")
+    ap.add_argument(
+        "--skip-network", action="store_true",
+        help="leave network.json untouched when capture is delegated off-host",
+    )
     args = ap.parse_args()
     out = Path(args.out_dir)
     fr = summarize_frida(out / "frida_trace.jsonl")
@@ -396,9 +400,18 @@ def main() -> int:
     (out / "frida_summary.json").write_text(json.dumps(fr, indent=2), encoding="utf-8")
     pm = summarize_procmon(out / "procmon.csv", args.sample_name)
     (out / "procmon_summary.json").write_text(json.dumps(pm, indent=2), encoding="utf-8")
-    net = summarize_network(out / "network_raw")
-    (out / "network.json").write_text(json.dumps(net, indent=2), encoding="utf-8")
-    print(json.dumps({"frida": fr.get("status"), "procmon": pm.get("status"), "network": net.get("status")}))
+    result = {"frida": fr.get("status"), "procmon": pm.get("status")}
+    if args.skip_network:
+        # Gateway mode writes an explicit delegated-capture marker before this
+        # summarizer runs. Do not replace that evidence with a guest-local
+        # network summary; Frida and Procmon are still summarized here.
+        result["network"] = "preserved"
+    else:
+        net = summarize_network(out / "network_raw")
+        (out / "network.json").write_text(
+            json.dumps(net, indent=2), encoding="utf-8")
+        result["network"] = net.get("status")
+    print(json.dumps(result))
     return 0
 
 

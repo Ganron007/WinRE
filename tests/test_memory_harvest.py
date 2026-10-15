@@ -103,9 +103,9 @@ def _job():
 
 def test_two_dump_passes_are_scheduled():
     j = _job()
-    assert '"early", "late"' in j
     assert "$pdProcs" in j
-    assert "$memDir\\sample_$tag" in j, "dumps are named per pass"
+    assert 'Join-Path $memDir "sample_early"' in j
+    assert 'Join-Path $memDir "sample_late"' in j
     # the old single-dump-at-70% behaviour must be gone
     assert "sample_full" not in j, (
         "a single dump at 70% of the cap always lands after the sample exits")
@@ -118,6 +118,20 @@ def test_the_early_pass_is_short_enough_to_survive_a_gate_stop():
     j = _job()
     assert "$delayEarly = 0" in j
     assert "* 0.02" not in j
+    # The immediate pass must start ProcDump itself. A child PowerShell adds
+    # startup latency precisely where a fast-exiting process leaves no margin.
+    assert 'Start-Process -FilePath $ProcdumpExe -ArgumentList $earlyArgs' in j
+    early_start = j.index('$earlyOut = Join-Path $memDir "sample_early"')
+    early_end = j.index("# The late pass intentionally", early_start)
+    assert "Start-Process powershell" not in j[early_start:early_end]
+    assert '"procdump[early] launched immediately' in j
+
+
+def test_early_procdump_preserves_collector_diagnostics():
+    j = _job()
+    assert '-RedirectStandardOutput "$earlyOut.stdout.txt"' in j
+    assert '-RedirectStandardError "$earlyOut.stderr.txt"' in j
+    assert 'WARN: procdump[early] launch failed' in j
 
 
 def test_the_late_pass_is_still_the_70_percent_of_cap():
@@ -125,6 +139,9 @@ def test_the_late_pass_is_still_the_70_percent_of_cap():
     assert "$delayLate = [Math]::Max($delayEarly + 5, " \
            "[Math]::Floor($MaxSeconds * 0.7))" in j
     assert "0.7" in j
+    assert "if (-not (Get-Process -Id `$TargetPid" in j
+    assert "Start-Sleep -Milliseconds 250" in j
+    assert "$pdWaitTimeout" in j
 
 
 def test_each_pass_logs_its_own_outcome():
@@ -140,7 +157,9 @@ def test_stale_dumps_are_cleaned_with_the_new_filter():
     assert 'sample_full*.dmp' not in j
 
 
-@pytest.mark.parametrize("tag", ["early", "late"])
-def test_both_filenames_are_reachable_from_the_loop(tag):
+def test_both_dump_outputs_use_distinct_paths():
     j = _job()
-    assert f'$memDir\\sample_$tag' in j
+    assert '"$earlyOut.stdout.txt"' in j
+    assert '"$earlyOut.stderr.txt"' in j
+    assert 'Join-Path $memDir "sample_late"' in j
+    assert "$lateOut" in j[j.index('$lateOut ='):j.index('if ($lateProc)', j.index('$lateOut ='))]

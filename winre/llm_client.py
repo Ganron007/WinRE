@@ -7,7 +7,9 @@ Reads configuration from the environment, which is loaded from <repo>/.env
     WINRE_LLM_BASE_URL   base URL (any OpenAI-compatible endpoint)
     WINRE_LLM_API_KEY    API key (leave blank for a local unauthed server)
     WINRE_LLM_MODEL      model name (whatever your provider exposes)
-    WINRE_LLM_REASONING  reasoning effort: low|medium|high|max (optional)
+    WINRE_LLM_REASONING  provider-specific reasoning control (optional);
+                         Agnes: enabled|disabled (legacy effort labels mean on)
+    WINRE_LLM_TIMEOUT    per-request timeout in seconds (default 120)
 
 Role separation (RevAI handoff 2026-09-27, item 7) — OPTIONAL pins, each
 defaulting to WINRE_LLM_MODEL:
@@ -45,6 +47,8 @@ BASE_URL = os.environ.get("WINRE_LLM_BASE_URL", "http://127.0.0.1:8000/v1")
 API_KEY = os.environ.get("WINRE_LLM_API_KEY", "")
 MODEL = os.environ.get("WINRE_LLM_MODEL", "local")
 REASONING = os.environ.get("WINRE_LLM_REASONING", "").strip().lower()
+DEFAULT_REQUEST_TIMEOUT = 120
+MAX_REQUEST_TIMEOUT = 3600
 
 #: role name -> env var that pins it (the default role is deliberately unpinned)
 ROLE_VARS = {
@@ -141,6 +145,25 @@ def context_window_tokens(value: int | str | None = None,
     return min(tokens, 512000) if _is_agnes_endpoint(base_url) else tokens
 
 
+def request_timeout(value: int | str | None = None) -> int:
+    """Resolve the configured LLM request timeout (1..3600 seconds).
+
+    Read the environment at call time so runtime overrides behave like the
+    other settings. Invalid values fail clearly instead of silently falling
+    back to a shorter timeout that can truncate a slow Thinking-mode call.
+    """
+    raw = os.environ.get("WINRE_LLM_TIMEOUT") if value is None else value
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_REQUEST_TIMEOUT
+    try:
+        seconds = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("WINRE_LLM_TIMEOUT must be an integer from 1 to 3600") from exc
+    if not 1 <= seconds <= MAX_REQUEST_TIMEOUT:
+        raise ValueError("WINRE_LLM_TIMEOUT must be an integer from 1 to 3600")
+    return seconds
+
+
 def _post(path: str, payload: dict, timeout: int = 120) -> dict:
     url = BASE_URL.rstrip("/") + path
     data = json.dumps(payload).encode("utf-8")
@@ -158,17 +181,20 @@ def _post(path: str, payload: dict, timeout: int = 120) -> dict:
 
 
 def _reasoning_field(base_url: str | None = None) -> dict:
-    """Map configured reasoning to the selected provider's documented field.
+    """Map the configured provider-specific setting to its documented field.
 
     Agnes exposes Thinking mode through ``chat_template_kwargs`` and does not
-    document a numeric/string effort field. Other configured OpenAI-compatible
-    providers retain the existing ``reasoning_effort`` behavior.
+    document a numeric/string effort field on Chat Completions. Use enabled or
+    disabled for Agnes; legacy effort labels remain aliases for enabled.
+    Other configured OpenAI-compatible providers retain ``reasoning_effort``.
     """
     if _is_agnes_endpoint(base_url):
-        if REASONING in ("low", "medium", "high", "max"):
+        if REASONING in ("enabled", "on", "true", "low", "medium", "high", "max"):
             return {"chat_template_kwargs": {"enable_thinking": True}}
-        if REASONING in ("disabled", "none", "off"):
+        if REASONING in ("disabled", "none", "off", "false"):
             return {"chat_template_kwargs": {"enable_thinking": False}}
+        return {}
+    if REASONING in ("enabled", "on", "true"):
         return {}
     if REASONING in ("low", "medium", "high", "max"):
         return {"reasoning_effort": REASONING}
@@ -178,17 +204,21 @@ def _reasoning_field(base_url: str | None = None) -> dict:
 def chat_openai_options(max_tokens: int, base_url: str | None = None) -> dict:
     """LangChain options that retain the documented provider fields on the wire."""
     if not _is_agnes_endpoint(base_url):
-        return {"max_tokens": max_tokens}
+        return {"max_tokens": max_tokens, "timeout": request_timeout()}
     # ChatOpenAI renames its max_tokens option to max_completion_tokens.
     # Leave that option unset and merge the supported field at the SDK layer.
-    return {"extra_body": {
-        "max_tokens": max_output_tokens(max_tokens, base_url),
-        **_reasoning_field(base_url),
-    }}
+    return {
+        "timeout": request_timeout(),
+        "extra_body": {
+            "max_tokens": max_output_tokens(max_tokens, base_url),
+            **_reasoning_field(base_url),
+        },
+    }
 
 
 def chat(messages: list[dict[str, str]], *, model: str | None = None,
-         timeout: int = 120, temperature: float = 0.1, max_tokens: int = 4000) -> str:
+         timeout: int | None = None, temperature: float = 0.1,
+         max_tokens: int = 4000) -> str:
     """One chat completion. Returns the assistant text."""
     m = model or MODEL
     payload: dict[str, Any] = {
@@ -198,7 +228,7 @@ def chat(messages: list[dict[str, str]], *, model: str | None = None,
         "max_tokens": max_output_tokens(max_tokens),
     }
     payload.update(_reasoning_field())
-    out = _post("/chat/completions", payload, timeout=timeout)
+    out = _post("/chat/completions", payload, timeout=request_timeout(timeout))
     try:
         return out["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as e:
@@ -253,7 +283,7 @@ def available_roles() -> dict:
 
 
 def complete(prompt: str, *, system: str | None = None,
-             temperature: float = 0.1, timeout: int = 120) -> str:
+             temperature: float = 0.1, timeout: int | None = None) -> str:
     """Convenience: one-shot completion from a prompt string."""
     messages = []
     if system:

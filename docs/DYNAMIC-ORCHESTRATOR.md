@@ -86,6 +86,12 @@ off-box gateway mode: Flare's default route and DNS point to REMnux, FakeNet is
 disabled for that run, and the driver starts a run-scoped `dumpcap` capture on
 the private interface. The pcap is returned under
 `dynamic/off_box/network_raw/` and is covered by the artifact manifest.
+Gateway mode delegates network interpretation only: the guest still runs
+`summarize_dynamic.py --skip-network` to produce its Frida and Procmon summaries
+without replacing the delegated `network.json` marker. A missing summarizer
+produces explicit partial summaries and marks the job incomplete; an execution
+error or non-`ok` Frida/Procmon summary also marks the job incomplete instead of
+silently omitting those behavior artifacts.
 
 The paired setup scripts make the intended lab topology persistent:
 `RevAI/install/setup-remnux.sh` installs the REMnux gateway policy whenever

@@ -239,6 +239,13 @@ def test_host_side_flare_sync_and_reapply_use_the_revai_gateway_jump():
         assert "-W %h:%p" in src
 
 
+def test_reapply_prunes_stale_guest_source_after_snapshot_restore():
+    src = _src("ops/reapply_after_revert.ps1")
+    assert 'sync_to_flare.ps1") -Prune' in src, (
+        "GOLD restore must mirror the local source tree, not leave removed "
+        "guest modules behind")
+
+
 def test_verify_does_not_warn_about_census_required_items():
     """Nothing we own may be WARN-only: that is how a 0 FAIL lied."""
     src = _src("install/verify-flarevm.ps1")
@@ -338,6 +345,15 @@ def test_sync_prune_cannot_target_anything_outside_the_mirrored_trees():
         "a backslash can never appear in $_.Name, so that exclude never fired "
         "and the gitignored handoff notes were shipped to the VM")
     assert "docs\\internal" in src, "nested local-only paths must be removed"
+
+
+def test_sync_excludes_run_scoped_pytest_scratch_trees():
+    src = _src("ops/sync_to_flare.ps1")
+    assert '$_.Name -notlike ".pytest-*"' in src, (
+        "run-specific pytest basetemp directories must never enter the guest "
+        "source mirror or deployment manifest")
+    assert '$_.Name -like ".pytest-*"' in src, (
+        "nested pytest scratch directories must also be stripped recursively")
 
 
 def test_shipped_env_template_cannot_weaken_the_gate():

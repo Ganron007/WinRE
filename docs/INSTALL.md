@@ -24,7 +24,7 @@ python -m pip install pefile psutil "setuptools<81"
 
 # LLM config (any OpenAI-compatible provider)
 copy .env.template .env
-notepad .env        # WINRE_LLM_BASE_URL / _MODEL / _API_KEY / _REASONING
+notepad .env        # WINRE_LLM_BASE_URL / _MODEL / _API_KEY / _REASONING / _TIMEOUT
 ```
 
 Point `FLARE_*` environment variables at your VM (or put them in `.env`):
@@ -50,6 +50,7 @@ Snapshot-gate config:
 | `WINRE_SNAPSHOT` | snapshot name shown in gate status (report-only) |
 | `WINRE_LLM_CONTEXT_TOKENS` | model context window (generic default `1000000`); provider-specific published limits clamp the effective window used to estimate the evidence budget, with 30% reserved for prompts, history and output |
 | `WINRE_LLM_MAX_OUTPUT_TOKENS` | assistant output cap (default `32768`); clamped to the configured provider/model's published output limit where supported |
+| `WINRE_LLM_TIMEOUT` | per-request HTTP timeout in seconds (default `120`); use a longer value such as `600` for slower Thinking-enabled responses |
 | `WINRE_VT_API_KEY` | VirusTotal **hash-only** triage on the control plane (optional; only the SHA256 is sent) |
 
 Smoke-check connectivity:

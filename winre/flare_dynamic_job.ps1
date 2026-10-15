@@ -277,34 +277,66 @@ try {
   # at 70% of the cap therefore always lands after the sample has left -
   # b108's own log is "procdump scheduled in 105s" -> "procdump done (0 dmp)",
   # and it had dropped b.wnry/c.wnry and exited inside the first second.
-  #   early ~2s : up, first payload already dropped. This is the pass that
-  #               survives an early gate stop, now the common case.
-  #   late  70% : unchanged, for samples that stay up for the whole window and
-  #               unpack in memory later.
+  #   early immediate : launch ProcDump directly when the PID is observed.
+  #               Do not add a PowerShell child between detection and attach:
+  #               fast-exiting samples can be gone before that child starts.
+  #   late  70% : retain a delayed pass for samples that stay up for the whole
+  #               window and unpack in memory later.
   $pdProcs = @()
+  $delayLate = 0
   if ($samplePid -and (Test-Path $ProcdumpExe)) {
     New-Item -ItemType Directory -Force -Path $memDir | Out-Null
-# 1s, not "2% of the cap". b103 exited 1.8s after spawn and a 3s early
-    # dump missed it completely (0 dumps for a sample that had just run 878
-    # API calls). The pid is observed within ~500ms of spawn, so a 1s delay
-    # still catches a process that lives over a second, and the late pass
-    # remains for everything that does.
-# 0: as soon as the pid is observed. b103's lifetime VARIED between runs
-    # (1.8s then 1.3s) and it beat a 1s dump both times. A fixed delay cannot
-    # win that race; the only move that can is to fire the moment we have a
-    # pid, which the wait loop gives us within ~500ms of spawn.
     $delayEarly = 0
     $delayLate = [Math]::Max($delayEarly + 5, [Math]::Floor($MaxSeconds * 0.7))
-    foreach ($tag in @("early", "late")) {
-      $delay = if ($tag -eq "early") { $delayEarly } else { $delayLate }
-      $outFile = "$memDir\sample_$tag"
-      $dumpCmd = "Start-Sleep -Seconds $delay; & '$ProcdumpExe' -accepteula -ma $samplePid '$outFile'; exit"
-      $p = Start-Process powershell -ArgumentList @(
-        "-NoProfile", "-Command", $dumpCmd
-      ) -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
-      if ($p) { $pdProcs += $p }
-      Log ("procdump[$tag] scheduled in {0}s pid={1}" -f $delay, $samplePid)
+    $earlyOut = Join-Path $memDir "sample_early"
+    try {
+      # Start ProcDump itself, not a second PowerShell that will start it later.
+      # Keep both streams as evidence if the process has already exited or
+      # access to the target PID is denied.
+      $earlyArgs = '-accepteula -ma {0} "{1}"' -f [int]$samplePid, $earlyOut
+      $earlyProc = Start-Process -FilePath $ProcdumpExe -ArgumentList $earlyArgs `
+        -PassThru -WindowStyle Hidden -ErrorAction Stop `
+        -RedirectStandardOutput "$earlyOut.stdout.txt" `
+        -RedirectStandardError "$earlyOut.stderr.txt"
+      if ($earlyProc) { $pdProcs += $earlyProc }
+      Log ("procdump[early] launched immediately pid={0} collector_pid={1}" -f $samplePid, $earlyProc.Id)
+    } catch {
+      Log ("WARN: procdump[early] launch failed pid={0}: {1}" -f $samplePid, $_.Exception.Message)
     }
+
+    # The late pass intentionally sleeps in a separate process so the main
+    # collector remains free to monitor Frida and the behavior gate. The
+    # helper exits as soon as the target PID disappears, so a fast-exiting
+    # sample does not hold up post-processing until the late deadline.
+    $lateOut = Join-Path $memDir "sample_late"
+    $lateScript = Join-Path $OutDir "_delayed_procdump.ps1"
+    @"
+param([int]`$TargetPid, [string]`$ProcdumpPath, [string]`$DumpPath, [int]`$DelaySeconds)
+`$deadline = (Get-Date).AddSeconds(`$DelaySeconds)
+while ((Get-Date) -lt `$deadline) {
+  if (-not (Get-Process -Id `$TargetPid -ErrorAction SilentlyContinue)) { exit 0 }
+  Start-Sleep -Milliseconds 250
+}
+if (-not (Get-Process -Id `$TargetPid -ErrorAction SilentlyContinue)) { exit 0 }
+& `$ProcdumpPath -accepteula -ma `$TargetPid `$DumpPath
+exit `$LASTEXITCODE
+"@ | Set-Content $lateScript -Encoding ASCII
+    $lateArgs = '"{0}" -TargetPid {1} -ProcdumpPath "{2}" -DumpPath "{3}" -DelaySeconds {4}' -f `
+      $lateScript, [int]$samplePid, $ProcdumpExe, $lateOut, [int]$delayLate
+    $lateProc = Start-Process -FilePath "powershell.exe" -ArgumentList @(
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $lateArgs
+    ) -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue `
+      -RedirectStandardOutput "$lateOut.stdout.txt" `
+      -RedirectStandardError "$lateOut.stderr.txt"
+    if ($lateProc) { $pdProcs += $lateProc }
+    Log ("procdump[late] scheduled in {0}s pid={1}" -f $delayLate, $samplePid)
+    if (-not $lateProc) { Log "WARN: procdump[late] scheduler did not start" }
+  } elseif ($samplePid) {
+    Log ("WARN: procdump executable missing: {0}" -f $ProcdumpExe)
+  }
+
+  if (-not $samplePid) {
+    Log "WARN: no sample PID for in-run memory capture"
   }
 
   # ---- KB: Early-Bird/APC-aware capture + sandbox input jiggle -----------
@@ -478,9 +510,31 @@ Log ("window effective={0}s reason={1} adaptive={2} gate={3}/{4}" -f $windowEffe
 # nearly done - bounded wait, then report how many dumps landed. Both passes
 # are reported separately: a behaviour-gated window stops early, so the EARLY
 # pass is the one that survives and logging only a combined 0 would hide it.
+$lateRemaining = 0
+if ($delayLate -gt 0 -and $windowEffective -ne $null) {
+  $lateRemaining = [Math]::Max(0, $delayLate - [double]$windowEffective)
+} elseif ($delayLate -gt 0) {
+  $lateRemaining = $delayLate
+}
+$pdWaitTimeout = [int][Math]::Max(90, [Math]::Ceiling($lateRemaining + 60))
 foreach ($d in $pdProcs) {
-  if (-not ($d | Wait-Process -Timeout 90 -ErrorAction SilentlyContinue)) {
+  if (-not ($d | Wait-Process -Timeout $pdWaitTimeout -ErrorAction SilentlyContinue)) {
+    Log ("WARN: procdump collector pid={0} exceeded {1}s wait; terminating" -f $d.Id, $pdWaitTimeout)
     Stop-Process -Id $d.Id -Force -ErrorAction SilentlyContinue
+  }
+}
+foreach ($collector in @(
+  @{ tag = "early"; process = $earlyProc },
+  @{ tag = "late"; process = $lateProc }
+)) {
+  $collectorProcess = $collector.process
+  if ($collectorProcess) {
+    try {
+      $collectorProcess.Refresh()
+      if ($collectorProcess.HasExited) {
+        Log ("procdump[{0}] collector exit={1}" -f $collector.tag, $collectorProcess.ExitCode)
+      }
+    } catch { Log ("WARN: procdump[{0}] collector status unavailable: {1}" -f $collector.tag, $_.Exception.Message) }
   }
 }
 foreach ($tag in @("early", "late")) {
@@ -560,19 +614,48 @@ Log ("new_processes={0}" -f $newProcs.Count)
 
 $summaryPy = Join-Path $PSScriptRoot "summarize_dynamic.py"
 if (-not (Test-Path $summaryPy)) { $summaryPy = "C:\tools\reveng-dynamic\summarize_dynamic.py" }
+$summaryErrors = @()
 if ($NetworkMode -eq "gateway") {
   @{ status = "delegated_external"; collector = "REMnux gateway capture";
      reason = "guest FakeNet is disabled in gateway mode" } |
     ConvertTo-Json -Depth 3 | Set-Content (Join-Path $OutDir "network.json") -Encoding UTF8
-} elseif (Test-Path $summaryPy) {
+}
+if (Test-Path $summaryPy) {
   Log "running summarize_dynamic.py"
-  & $Python $summaryPy --out-dir $OutDir --sample-name "$SampleProcName.exe" 2>&1 | ForEach-Object { Log "$_" }
+  $summaryArgs = @("--out-dir", $OutDir, "--sample-name", "$SampleProcName.exe")
+  if ($NetworkMode -eq "gateway") { $summaryArgs += "--skip-network" }
+  & $Python $summaryPy @summaryArgs 2>&1 | ForEach-Object { Log "$_" }
+  if ($LASTEXITCODE -ne 0) {
+    $summaryErrors += "summarize_dynamic.py exited $LASTEXITCODE"
+  }
 } else {
   Log "WARN: summarize_dynamic.py missing"
-  @{ status = "partial"; reason = "summarizer missing" } | ConvertTo-Json | Set-Content (Join-Path $OutDir "network.json")
-  @{ status = "partial"; reason = "summarizer missing" } | ConvertTo-Json | Set-Content (Join-Path $OutDir "procmon_summary.json")
-  @{ status = "partial"; reason = "summarizer missing" } | ConvertTo-Json | Set-Content (Join-Path $OutDir "frida_summary.json")
+  $summaryErrors += "summarize_dynamic.py missing"
+  if ($NetworkMode -ne "gateway") {
+    @{ status = "partial"; reason = "summarizer missing" } | ConvertTo-Json | Set-Content (Join-Path $OutDir "network.json") -Encoding UTF8
+  }
 }
+foreach ($summaryName in @("frida_summary.json", "procmon_summary.json")) {
+  $summaryPath = Join-Path $OutDir $summaryName
+  if (-not (Test-Path $summaryPath)) {
+    $summaryErrors += "$summaryName missing"
+    @{ status = "partial"; reason = "derived summary missing" } |
+      ConvertTo-Json | Set-Content $summaryPath -Encoding UTF8
+    continue
+  }
+  try {
+    $summaryRecord = Get-Content $summaryPath -Raw | ConvertFrom-Json
+    if ($summaryRecord.status -ne "ok") {
+      $summaryErrors += "$summaryName status=$($summaryRecord.status)"
+    }
+  } catch {
+    $summaryErrors += "$summaryName unreadable: $($_.Exception.Message)"
+  }
+}
+$summaryError = if ($summaryErrors.Count -gt 0) {
+  $summaryErrors -join "; "
+} else { $null }
+if ($summaryError) { Log "ERROR: required dynamic summaries incomplete: $summaryError" }
 
 if (Test-Path $trace) {
   Log "copying Frida trace into output"
@@ -617,9 +700,17 @@ if (Test-Path $trace) {
     $detonation_err = $reason
   }
   Log "writing META.job.json"
+  $jobErrorParts = @()
+  if ($detonation_err) { $jobErrorParts += $detonation_err }
+  if ($summaryError) { $jobErrorParts += $summaryError }
+  $jobError = if ($jobErrorParts.Count -gt 0) {
+    $jobErrorParts -join "; "
+  } else { $null }
+  $jobOk = (-not $jobError)
   @{
-    ok = (-not $detonation_err)
-    error = $detonation_err
+    ok = $jobOk
+    error = $jobError
+    summary_error = $summaryError
     sha256 = $Sha256
   max_seconds = $MaxSeconds
   window = @{
@@ -658,7 +749,7 @@ Log "META.job.json written"
 
 if ($SkipZip) {
   Log "ZIP skipped: local caller collects the output directory directly"
-  Log "DONE ok=true zip_skipped=true"
+  Log ("DONE ok={0} zip_skipped=true" -f $jobOk)
 } else {
   # Drop huge PML from zip (CSV is enough); keep PML on disk for optional forensics
   $pmlZip = Join-Path $OutDir "procmon.pml"
@@ -689,7 +780,7 @@ if ($SkipZip) {
     $zip.Dispose()
   }
   $zipSize = (Get-Item $ZipPath).Length
-  Log ("DONE ok=true zip_size={0}" -f $zipSize)
+  Log ("DONE ok={0} zip_size={1}" -f $jobOk, $zipSize)
 }
 # Keep the local caller's copied log current through the terminal record.
 Copy-Item $LogFile (Join-Path $OutDir "job.log") -Force -ErrorAction SilentlyContinue

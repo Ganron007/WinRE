@@ -143,7 +143,11 @@ Write-Host "  VM reachable."
 Write-Host "`n--- 1. sync repo -> C:\WinRE ---"
 if ($SkipSync) { Write-Host "  [SKIP] -SkipSync" }
 else {
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "sync_to_flare.ps1")
+    # A GOLD restore is a source-tree restore too: prune stale files from the
+    # mirrored code trees so the guest cannot keep modules removed upstream.
+    # sync_to_flare scopes pruning to winre/tools/ops/install/docs/tests/assets;
+    # sample data, logs, credentials, and the clean marker are outside that scope.
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "sync_to_flare.ps1") -Prune
     if ($LASTEXITCODE -ne 0) { Write-Host "sync failed" -ForegroundColor Red; exit 1 }
 }
 

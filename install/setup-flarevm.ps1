@@ -862,6 +862,8 @@ $tmplBody = @"
 # WinRE control-plane LLM config (copy to .env on the CONTROL PLANE, never commit .env)
 WINRE_LLM_BASE_URL=
 WINRE_LLM_MODEL=
+# On the Agnes endpoint's Chat Completions API, use enabled/disabled;
+# effort labels are legacy on aliases.
 WINRE_LLM_REASONING=
 WINRE_LLM_API_KEY=
 "@

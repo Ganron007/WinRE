@@ -65,9 +65,12 @@ def test_the_job_records_detonation_reason():
     assert "detonation_ran = [bool]$samplePid" in j
 
 
-def test_the_job_still_reports_green_when_the_sample_ran():
+def test_job_success_requires_sample_and_usable_behavior_summaries():
     j = _job()
-    assert "ok = (-not $detonation_err)" in j
+    assert '$jobOk = (-not $jobError)' in j
+    assert 'summary_error = $summaryError' in j
+    assert 'if ($summaryRecord.status -ne "ok")' in j
+    assert 'ok = $jobOk' in j
 
 
 # --- the orchestrator must require an observed pid ------------------------
@@ -87,6 +90,47 @@ def test_no_pid_means_not_ok_even_with_healthy_procmon():
     """This is b105: everything else worked, nothing ran."""
     m = _meta(sample_pid=None, frida_events=0)
     assert orchestrator._finalize_ok(m) is False
+
+
+def test_failed_summary_means_not_ok_even_when_the_sample_ran(tmp_path):
+    trace = tmp_path / "failed-summary.jsonl"
+    trace.write_text('{"event":"observed"}\n', encoding="utf-8")
+    m = _meta(job_ok=False, error="frida_summary.json missing")
+    orchestrator._apply_detonation_verdict(m, trace=trace,
+                                          dyn_dir=trace.parent)
+    assert m["frida_events"] == 1
+    assert m["ok"] is False
+    assert orchestrator._finalize_ok(m) is False
+
+
+def test_job_record_failure_and_summary_error_reach_metadata():
+    m = _meta()
+    orchestrator._apply_job_record(m, {
+        "ok": False,
+        "error": "dynamic summaries incomplete",
+        "summary_error": "frida_summary.json missing",
+    })
+    assert m["job_ok"] is False
+    assert m["summary_error"] == "frida_summary.json missing"
+    assert m["error"] == "dynamic summaries incomplete"
+
+
+def test_collected_pack_revalidates_required_behavior_summaries(tmp_path):
+    m = _meta(job_ok=True)
+    (tmp_path / "frida_summary.json").write_text(
+        '{"status":"ok"}', encoding="utf-8")
+    orchestrator._validate_behavior_summaries(m, tmp_path)
+    assert m["job_ok"] is False
+    assert "procmon_summary.json missing" in m["summary_error"]
+
+
+def test_valid_collected_summaries_preserve_job_success(tmp_path):
+    m = _meta(job_ok=True)
+    for name in ("frida_summary.json", "procmon_summary.json"):
+        (tmp_path / name).write_text('{"status":"ok"}', encoding="utf-8")
+    orchestrator._validate_behavior_summaries(m, tmp_path)
+    assert m["job_ok"] is True
+    assert "summary_error" not in m
 
 
 def test_the_verdict_helper_names_the_failure(tmp_path):

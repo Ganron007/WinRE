@@ -564,6 +564,41 @@ def _detonation_ran(meta: dict) -> bool:
     return bool(meta.get("sample_pid"))
 
 
+def _apply_job_record(meta: dict, job_record: dict) -> None:
+    """Carry the guest job's collection result into the pipeline verdict."""
+    if isinstance(job_record.get("ok"), bool):
+        meta["job_ok"] = job_record["ok"]
+    if job_record.get("summary_error"):
+        meta["summary_error"] = job_record["summary_error"]
+    error = (job_record.get("error") or job_record.get("detonation_reason")
+             or job_record.get("summary_error"))
+    if error:
+        meta["error"] = error
+
+
+def _validate_behavior_summaries(meta: dict, dyn_dir: Path) -> None:
+    """Require transferred/locally produced summaries for core behavior evidence."""
+    issues: list[str] = []
+    for name in ("frida_summary.json", "procmon_summary.json"):
+        path = dyn_dir / name
+        if not path.is_file():
+            issues.append(f"{name} missing from collected artifacts")
+            continue
+        try:
+            record = json.loads(path.read_text(encoding="utf-8-sig"))
+        except Exception as exc:
+            issues.append(f"{name} unreadable: {exc}")
+            continue
+        if not isinstance(record, dict) or record.get("status") != "ok":
+            status = record.get("status") if isinstance(record, dict) else "invalid"
+            issues.append(f"{name} status={status}")
+    if issues:
+        summary_error = "; ".join(issues)
+        meta["job_ok"] = False
+        meta["summary_error"] = summary_error
+        meta["error"] = meta.get("error") or summary_error
+
+
 def _apply_detonation_verdict(meta: dict, *, trace, dyn_dir) -> None:
     # How the sample was launched is part of the evidence, not a log detail:
     # "rundll32" means the target was a DLL hosted by rundll32 with a chosen
@@ -613,6 +648,12 @@ def _apply_detonation_verdict(meta: dict, *, trace, dyn_dir) -> None:
             "out; returned evidence is partial and cannot support a complete "
             "dynamic assessment")
         return
+    if meta.get("job_ok") is False:
+        meta["ok"] = False
+        meta["note"] = (
+            meta.get("error") or meta.get("summary_error") or
+            "the dynamic job reported incomplete evidence collection")
+        return
     meta["ok"] = bool(n) or bool(meta.get("job_ok"))
     if not n:
         meta["note"] = (
@@ -623,7 +664,8 @@ def _apply_detonation_verdict(meta: dict, *, trace, dyn_dir) -> None:
 
 def _finalize_ok(meta: dict) -> bool:
     """The stage's ok flag; launch alone cannot clear a collection timeout."""
-    if not _detonation_ran(meta) or meta.get("job_timeout"):
+    if (not _detonation_ran(meta) or meta.get("job_timeout") or
+            meta.get("job_ok") is False):
         return False
     return bool(meta.get("frida_events")) or bool(meta.get("job_ok"))
 
@@ -986,6 +1028,7 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
     if job_meta_path.is_file():
         try:
             jm = json.loads(job_meta_path.read_text(encoding="utf-8-sig"))
+            _apply_job_record(meta, jm)
             meta["pe_sieve_ran"] = bool(jm.get("pe_sieve_ran"))
             meta["pe_sieve_pid"] = jm.get("pe_sieve_pid")
             meta["pe_sieve_rc"] = jm.get("pe_sieve_rc")
@@ -997,8 +1040,6 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
             # a reader needs that before interpreting a single line of it.
             meta["loader"] = jm.get("loader") or "direct"
             meta["loader_entry"] = jm.get("loader_entry")
-            if jm.get("detonation_reason"):
-                meta["error"] = jm.get("detonation_reason")
             # detonation-window telemetry (behaviour gate; RevAI item 9)
             meta["max_seconds"] = jm.get("max_seconds")
             if isinstance(jm.get("window"), dict):
@@ -1014,6 +1055,7 @@ def _run_local_windows(sha: str, sample: Path, dyn_dir: Path,
         except Exception:
             pass
 
+    _validate_behavior_summaries(meta, dyn_dir)
     trace = dyn_dir / "frida_trace.json"
     if not trace.is_file():
         trace = dyn_dir / "frida_trace.jsonl"
@@ -1462,6 +1504,7 @@ def run_dynamic(
                 job_meta = json.loads(
                     job_meta_path.read_text(encoding="utf-8-sig")
                 )
+                _apply_job_record(meta, job_meta)
                 meta["pe_sieve_ran"] = bool(job_meta.get("pe_sieve_ran"))
                 meta["pe_sieve_pid"] = job_meta.get("pe_sieve_pid")
                 meta["pe_sieve_rc"] = job_meta.get("pe_sieve_rc")
@@ -1471,8 +1514,6 @@ def run_dynamic(
                 # rundll32, so a reader needs this first)
                 meta["loader"] = job_meta.get("loader") or "direct"
                 meta["loader_entry"] = job_meta.get("loader_entry")
-                if job_meta.get("detonation_reason"):
-                    meta["error"] = job_meta.get("detonation_reason")
             except Exception:
                 pass
 
@@ -1488,6 +1529,7 @@ def run_dynamic(
             except Exception:
                 meta["frida_events"] = 0
 
+        _validate_behavior_summaries(meta, dyn_dir)
         meta["verdict_policy"] = {
             "static_yara_wins": True,
             "high_signal_yara": yara_lock.get("high_signal") or [],
@@ -1496,9 +1538,15 @@ def run_dynamic(
         # Success = artifacts landed (Frida and/or Procmon). SSH timeout after job
         # finished must not fail a complete pack.
         has_core = bool(meta.get("frida_events")) or (dyn_dir / "procmon.csv").is_file()
-        meta["ok"] = bool(meta.get("unzipped")) and has_core
+        meta["ok"] = (
+            bool(meta.get("unzipped")) and has_core and
+            meta.get("job_ok") is not False and not meta.get("job_timeout")
+        )
         if not meta["ok"] and not meta.get("error"):
-            meta["error"] = f"incomplete pack job_rc={jr.returncode} timeout={meta.get('job_timeout')}"
+            meta["error"] = (
+                meta.get("summary_error") or
+                f"incomplete pack job_rc={jr.returncode} timeout={meta.get('job_timeout')}"
+            )
         meta["elapsed_s"] = round(time.time() - t0, 1)
 
         # Best-effort remote wipe of sample dir contents (keep structure)

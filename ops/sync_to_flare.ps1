@@ -98,7 +98,11 @@ $Excludes = @(".git","__pycache__","logs","cache","local-runs","dist",".env","in
 
 Step "staging repo -> $Staging"
 New-Item -ItemType Directory -Force -Path $Staging | Out-Null
-Get-ChildItem -LiteralPath $Repo -Force | Where-Object { $_.Name -notin $Excludes } | ForEach-Object {
+# Pytest's --basetemp folders are commonly named `.pytest-*`. They contain
+# generated sample fixtures and must not be copied into the guest deployment.
+Get-ChildItem -LiteralPath $Repo -Force | Where-Object {
+    $_.Name -notin $Excludes -and $_.Name -notlike ".pytest-*"
+} | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $Staging $_.Name) -Recurse -Force
 }
 # strip any pycache left inside staged tree
@@ -108,7 +112,10 @@ Get-ChildItem -LiteralPath $Staging -Recurse -Directory -Filter "__pycache__" -E
 # winre/.pytest_cache survived the top-level prune and shipped to the VM, which
 # is how a cache directory came to sit inside the deployed tree at all.
 Get-ChildItem -LiteralPath $Staging -Recurse -Directory -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -in @(".pytest_cache", ".mypy_cache", ".ruff_cache") } |
+    Where-Object {
+        $_.Name -in @(".pytest_cache", ".mypy_cache", ".ruff_cache") -or
+        $_.Name -like ".pytest-*"
+    } |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 foreach ($nested in @("docs\internal")) {
     $np = Join-Path $Staging $nested

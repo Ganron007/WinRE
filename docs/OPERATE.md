@@ -41,8 +41,9 @@ start the console, open `http://127.0.0.1:5001`. From there: run the
 pipeline (agentic/static, optional agentic-dbg, optional dynamic), watch
 the live stage board, browse packs, rerun single stages, fire single
 tools, attest the snapshot gate. Dry-LLM defaults to **off** when the LLM
-endpoint answers (`/settings` shows reachability); it stays on when no
-LLM is configured so the spine never stalls on timeouts. MCP badges: x64dbg
+endpoint answers (`/settings` shows reachability); it stays on when no LLM is
+configured, so the deterministic pipeline remains usable. Configured LLM calls
+use `WINRE_LLM_TIMEOUT` (default 120 seconds). MCP badges: x64dbg
 is probed directly (`:9094` binds `0.0.0.0`, restricted by a Windows Firewall
 allow rule to `LocalSubnet` only), Malcat `:9009` and mcp-windbg `:9097` are
 localhost-bound on the VM and probed over SSH.
@@ -71,7 +72,8 @@ negotiation with the VM. On import, `winre/envfile.py` loads *that box's*
 WINRE_LLM_BASE_URL=https://<your-provider>/v1
 WINRE_LLM_MODEL=<model-name-your-provider-exposes>
 WINRE_LLM_API_KEY=<key>
-WINRE_LLM_REASONING=high          # mapped to the configured provider's supported reasoning control
+WINRE_LLM_REASONING=enabled       # on the Agnes endpoint; use disabled to turn Thinking off
+WINRE_LLM_TIMEOUT=600             # per-request timeout in seconds (default 120)
 WINRE_VT_API_KEY=<virustotal-key>   # hash-only triage (optional)
 WINRE_LLM_CONTEXT_TOKENS=1000000     # generic context default; provider limits clamp the effective budget
 WINRE_LLM_MAX_OUTPUT_TOKENS=32768    # assistant output cap (default; clamped to the provider/model limit)

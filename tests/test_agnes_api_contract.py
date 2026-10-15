@@ -9,12 +9,48 @@ from winre import llm_client
 def test_agnes_reasoning_uses_documented_chat_template_extension(monkeypatch):
     monkeypatch.setattr(llm_client, "BASE_URL", "https://apihub.agnes-ai.com/v1")
     monkeypatch.setattr(llm_client, "REASONING", "high")
+    monkeypatch.delenv("WINRE_LLM_TIMEOUT", raising=False)
 
     assert llm_client._reasoning_field() == {
         "chat_template_kwargs": {"enable_thinking": True},
     }
-    assert llm_client.chat_openai_options(4096) == {"extra_body": {
-        "max_tokens": 4096, "chat_template_kwargs": {"enable_thinking": True}}}
+    assert llm_client.chat_openai_options(4096) == {
+        "timeout": 120,
+        "extra_body": {
+            "max_tokens": 4096,
+            "chat_template_kwargs": {"enable_thinking": True},
+        },
+    }
+
+
+def test_request_timeout_is_configurable_and_validated(monkeypatch):
+    monkeypatch.delenv("WINRE_LLM_TIMEOUT", raising=False)
+    assert llm_client.request_timeout() == 120
+    monkeypatch.setenv("WINRE_LLM_TIMEOUT", "600")
+    assert llm_client.request_timeout() == 600
+    assert llm_client.chat_openai_options(4096)["timeout"] == 600
+    assert llm_client.request_timeout(45) == 45
+    for invalid in ("slow", "0", "3601"):
+        with pytest.raises(ValueError, match="WINRE_LLM_TIMEOUT"):
+            llm_client.request_timeout(invalid)
+
+
+@pytest.mark.parametrize("legacy_level", ["low", "medium", "high", "max"])
+def test_agnes_legacy_effort_levels_are_all_thinking_on_aliases(
+        monkeypatch, legacy_level):
+    monkeypatch.setattr(llm_client, "BASE_URL", "https://apihub.agnes-ai.com/v1")
+    monkeypatch.setattr(llm_client, "REASONING", legacy_level)
+    assert llm_client._reasoning_field() == {
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+
+
+def test_agnes_enabled_is_canonical_thinking_on_value(monkeypatch):
+    monkeypatch.setattr(llm_client, "BASE_URL", "https://apihub.agnes-ai.com/v1")
+    monkeypatch.setattr(llm_client, "REASONING", "enabled")
+    assert llm_client._reasoning_field() == {
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
 
 
 def test_agnes_disabled_reasoning_uses_supported_boolean(monkeypatch):
@@ -29,9 +65,13 @@ def test_agnes_disabled_reasoning_uses_supported_boolean(monkeypatch):
 def test_non_agnes_reasoning_contract_is_unchanged(monkeypatch):
     monkeypatch.setattr(llm_client, "BASE_URL", "https://provider.example/v1")
     monkeypatch.setattr(llm_client, "REASONING", "high")
+    monkeypatch.delenv("WINRE_LLM_TIMEOUT", raising=False)
 
     assert llm_client._reasoning_field() == {"reasoning_effort": "high"}
-    assert llm_client.chat_openai_options(4096) == {"max_tokens": 4096}
+    assert llm_client.chat_openai_options(4096) == {
+        "max_tokens": 4096, "timeout": 120}
+    monkeypatch.setattr(llm_client, "REASONING", "enabled")
+    assert llm_client._reasoning_field() == {}
 
 
 def test_agnes_output_cap_is_enforced_only_for_agnes(monkeypatch):
@@ -46,11 +86,16 @@ def test_agnes_output_cap_is_enforced_only_for_agnes(monkeypatch):
 def test_explicit_langchain_endpoint_controls_reasoning_field(monkeypatch):
     monkeypatch.setattr(llm_client, "BASE_URL", "https://provider.example/v1")
     monkeypatch.setattr(llm_client, "REASONING", "high")
+    monkeypatch.delenv("WINRE_LLM_TIMEOUT", raising=False)
 
     assert llm_client.chat_openai_options(
-        4096, "https://apihub.agnes-ai.com/v1") == {"extra_body": {
-            "max_tokens": 4096,
-            "chat_template_kwargs": {"enable_thinking": True}}}
+        4096, "https://apihub.agnes-ai.com/v1") == {
+            "timeout": 120,
+            "extra_body": {
+                "max_tokens": 4096,
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+        }
 
 
 def test_provider_context_limit_bounds_evidence_budget(monkeypatch):
@@ -75,7 +120,9 @@ def test_chat_request_uses_documented_payload(monkeypatch):
     monkeypatch.setattr(llm_client, "REASONING", "high")
     monkeypatch.setattr(llm_client, "MODEL", "configured-llm")
     monkeypatch.setattr(llm_client, "API_KEY", "test-key")
+    monkeypatch.setenv("WINRE_LLM_TIMEOUT", "600")
     requests = []
+    timeouts = []
 
     class Response:
         def __enter__(self):
@@ -89,11 +136,13 @@ def test_chat_request_uses_documented_payload(monkeypatch):
 
     def urlopen(request, timeout):
         requests.append(request)
+        timeouts.append(timeout)
         return Response()
 
     monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
     assert llm_client.chat([{"role": "user", "content": "probe"}],
                            max_tokens=100000) == "OK"
+    assert timeouts == [600]
     assert requests[0].full_url == "https://apihub.agnes-ai.com/v1/chat/completions"
     body = json.loads(requests[0].data)
     assert body["max_tokens"] == 65536
@@ -107,10 +156,13 @@ def test_langchain_serializes_documented_token_field(monkeypatch):
     ChatOpenAI = pytest.importorskip("langchain_openai").ChatOpenAI
     monkeypatch.setattr(llm_client, "BASE_URL", "https://apihub.agnes-ai.com/v1")
     monkeypatch.setattr(llm_client, "REASONING", "high")
+    monkeypatch.setenv("WINRE_LLM_TIMEOUT", "600")
     bodies = []
+    request_timeouts = []
 
     def handle(request):
         bodies.append(json.loads(request.content))
+        request_timeouts.append(request.extensions.get("timeout"))
         return httpx.Response(200, json={
             "id": "test", "object": "chat.completion", "created": 0,
             "model": "configured-llm",
@@ -130,6 +182,7 @@ def test_langchain_serializes_documented_token_field(monkeypatch):
         }}]).invoke("Contract probe")
 
     body = bodies[0]
+    assert request_timeouts[0]["read"] == 600
     assert body["max_tokens"] == 65536
     assert body["chat_template_kwargs"] == {"enable_thinking": True}
     assert body["tools"]
