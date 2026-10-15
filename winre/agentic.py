@@ -779,12 +779,14 @@ class ToolRegistry:
             r = debug_loops.agentic_unpack(self._dbg_sample(),
                                            xc=self._dbg_client())
             return {"ok": r.get("ok"), "oep": r.get("oep"),
+                    "entrypoint": r.get("entrypoint"),
                     "dump_path": r.get("dump_path"),
                     "comparison": r.get("comparison"),
                     "error": r.get("error"),
                     "method": r.get("method"),
                     "attempts": r.get("attempts"),
                     "oep_target": r.get("oep_target"),
+                     "evidence": r.get("evidence") or [],
                     "dump_kind": r.get("dump_kind"),
                     "dump_source": r.get("dump_source"),
                     "heap_region": r.get("heap_region"),
@@ -1072,6 +1074,28 @@ def _max_section_bpb(f: dict) -> tuple[str, float] | None:
     return best
 
 
+def _max_pe_section_bpb(pe: dict) -> tuple[str, float] | None:
+    """Return the highest PE-section entropy in bits per byte.
+
+    The PE parser reports Shannon entropy directly on the 0-8 scale. Keep
+    that separate from Malcat's ``layout`` values, which are scaled by 32.
+    Reject out-of-range values rather than guessing which unit a producer
+    used.
+    """
+    best: tuple[str, float] | None = None
+    for section in (pe.get("sections") or []):
+        if not isinstance(section, dict):
+            continue
+        entropy = section.get("entropy")
+        if (isinstance(entropy, bool)
+                or not isinstance(entropy, (int, float))
+                or not 0.0 <= entropy <= 8.0):
+            continue
+        if best is None or entropy > best[1]:
+            best = (str(section.get("name") or "?"), float(entropy))
+    return best
+
+
 def _packer_signal(quick: dict | None) -> dict | None:
     """Deterministic packer indicators from quick evidence (no tool calls).
 
@@ -1104,13 +1128,23 @@ def _packer_signal(quick: dict | None) -> dict | None:
     bpb = ent / _MALCAT_ENTROPY_SCALE if isinstance(ent, (int, float)) else None
     if bpb is not None and bpb >= _PACKED_ENTROPY_BPB:
         sig["entropy"] = round(bpb, 3)
-    # a single packed section outranks a diluted file average: it is the
-    # section, not the file, whose bytes we should not trust
-    sec = _max_section_bpb(f)
-    if sec is not None:
-        name, sb = sec
+    # A single packed section outranks a diluted file average. Both PE and
+    # Malcat report section entropy, but their units differ: pefile is already
+    # bits/byte while Malcat is x32. Normalize before comparing and retain the
+    # producer so later analysis can explain the route decision.
+    candidates: list[tuple[str, float, str]] = []
+    malcat_sec = _max_section_bpb(f)
+    if malcat_sec is not None:
+        candidates.append((*malcat_sec, "malcat_layout"))
+    pe_sec = _max_pe_section_bpb(ev.get("pe") or {})
+    if pe_sec is not None:
+        candidates.append((*pe_sec, "pe_sections"))
+    if candidates:
+        name, sb, source = max(candidates, key=lambda row: row[1])
         if sb >= _PACKED_SECTION_BPB:
-            sig["packed_section"] = {"name": name, "bits_per_byte": round(sb, 3)}
+            sig["packed_section"] = {
+                "name": name, "bits_per_byte": round(sb, 3), "source": source,
+            }
     an = mc.get("anomalies") or []
     if isinstance(an, list):
         ahits = [str(a.get("name")) for a in an if isinstance(a, dict)
@@ -1583,11 +1617,11 @@ process observer closes. Do not start another sample session.
         state["calls"] += 1
         state["seen"].add(json.dumps(("x64dbg_unpack", {}), sort_keys=True))
         unpack_prepass = {k: r.get(k) for k in
-                          ("ok", "oep", "dump_path", "comparison", "note",
+                          ("ok", "oep", "entrypoint", "dump_path", "comparison", "note",
                            "error", "method", "attempts", "diagnostics",
                            "oep_target", "dump_kind", "dump_source",
                            "heap_region", "dump_parse", "rebuild_hint",
-                           "imp_modes_tried", "artifact", "fallback_trace",
+                           "imp_modes_tried", "artifact", "evidence", "fallback_trace",
                            "fallback_summary")
                           if k in r}
     elif dynamic and not managed:

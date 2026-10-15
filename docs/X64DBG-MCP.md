@@ -72,8 +72,17 @@ WinRE `winre/mcp/x64dbg_client.py` wraps this HTTP — see [`SSH-CONTRACT.md`](S
 
 > **WinRE pipeline note (debug loops):** the deep unpack prepass runs
 > `oep_by_section → oep_by_esp` (explicit entry BP, stable-pause gate,
-> fresh-session retry, heap-OEP gate) and produces the artifact with
-> **pe-sieve `/imp` escalation `1 -> 3 -> 4 -> 5`** at the paused OEP (3/4/5 = documented "build the ImportTable from scratch from found IATs" R0/R1/R2) until the produced image parses with imports; `imp_modes_tried` is recorded in the dump evidence (savedata `DumpModule` stays the fallback). Managed (.NET) samples skip the native OEP/unpack path entirely (no native entry-point pause) - `dotnet_analyze` + `x64dbg_wpm_dump` + `windbg` are used instead, and the MCP ensure waits up to 90 s for the plugin to bind. The dynamic OEP/dump step
+> original-entry-point page excluded from the memory-execute range, candidate
+> address checked against the selected range, fresh-session retry, heap-OEP
+> gate). A paused address is only an OEP candidate: the selected-range and
+> heap/module checks must pass before a dump is attempted. The dump path tries
+> **pe-sieve `/imp` modes `1 -> 3 -> 4 -> 5`** (3/4/5 build the ImportTable
+> from discovered IATs, R0/R1/R2) and checks for a parseable image with imports;
+> x64dbg `DumpModule` remains the fallback, with parse and rebuild status
+> recorded in the evidence. A failed OEP probe produces no reconstructed
+> artifact. Managed (.NET) samples skip the native OEP/unpack path entirely;
+> `dotnet_analyze`, `x64dbg_wpm_dump`, and WinDbg are used instead, and MCP
+> startup waits up to 90 seconds for the plugin to bind. The dynamic OEP/dump step
 > (`orchestrator._x64dbg_oep_dump`) still uses `DumpModule` into
 > `dynamic/x64dbg/dump/`.
 

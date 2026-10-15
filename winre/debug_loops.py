@@ -13,8 +13,8 @@ the LangGraph agent and the dynamic phase can drive them reliably. Discipline
 
 Scenarios (each = one checklist item, test one-by-one):
     ep_break(sample)        LoadBinary -> run -> auto-EP break -> state   [1]
-    oep_by_section(sample)  UPX/unpack: mem-BP on original .text exec
-                            region -> run -> OEP break -> dump            [2]
+    oep_by_section(sample)  UPX/unpack: mem-BP on unpack-target pages beyond
+                            the original EP page -> candidate OEP -> dump   [2]
     wpm_dump(sample)        BP WriteProcessMemory -> run -> on hit, decode
                             x64 args (rcx,rdx,r8,r9), ReadMemory src buf,
                             dump it -> bounded hits                      [3]
@@ -707,15 +707,33 @@ def _pick_oep_target(sections: list[dict], base: int, rcx: int | None,
     return base + text_offset, 0x10000, "fallback"
 
 
+def _address_int(value: Any) -> int | None:
+    """Parse a debugger address without treating booleans as integers."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value, 0)
+        except ValueError:
+            try:
+                return int(value, 16)
+            except ValueError:
+                return None
+    return None
+
+
 def oep_by_section(sample: str, xc: X64DbgClient | None = None,
                    text_offset: int = 0x1000, max_wait_s: int = 90) -> dict:
     """Unpack OEP via MEMORY-EXECUTE breakpoint on the unpack section.
 
     Method (analyst-standard, verified on UPX x64): EP break, find the
     unpack-target section (UPX0: the RWX region the stub decompresses into),
-    set a memory-execute bp over it via raw `bpm start, size, x`, run.
-    The FIRST instruction fetch in unpacked code is the OEP by definition.
-    No stub-walking, no HW-BP DR-register dependence, no stack assumptions.
+    set a memory-execute bp over it via raw `bpmrange start, size, x`, run.
+    Exclude the page containing the original entry point so the stub's first
+    instruction cannot be mistaken for the unpacked OEP. A hit must be inside
+    the remaining target range and differ from the original entry point.
     """
     xc = xc or X64DbgClient()
     evidence: list[dict] = []
@@ -724,6 +742,11 @@ def oep_by_section(sample: str, xc: X64DbgClient | None = None,
     if not r.get("ok"):
         return r
     evidence.extend(r["evidence"])
+    entrypoint = _address_int(r.get("oep"))
+    if entrypoint is None:
+        return {"ok": False,
+                "error": "initial entry point unavailable; cannot prove a later OEP",
+                "evidence": evidence}
 
     base, sections = _module_base_and_sections(xc, stem)
     if base is None:
@@ -733,22 +756,63 @@ def oep_by_section(sample: str, xc: X64DbgClient | None = None,
     rcx = _parse_reg(_regs(xc), "rcx")
     target, tsize, why = _pick_oep_target(sections, base, rcx, text_offset)
     tsize = tsize or 0x10000
+    section_end = target + tsize
+    probe_ranges = [(target, tsize)]
+    excluded_page: dict | None = None
+    if target <= entrypoint < section_end:
+        page_start = entrypoint & ~0xFFF
+        page_end = page_start + 0x1000
+        probe_ranges = []
+        if target < page_start:
+            probe_ranges.append((target, page_start - target))
+        if page_end < section_end:
+            probe_ranges.append((page_end, section_end - page_end))
+        excluded_page = {"start": hex(page_start), "size": "0x1000"}
     evidence.append({"label": "oep_membp_target",
                      "target": hex(target), "size": hex(tsize),
                      "why": why, "rcx": hex(rcx) if rcx else None,
+                     "initial_entrypoint": hex(entrypoint),
+                     "entrypoint_page_excluded": excluded_page,
+                     "breakpoint_ranges": [{"start": hex(start),
+                                            "size": hex(size)}
+                                           for start, size in probe_ranges],
                      "sections": [{k: s[k] for k in ("start", "size", "perm", "name")}
                                   for s in sections[:10]]})
 
-    # memory-execute bp via raw debugger command (no HW-BP DR dependence)
-    cmd = f"bpm {hex(target)}, {hex(tsize)}, x"
-    cr = xc.execute_command(cmd)
-    registered = hex(target).lower() in _bp_text(xc).lower()
-    evidence.append({"label": "oep_membp_set", "cmd": cmd,
-                     "ok": bool(cr.get("ok")), "registered": registered})
-    if not registered:
+    if not probe_ranges:
         return {"ok": False,
-                "error": f"memory bp {hex(target)} not registered",
+                "error": "selected unpack section has no range outside the original entry-point page",
+                "entrypoint": hex(entrypoint),
+                "target": {"start": hex(target), "size": hex(tsize),
+                           "why": why},
                 "evidence": evidence}
+
+    # `bpm` accepts an address, restore flag, and access type; it does not
+    # accept a start/size range. Use x64dbg's range command so the arguments
+    # match the section interval selected above.
+    for bp_start, bp_size in probe_ranges:
+        cmd = f"bpmrange {hex(bp_start)}, {hex(bp_size)}, x"
+        cr = xc.execute_command(cmd)
+        bp_text = _bp_text(xc)
+        registered = hex(bp_start).lower() in bp_text.lower()
+        cr_result = cr.get("result") if isinstance(cr, dict) else None
+        cr_content = cr_result.get("content") if isinstance(cr_result, dict) else None
+        cr_text = (cr_content[0].get("text", "")
+                   if isinstance(cr_content, list) and cr_content
+                   and isinstance(cr_content[0], dict)
+                   else str(cr_result or (cr.get("error")
+                                          if isinstance(cr, dict) else "") or ""))
+        evidence.append({"label": "oep_membp_set", "cmd": cmd,
+                         "range": {"start": hex(bp_start),
+                                   "size": hex(bp_size)},
+                         "ok": bool(cr.get("ok")), "registered": registered,
+                         "command_result": cr_text[:300],
+                         "breakpoints": bp_text[:600]})
+        if not registered:
+            return {"ok": False,
+                    "error": f"memory bp range {hex(bp_start)} not registered",
+                    "entrypoint": hex(entrypoint),
+                    "evidence": evidence}
 
     xc.run()
     w = _await_pause(xc, max_wait_s)
@@ -761,10 +825,40 @@ def oep_by_section(sample: str, xc: X64DbgClient | None = None,
                 "diagnostics": _debugger_diagnostics(xc),
                 "evidence": evidence}
     rip = w["rip"]
+    if rip == entrypoint:
+        rejected = _pause_evidence(xc, "oep_rejected", rip)
+        rejected.update({
+            "reason": "breakpoint hit the original entry point",
+            "entrypoint": hex(entrypoint),
+        })
+        evidence.append(rejected)
+        return {"ok": False,
+                "error": "memory-execute breakpoint hit the original entry point; unpacked OEP not established",
+                "entrypoint": hex(entrypoint), "oep": hex(rip),
+                "evidence": evidence}
+    if not any(start <= rip < start + size
+               for start, size in probe_ranges):
+        rejected = _pause_evidence(xc, "oep_rejected", rip)
+        rejected.update({
+            "reason": "pause address is outside the selected probe ranges",
+            "entrypoint": hex(entrypoint),
+            "allowed_ranges": [{"start": hex(start), "size": hex(size)}
+                               for start, size in probe_ranges],
+        })
+        evidence.append(rejected)
+        return {"ok": False,
+                "error": "memory-execute pause was outside the selected unpack-section range",
+                "entrypoint": hex(entrypoint), "oep": hex(rip),
+                "evidence": evidence}
     evidence.append(_pause_evidence(xc, "oep_membp_hit", rip))
-    return {"ok": True, "oep": rip, "module_base": hex(base),
+    return {"ok": True, "oep": rip, "entrypoint": hex(entrypoint),
+            "module_base": hex(base),
             "target": {"start": hex(target), "size": hex(tsize),
-                       "why": why, "rcx": hex(rcx) if rcx else None},
+                       "why": why, "rcx": hex(rcx) if rcx else None,
+                       "breakpoint_ranges": [{"start": hex(start),
+                                              "size": hex(size)}
+                                             for start, size in probe_ranges],
+                       "entrypoint_page_excluded": excluded_page},
             "evidence": evidence}
 
 
@@ -783,31 +877,39 @@ def oep_by_esp(sample: str, xc: X64DbgClient | None = None,
     if not r.get("ok"):
         return r
     evidence.extend(r["evidence"])
+    entrypoint = _address_int(r.get("oep"))
+    if entrypoint is None:
+        return {"ok": False,
+                "error": "initial entry point unavailable; cannot prove a later OEP",
+                "evidence": evidence}
 
-    # read current RSP at the stub EP
+    # Read the architecture-appropriate stack pointer at the stub EP. The
+    # x32dbg register view exposes ESP, while x64dbg exposes RSP.
     regs = _regs(xc)
-    m = re.search(r"\brsp: (0x[0-9A-Fa-f]+)", regs, re.I)
+    m = re.search(r"\b(rsp|esp):\s*(0x[0-9A-Fa-f]+)", regs, re.I)
     if not m:
-        return {"ok": False, "error": "rsp not in regs", "evidence": evidence}
-    esp = int(m.group(1), 16)
-    evidence.append({"label": "esp_at_ep", "rsp": hex(esp)})
+        return {"ok": False,
+                "error": "stack pointer (rsp/esp) not in regs",
+                "evidence": evidence}
+    sp_name = m.group(1).lower()
+    sp = int(m.group(2), 16)
+    bp_size = 4 if sp_name == "esp" else 8
+    evidence.append({"label": "stack_pointer_at_ep",
+                     "register": sp_name, "address": hex(sp)})
 
-    # hardware bp on ESP (write) — fires when the stub adjusts the stack.
-    # NOTE: the vendored plugin's SetHardwareBreakpoint returns ok but may
-    # silently fail to register — always verify via ListBreakpoints.
-    hw = xc.call("SetHardwareBreakpoint",
-                 {"address": esp, "drIndex": 0, "type": "access"})
-    if not hw.get("ok"):
-        # fall back to default (execute) if access-type unsupported
-        hw = xc.set_hw_breakpoint(esp, dr_index=0)
+    # Watch the top stack slot for the return-address read/write. The MCP
+    # contract takes a hex-string address and r/w/x type; `access` and an
+    # integer address are not valid plugin arguments.
+    hw = xc.set_hw_breakpoint(sp, bp_type="r", size=bp_size)
     bp_list = _bp_text(xc)
-    registered = hex(esp).lower() in bp_list.lower()
-    evidence.append({"label": "esp_hwbp", "ok": bool(hw.get("ok")),
-                     "registered": registered})
+    registered = hex(sp).lower() in bp_list.lower()
+    evidence.append({"label": "stack_hwbp", "register": sp_name,
+                     "address": hex(sp), "type": "r", "size": bp_size,
+                     "ok": bool(hw.get("ok")), "registered": registered,
+                     "breakpoints": bp_list[:500]})
     if not registered:
         return {"ok": False,
-                "error": "hw bp did not register (plugin silent-drop); "
-                         "software-bp fallback required",
+                "error": "hardware stack breakpoint did not register",
                 "evidence": evidence}
 
     xc.run()
@@ -821,8 +923,20 @@ def oep_by_esp(sample: str, xc: X64DbgClient | None = None,
                 "diagnostics": _debugger_diagnostics(xc),
                 "evidence": evidence}
     rip = w["rip"]
+    if rip == entrypoint:
+        rejected = _pause_evidence(xc, "oep_rejected", rip)
+        rejected.update({
+            "reason": "stack breakpoint hit the original entry point",
+            "entrypoint": hex(entrypoint),
+        })
+        evidence.append(rejected)
+        return {"ok": False,
+                "error": "stack breakpoint hit the original entry point; unpacked OEP not established",
+                "entrypoint": hex(entrypoint), "oep": hex(rip),
+                "evidence": evidence}
     evidence.append(_pause_evidence(xc, "oep_esp_hit", rip))
-    return {"ok": True, "oep": rip, "evidence": evidence,
+    return {"ok": True, "oep": rip, "entrypoint": hex(entrypoint),
+            "evidence": evidence,
             "module": _parse_state(xc.get_state()).get("currentModule")}
 
 
@@ -1304,6 +1418,7 @@ def _resolve_oep(sample: str, xc: X64DbgClient) -> dict:
     return {"ok": False,
             "error": (f"OEP unresolved: section={r1.get('error')}; "
                       f"esp={r2.get('error')}"),
+            "entrypoint": r1.get("entrypoint") or r2.get("entrypoint"),
             "session_ended": bool(r1.get("session_ended")
                                   or r2.get("session_ended")),
             "attempts": attempts,
@@ -1536,6 +1651,7 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
                 "evidence": evidence}
     oep = oep_res["oep"]
     evidence.append({"label": "oep_found", "oep": hex(oep),
+                     "entrypoint": oep_res.get("entrypoint"),
                      "method": oep_res.get("method", "oep_by_section")})
 
     # 2. Dump the OEP artifact. Gate on OEP location: a module-image dump is
@@ -1739,6 +1855,7 @@ def agentic_unpack(sample: str, xc: X64DbgClient | None = None,
     }
     evidence.append({"label": "compare", **comparison})
     common = {"ok": True, "oep": hex(oep), "dump_path": dump_path,
+              "entrypoint": oep_res.get("entrypoint"),
               "dump_kind": dump_kind,
               "dump_source": dump_source,
               "heap_region": (heap_info or {}).get("region"),

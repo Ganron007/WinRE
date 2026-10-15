@@ -21,7 +21,8 @@ them cleanly (benign max 2.31 and 4.13 b/B; malware 7.06 b/B), so it is the
 primary signal and the thresholds are set against those measurements.
 """
 from winre.agentic import (_PACKED_ENTROPY_BPB, _PACKED_SECTION_BPB,
-                           _max_section_bpb, _packer_note, _packer_signal)
+                           _max_pe_section_bpb, _max_section_bpb,
+                           _packer_note, _packer_signal)
 
 
 def _quick(file_entropy, sections=None, anomalies=None):
@@ -62,6 +63,32 @@ def test_b108_packed_section_is_detected():
     assert sig["packed_section"]["bits_per_byte"] == 7.062
     # the file average is below its own threshold, so it must NOT also claim
     assert "entropy" not in sig
+
+
+def test_nspack_pe_entropy_routes_when_malcat_and_diec_miss():
+    """Regression from the live nspack run: pefile had 6.96, Malcat 52/0."""
+    quick = _quick(52, _secs([("nsp0", 52), ("nsp1", 0)]))
+    quick["evidence"]["pe"] = {
+        "sections": _secs([("nsp0", 2.48), ("nsp1", 6.96)]),
+    }
+
+    sig = _packer_signal(quick)
+
+    assert sig and sig["packed_section"] == {
+        "name": "nsp1", "bits_per_byte": 6.96, "source": "pe_sections",
+    }
+    note = _packer_note(sig, None, False)
+    assert "nsp1" in note and "pe_sections" in note and "6.96" in note
+
+
+def test_pe_section_entropy_uses_shannon_units_and_range_checks():
+    assert _max_pe_section_bpb({"sections": _secs([(".text", 4.125),
+                                                   ("nsp1", 6.96)])}) == (
+        "nsp1", 6.96)
+    assert _max_pe_section_bpb({"sections": _secs([(".text", 4.125)])}) == (
+        ".text", 4.125)
+    assert _max_pe_section_bpb({"sections": _secs([("bad", 52),
+                                                   ("none", None)])}) is None
 
 
 # --- the unit conversion --------------------------------------------------
