@@ -194,6 +194,40 @@ def test_a_lead_alone_cannot_make_the_sample_malicious():
         "resolved names alone produced a malicious verdict")
 
 
+def test_virtualalloc_alone_is_not_process_injection_or_a_verdict():
+    """Ordinary same-process heap allocation is not proof of injection."""
+    f = F.dynamic_findings(pack({"top_apis": [["VirtualAlloc", 1]]}),
+                           sha=SHA)
+    assert f["findings"]["memory_activity"]["apis"] == ["virtualalloc"]
+    assert f["findings"]["injection"] == []
+    assert f["verdict"]["level"] == F.UNKNOWN
+    assert not any(item.startswith("injection:")
+                   for item in f["verdict"]["basis"])
+
+
+def test_vm_wide_procmon_spawn_count_does_not_raise_the_sample_verdict():
+    """Procmon sees analyst and helper processes as well as the sample."""
+    root = pack()
+    (root / "dynamic" / "procmon_summary.json").write_text(
+        json.dumps({"process_spawns": 27}), encoding="utf-8")
+    f = F.dynamic_findings(root, sha=SHA)
+    assert f["findings"]["process_spawns"] == 27
+    assert "system-wide" in f["findings"]["process_spawns_scope"]
+    assert f["verdict"]["level"] == F.UNKNOWN
+
+
+def test_remote_write_and_execution_remain_a_positive_injection_signal():
+    """The stricter negative control must preserve a real injection pattern."""
+    f = F.dynamic_findings(pack({"top_apis": [
+        ["VirtualAllocEx", 1], ["WriteProcessMemory", 1],
+        ["CreateRemoteThread", 1],
+    ]}), sha=SHA)
+    assert f["findings"]["injection"]
+    assert f["verdict"]["level"] == F.SUSPICIOUS
+    assert any(item.startswith("injection:")
+               for item in f["verdict"]["basis"])
+
+
 def test_the_lead_note_states_the_rule():
     n = net({"captures": [{"dns_queries": [HOST], "tls_sni": [],
                            "http_requests": []}]})

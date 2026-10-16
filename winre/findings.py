@@ -510,6 +510,8 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "",
         "are context, not sample behaviour; only Frida's decoded_paths are "
         "sample-attributable.")
     findings["process_spawns"] = ps.get("process_spawns") if isinstance(ps, dict) else None
+    findings["process_spawns_scope"] = (
+        "system-wide Procmon count; no sample process attribution")
 
     # --- network ---------------------------------------------------------
     net = {"c2": [], "leads": [], "beacons": [], "pcaps": [],
@@ -586,25 +588,45 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "",
             "attributed to this sample; they do not raise the verdict")
 
     # --- injection / memory ops ------------------------------------------
-    apis = {a: n for a, n in (fs.get("top_apis") or [])}
+    apis = {str(a).casefold(): n for a, n in (fs.get("top_apis") or [])}
+    remote_alloc_api = bool(apis.get("virtualallocex"))
+    wrote_remote = any(apis.get(name) for name in
+                       ("writeprocessmemory", "ntwritevirtualmemory"))
+    executed_remote = any(apis.get(name) for name in
+                          ("createremotethread", "ntcreatethreadex",
+                           "queueuserapc"))
+    # A plain VirtualAlloc is routine heap allocation in the current process.
+    # It is useful behavioral evidence, but does not establish process
+    # injection. Keep all memory APIs visible and require remote-write plus
+    # remote-execution evidence before calling the behavior an injection chain.
+    memory_apis = [name for name in (
+        "virtualalloc", "virtualallocex", "ntallocatememory",
+        "writeprocessmemory", "ntwritevirtualmemory",
+        "createremotethread", "ntcreatethreadex", "queueuserapc")
+        if apis.get(name)]
+    findings["memory_activity"] = {
+        "apis": memory_apis,
+        "remote_allocation_api_observed": remote_alloc_api,
+        "remote_write_api_observed": wrote_remote,
+        "remote_execution_api_observed": executed_remote,
+        "scope": "API presence in sample-attributed Frida summary; targets not resolved",
+    }
     chain = []
-    if apis.get("VirtualAlloc"):
-        chain.append("VirtualAlloc")
-    if apis.get("WriteProcessMemory") or apis.get("NtWriteVirtualMemory"):
-        chain.append("WriteProcessMemory")
-    if apis.get("CreateRemoteThread") or apis.get("NtCreateThreadEx"):
-        chain.append("CreateRemoteThread")
+    if remote_alloc_api:
+        chain.append("VirtualAllocEx")
+    if wrote_remote:
+        chain.append("WriteProcessMemory/NtWriteVirtualMemory")
+    if executed_remote:
+        chain.append("CreateRemoteThread/NtCreateThreadEx/QueueUserAPC")
+    injection_confirmed = wrote_remote and executed_remote
     findings["injection"] = (
         [{"chain": chain, "evidence": "frida top_apis",
-          "confidence": "medium" if len(chain) >= 2 else "low"}]
-        if chain else [])
-    # The injection chain is what raises this pack to suspicious/medium below,
-    # so it must be named in the basis. A level with an empty basis is
-    # un-auditable: the report shows a verdict and no trail for it, which is
-    # the same defect class as the calibration items - a claim nothing supports.
-    if chain:
-        basis.append("injection:" + "+".join(chain))
-    if len(chain) >= 2:
+          "confidence": "medium",
+          "limitation": "target process and call success are unresolved"}]
+        if injection_confirmed else [])
+    # A verdict-driving injection claim requires cross-process write and
+    # execution primitives; a generic allocation or one API remains a lead.
+    if injection_confirmed:
         basis.append("injection:" + "+".join(chain))
 
     # --- device writes (a wiper) ------------------------------------------
@@ -701,8 +723,6 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "",
         level, conf = SUSPICIOUS, "medium"
     elif findings["injection"]:
         level, conf = SUSPICIOUS, "medium"
-    elif findings["process_spawns"]:
-        level, conf = SUSPICIOUS, "low"
     else:
         level, conf = UNKNOWN, "low"
         if not transfer_incomplete:
