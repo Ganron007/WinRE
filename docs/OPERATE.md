@@ -50,6 +50,12 @@ localhost-bound on the VM and probed over SSH.
 
 **Invariants:** dynamic is opt-in and always LAST; `static_yara_wins` - dynamic corroborates, never clears a static verdict; every run is audited (`audit.json`, `truly_green`). The snapshot gate defaults to **`enforce`**. It requires both the guest marker and a clean ledger on the separate control plane: a marker can be recreated by code inside the guest, so it is not sufficient alone. After every restore, verify the marker and run `python -m winre.snapshot_gate attest --action verified_clean` from the control plane. The next dynamic/debug execution marks that ledger dirty; the product never restores snapshots automatically. Set `WINRE_SNAPSHOT_GATE=observe` only for intentional benign test loops. A refused dynamic run writes a fresh `dynamic/STAGE.json` (`ok=false`, "blocked by snapshot gate") and the audit records `dynamic_blocked: true` - stale evidence can never masquerade as this run's detonation. A run records its intent in `execution_plan.json` (how many VM executions it asked for vs what the gate allows; mirrored into `audit.json`), and a **verdict-less run is never green** - `audit.json → unmet_expectations` names the gap (`deep verdict missing`, `report verdict missing`) and `truly_green` is false. Dynamic-pack freshness is decided by the per-run nonce (`run_id`), never by comparing clocks; `clock_skew_s` (pack `META.json`, `dynamic/STAGE.json`, `/health`) is a diagnostic, and the VM publishes its own clock facts to `C:\WinRE\vm_clock.json` (w32time Automatic + resync in setup). On an air-gapped lab box `w32tm /query /status` honestly reports `Source: Local CMOS Clock` / `not synchronized` - there is no upstream peer, which is exactly why the pipeline no longer lets any clock decide freshness.
 
+RevAI supplies its parent run ID to the remote driver through `--run-id`; a
+standalone WinRE run creates its own ID. WinRE records that ID in the root
+metadata and generated stage evidence, and carries it into audit and case
+exports. Consumers should use the ID together with the sample SHA and mode
+section when joining reports or forensic evidence.
+
 **Threat intel (triage):** the deterministic `threat_intel` tool identifies
 known tools (Authenticode signer, VersionInfo, security-tool markers), and
 the driver box adds a **VirusTotal HASH-ONLY** lookup (`WINRE_VT_API_KEY` in

@@ -845,6 +845,7 @@ def publish_case(pack_root: Path, dest_root: Path | None = None,
     (dest / "CASE.json").write_text(json.dumps({
         "sha256": sha,
         "mode": mode,
+        "run_id": ((_load(pack_root / "META.json") or {}).get("run_id")),
         "engine": ((_load(pack_root / "deep" / "META.json") or {}).get("engine")),
         "source": ((_load(pack_root / "report" / "report.json") or {}).get("source")),
         "published_at": _utc(),

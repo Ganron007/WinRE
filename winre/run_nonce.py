@@ -26,6 +26,7 @@ explicit "sync the VM" reason rather than silently believed.
 from __future__ import annotations
 
 import uuid
+import re
 
 FIELD = "run_id"
 
@@ -33,6 +34,14 @@ FIELD = "run_id"
 def new_run_id() -> str:
     """Fresh per-execution nonce (opaque, 32 hex chars)."""
     return uuid.uuid4().hex
+
+
+def normalize_run_id(value: str) -> str:
+    """Validate and lowercase an externally supplied execution identity."""
+    normalized = str(value or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{32}", normalized):
+        raise ValueError("run_id must be 32 hexadecimal characters")
+    return normalized
 
 
 def check(meta: dict | None, run_id: str) -> dict:

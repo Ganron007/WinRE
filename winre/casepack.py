@@ -242,6 +242,7 @@ def build_case(pack_root: Path, sha: str, mode: str | None = None,
             "schema": "winre-case/v1",
             "sha256": sha,
             "mode": mode,
+            "run_id": run_id,
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "archiver": "7z" if sevenzip else "zip-fallback",
             "notes": ("DFIR-Nexus ingest pack: dynamic logs + static context. "
@@ -254,6 +255,7 @@ def build_case(pack_root: Path, sha: str, mode: str | None = None,
             json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         (staging / "case_timeline.json").write_text(
             json.dumps({"sha256": sha, "mode": mode,
+                        "run_id": run_id,
                         "events": timeline}, indent=2) + "\n",
             encoding="utf-8")
 
@@ -273,6 +275,7 @@ def build_case(pack_root: Path, sha: str, mode: str | None = None,
                         zf.write(f, f.relative_to(staging))
 
     return {"ok": True, "path": str(out_path), "mode": mode,
+            "run_id": run_id,
             "suffix": suffix,
             "size_bytes": out_path.stat().st_size,
             "files": len(manifest_files),

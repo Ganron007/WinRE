@@ -1879,7 +1879,8 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
                         adaptive: bool = False,
                         idle_stop_seconds: int = 0,
                         stop_on: str = "network,file",
-                        stop_on_settle: int = 20) -> dict:
+                        stop_on_settle: int = 20,
+                        run_id: str | None = None) -> dict:
     """Control-plane pipeline driver: SSH/HTTP to the VM + local LLM + local audit.
 
     DEFAULT = static-only (quick + deep + yara + report + audit). Dynamic is
@@ -1909,7 +1910,7 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
                                        "aborted": True,
                                        "aborted_reason": str(e)}}}
     pack = EvidencePack(LOCAL_LOGS, sha, mode=pack_mode).ensure()
-    run_id = new_run_id()
+    run_id = run_nonce.normalize_run_id(run_id) if run_id else new_run_id()
     (pack.root / "META.json").write_text(json.dumps({
         "sha256": sha, "mode": pack_mode, "pack_mode": pack_mode,
         "run_id": run_id, "status": "in_progress",
@@ -2257,6 +2258,8 @@ def main() -> int:
                     help="deep-dive engine: agentic = LangGraph ReAct (RevAI "
                          "agentic); static = deterministic fixed-checklist, "
                          "zero LLM calls (RevAI scripted)")
+    ap.add_argument("--run-id", default=None,
+                    help="parent execution ID (RevAI remote-driver integration)")
     ap.add_argument("--publish", action="store_true",
                     help="publish sanitized case to docs/case-studies/<mode>/<sha>/")
     args = ap.parse_args()
@@ -2276,7 +2279,8 @@ def main() -> int:
                               adaptive=getattr(args, "adaptive", False),
                               idle_stop_seconds=getattr(args, "idle_stop_seconds", 0),
                                stop_on=getattr(args, "stop_on", "network,file"),
-                               stop_on_settle=getattr(args, "stop_on_settle", 20))
+                               stop_on_settle=getattr(args, "stop_on_settle", 20),
+                               run_id=args.run_id)
     if res.get("aborted"):
         # fail fast BEFORE anything executed (execution plan over budget)
         return 2

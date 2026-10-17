@@ -111,6 +111,13 @@ class EvidencePack:
 
     def write(self, stage: str, name: str, payload: dict) -> Path:
         """Write a JSON artifact into a stage folder. Returns the path."""
+        try:
+            run_id = json.loads((self.root / "META.json").read_text(
+                encoding="utf-8-sig")).get("run_id")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            run_id = None
+        if run_id and not payload.get("run_id"):
+            payload = {**payload, "run_id": run_id}
         p = self.stages[stage] / name
         p.write_text(json.dumps(payload, indent=2, default=str) + "\n",
                      encoding="utf-8")
@@ -132,9 +139,15 @@ class EvidencePack:
         return sorted(f.name for f in d.iterdir() if f.is_file())
 
     def manifest(self) -> dict:
+        try:
+            run_id = json.loads((self.root / "META.json").read_text(
+                encoding="utf-8-sig")).get("run_id")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            run_id = None
         return {
             "sha256": self.sha,
             "mode": self.mode,
+            "run_id": run_id,
             "stages": {s: self.stage_artifacts(s) for s in self.STAGES},
             "generated_at": utcnow(),
         }

@@ -851,7 +851,8 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
                   stop_on: str = "network,file",
                   # referenced by the dynamic call below but never declared:
                   # the dynamic path raised NameError on both of these
-                  stop_on_settle: int = 20) -> dict:
+                  stop_on_settle: int = 20,
+                  run_id: str | None = None) -> dict:
     """Run the WinRE pipeline.
 
     DEFAULT = STATIC-ONLY (mirrors RevEng/RevAI): intake → quick → deep → yara
@@ -891,8 +892,8 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
                 "results": {"audit": {"truly_green": False,
                                        "aborted": True,
                                        "aborted_reason": str(e)}}}
-    from .run_nonce import new_run_id
-    run_id = new_run_id()
+    from .run_nonce import new_run_id, normalize_run_id
+    run_id = normalize_run_id(run_id) if run_id else new_run_id()
     pack = EvidencePack(LOGS_DIR, sha, mode=pack_mode).ensure()
     results: dict = {}
     (pack.root / "META.json").write_text(json.dumps({
@@ -1171,6 +1172,8 @@ def main() -> int:
     ap.add_argument("--driver", choices=["local", "remote"], default="local",
                     help="local = run on FlareVM itself; remote = control-plane "
                          "driver (SSH to FlareVM + HTTP MCP + local LLM)")
+    ap.add_argument("--run-id", default=None,
+                    help="parent execution ID (RevAI remote-driver integration)")
     ap.add_argument("--publish", action="store_true",
                     help="publish sanitized case to docs/case-studies/<mode>/<sha>/")
     args = ap.parse_args()
@@ -1197,7 +1200,8 @@ def main() -> int:
             adaptive=args.adaptive,
             idle_stop_seconds=args.idle_stop_seconds,
             stop_on=args.stop_on,
-            stop_on_settle=args.stop_on_settle)
+            stop_on_settle=args.stop_on_settle,
+            run_id=args.run_id)
         if res.get("aborted"):
             return 2   # fail fast before anything executed
         if args.publish:
@@ -1216,7 +1220,8 @@ def main() -> int:
                        adaptive=args.adaptive,
                        idle_stop_seconds=args.idle_stop_seconds,
                        stop_on=args.stop_on,
-                       stop_on_settle=args.stop_on_settle)
+                       stop_on_settle=args.stop_on_settle,
+                       run_id=args.run_id)
     if res.get("aborted"):
         return 2   # fail fast before anything executed
     if args.publish:
