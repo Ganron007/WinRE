@@ -35,6 +35,7 @@ stages; it only interprets evidence. Every response is source-tagged
 from __future__ import annotations
 
 import json
+import math
 import os
 import urllib.error
 import urllib.request
@@ -121,6 +122,14 @@ def _is_agnes_endpoint(base_url: str | None = None) -> bool:
         return False
 
 
+def _is_meta_endpoint(base_url: str | None = None) -> bool:
+    """Whether the configured base URL is Meta Model API's official host."""
+    try:
+        return urlsplit(base_url or BASE_URL).hostname == "api.meta.ai"
+    except ValueError:
+        return False
+
+
 def max_output_tokens(value: int | str, base_url: str | None = None) -> int:
     """Keep Agnes Chat Completions output requests within its documented cap."""
     try:
@@ -164,6 +173,25 @@ def request_timeout(value: int | str | None = None) -> int:
     return seconds
 
 
+def request_temperature(default: float = 0.1) -> float:
+    """Resolve an optional provider temperature override (0..2).
+
+    Keeping the override in one helper makes the direct HTTP client and the
+    LangChain agent use the same configured value while preserving their
+    historical call-site defaults when the variable is unset.
+    """
+    raw = os.environ.get("WINRE_LLM_TEMPERATURE")
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("WINRE_LLM_TEMPERATURE must be a number from 0 to 2") from exc
+    if not math.isfinite(value) or not 0.0 <= value <= 2.0:
+        raise ValueError("WINRE_LLM_TEMPERATURE must be a number from 0 to 2")
+    return value
+
+
 def _post(path: str, payload: dict, timeout: int = 120) -> dict:
     url = BASE_URL.rstrip("/") + path
     data = json.dumps(payload).encode("utf-8")
@@ -186,7 +214,8 @@ def _reasoning_field(base_url: str | None = None) -> dict:
     Agnes exposes Thinking mode through ``chat_template_kwargs`` and does not
     document a numeric/string effort field on Chat Completions. Use enabled or
     disabled for Agnes; legacy effort labels remain aliases for enabled.
-    Other configured OpenAI-compatible providers retain ``reasoning_effort``.
+    Meta Chat Completions accepts ``reasoning_effort`` including ``xhigh``;
+    other configured OpenAI-compatible providers retain their effort field.
     """
     if _is_agnes_endpoint(base_url):
         if REASONING in ("enabled", "on", "true", "low", "medium", "high", "max"):
@@ -194,9 +223,15 @@ def _reasoning_field(base_url: str | None = None) -> dict:
         if REASONING in ("disabled", "none", "off", "false"):
             return {"chat_template_kwargs": {"enable_thinking": False}}
         return {}
+    if _is_meta_endpoint(base_url):
+        if REASONING in ("minimal", "low", "medium", "high", "xhigh"):
+            return {"reasoning_effort": REASONING}
+        # Meta does not support reasoning_effort="none". `enabled` and
+        # disabled aliases therefore leave its model-set default in force.
+        return {}
     if REASONING in ("enabled", "on", "true"):
         return {}
-    if REASONING in ("low", "medium", "high", "max"):
+    if REASONING in ("minimal", "low", "medium", "high", "xhigh", "max"):
         return {"reasoning_effort": REASONING}
     return {}
 
@@ -204,7 +239,12 @@ def _reasoning_field(base_url: str | None = None) -> dict:
 def chat_openai_options(max_tokens: int, base_url: str | None = None) -> dict:
     """LangChain options that retain the documented provider fields on the wire."""
     if not _is_agnes_endpoint(base_url):
-        return {"max_tokens": max_tokens, "timeout": request_timeout()}
+        options = {"max_tokens": max_tokens, "timeout": request_timeout()}
+        if _is_meta_endpoint(base_url):
+            meta_fields = _reasoning_field(base_url)
+            if meta_fields:
+                options["extra_body"] = meta_fields
+        return options
     # ChatOpenAI renames its max_tokens option to max_completion_tokens.
     # Leave that option unset and merge the supported field at the SDK layer.
     return {
@@ -217,14 +257,15 @@ def chat_openai_options(max_tokens: int, base_url: str | None = None) -> dict:
 
 
 def chat(messages: list[dict[str, str]], *, model: str | None = None,
-         timeout: int | None = None, temperature: float = 0.1,
+         timeout: int | None = None, temperature: float | None = None,
          max_tokens: int = 4000) -> str:
     """One chat completion. Returns the assistant text."""
     m = model or MODEL
     payload: dict[str, Any] = {
         "model": m,
         "messages": messages,
-        "temperature": temperature,
+        "temperature": (request_temperature(default=0.1)
+                        if temperature is None else temperature),
         "max_tokens": max_output_tokens(max_tokens),
     }
     payload.update(_reasoning_field())
@@ -283,7 +324,7 @@ def available_roles() -> dict:
 
 
 def complete(prompt: str, *, system: str | None = None,
-             temperature: float = 0.1, timeout: int | None = None) -> str:
+             temperature: float | None = None, timeout: int | None = None) -> str:
     """Convenience: one-shot completion from a prompt string."""
     messages = []
     if system:

@@ -1769,7 +1769,7 @@ process observer closes. Do not start another sample session.
     llm_roles = _llm_roles()
     _mk = lambda role: ChatOpenAI(          # noqa: E731 - one-line factory
         model=llm_roles[role], api_key=api_key or "none",
-        base_url=api_url, temperature=0.0,
+        base_url=api_url, temperature=llm_client.request_temperature(default=0.0),
         **llm_client.chat_openai_options(_max_out, api_url))
     llm = _mk("planner")        # tool selection / investigation
     judge = _mk("judgment")     # verdict + finalize pass
