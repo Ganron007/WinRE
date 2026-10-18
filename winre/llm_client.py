@@ -222,7 +222,9 @@ def _reasoning_field(base_url: str | None = None) -> dict:
             return {"chat_template_kwargs": {"enable_thinking": True}}
         if REASONING in ("disabled", "none", "off", "false"):
             return {"chat_template_kwargs": {"enable_thinking": False}}
-        return {}
+        # Agnes Thinking defaults to the requested ON mode in this pipeline.
+        # The service documents no reasoning-effort field for this model.
+        return {"chat_template_kwargs": {"enable_thinking": True}}
     if _is_meta_endpoint(base_url):
         if REASONING in ("minimal", "low", "medium", "high", "xhigh"):
             return {"reasoning_effort": REASONING}

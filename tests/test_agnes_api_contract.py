@@ -53,6 +53,14 @@ def test_agnes_enabled_is_canonical_thinking_on_value(monkeypatch):
     }
 
 
+def test_agnes_defaults_to_thinking_on_when_setting_is_blank(monkeypatch):
+    monkeypatch.setattr(llm_client, "BASE_URL", "https://apihub.agnes-ai.com/v1")
+    monkeypatch.setattr(llm_client, "REASONING", "")
+    assert llm_client._reasoning_field() == {
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+
+
 def test_agnes_disabled_reasoning_uses_supported_boolean(monkeypatch):
     monkeypatch.setattr(llm_client, "BASE_URL", "https://apihub.agnes-ai.com/v1")
     monkeypatch.setattr(llm_client, "REASONING", "disabled")
