@@ -335,7 +335,7 @@ exit `$LASTEXITCODE
     Log "WARN: no sample PID for in-run memory capture"
   }
 
-  # ---- KB: Early-Bird/APC-aware capture + sandbox input jiggle -----------
+  # ---- Early-Bird/APC-aware capture + sandbox input jiggle ---------------
   # Start CONCURRENT with Frida (not after the run) so the monitor can catch
   # suspended/injected child processes during the live detonation window.
   $monitor = Join-Path $OutDir "_monitor_suspended.ps1"
@@ -561,7 +561,7 @@ if (Test-Path $pml) {
 }
 Start-Process -FilePath $ProcmonExe -ArgumentList "/AcceptEula","/Terminate" -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
 
-# KB: stop the aux monitors/jiggle (bounded; never stall the job)
+# Stop the auxiliary monitors/jiggle within a bounded wait.
 foreach ($aux in @($monProc, $jigProc)) {
   if ($aux) {
     Stop-Process -Id $aux.Id -Force -ErrorAction SilentlyContinue

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""pcap_beacon.py — C2 beaconing + HTTP schema extraction (KB: Wireshark
-course methodology). Parses detonation pcaps via tshark and derives:
+"""pcap_beacon.py — C2 beaconing + HTTP schema extraction.
+
+Parses detonation pcaps via tshark and derives:
 
   * per-flow cadence stats (interval mean/jitter => beacon fingerprint)
   * HTTP request URIs + User-Agent strings (param schemas)

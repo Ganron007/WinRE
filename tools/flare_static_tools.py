@@ -752,7 +752,7 @@ def threat_intel(sample: str, timeout: int = 120) -> dict:
 
 
 
-# ── API-hash resolver detection (KB: AMAT Track 8 Miniduke / MalTrak Emotet) ─
+# ── API-hash resolver detection (AMAT Track 8 Miniduke / MalTrak Emotet) ────
 # Runtime import resolvers hash API names (murmur2/3, djb2, sdbm, fnv) and
 # call GetProcAddress/LdrGetProcedureAddress with the constant — a classic
 # evasion/anti-import-table technique. Detection = find 4-byte constants in
@@ -1708,7 +1708,7 @@ def ghidra_decompile(sample: str, function_addr: str = "",
 
 def main() -> int:
     import argparse
-    # KB-derived gap tools (pure-python / r2) live in kb_gap_tools.py
+    # Supplemental gap tools (pure-python / r2) live in kb_gap_tools.py
     try:
         from kb_gap_tools import TOOL_FUNCS as KB_TOOL_FUNCS
     except Exception:

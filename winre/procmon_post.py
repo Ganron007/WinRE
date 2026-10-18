@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""procmon_post.py — post-detonation Procmon correlation (KB-derived).
+"""procmon_post.py — post-detonation Procmon correlation.
 
-Maldev persistence catalog + Mandiant cheat sheet: turns the raw Procmon
-CSV into per-family persistence reports, a high-signal behavior timeline,
-and an argument/PPID-spoofing diff (Maldev 47/48: cmdline-in-Procmon vs
-real PEB cmdline can diverge when the process spoofs its arguments).
+Curated persistence patterns turn the raw Procmon CSV into per-family
+persistence reports, a high-signal behavior timeline, and an argument/PPID-
+spoofing diff (the Procmon command line can differ from the real PEB command
+line when the process spoofs its arguments).
 
 Inputs (dynamic/ dir):
   procmon.csv            raw Sysinternals capture

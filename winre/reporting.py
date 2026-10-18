@@ -191,8 +191,8 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     intake = _load(pack_root / "intake" / "intake.json") or {}
     quick = _load(pack_root / "quick" / "quick.json") or {}
     ev = quick.get("evidence") or {}
-    # merge deep-tool results (history results keyed by tool) so report
-    # sections see the KB-derived deep evidence too (crypto/decrypt-gate/ioc)
+    # Merge deep-tool results (history results keyed by tool) so report
+    # sections see supplemental deep evidence (crypto/decrypt-gate/IOC).
     deep = _load(pack_root / "deep" / "deep.json") or {}
     deep_ev = {}
     for h in ((deep.get("agent") or {}).get("history") or []):

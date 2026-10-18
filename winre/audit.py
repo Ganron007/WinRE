@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 
@@ -276,12 +277,16 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                         break
                     row_locators = set(str(value) for value in (row.get("locators") or []))
                     row_sources = row.get("evidence_sources") or []
+                    reviewed_locator = str(row.get("reviewed_locator") or "")
                     if not row_locators or row_locators != {
                             str(source.get("locator")) for source in row_sources}:
                         source_rows_valid = False
                         break
+                    if not reviewed_locator or reviewed_locator not in row_locators:
+                        source_rows_valid = False
+                        break
                     quote = str(row.get("evidence_quote") or "")
-                    quote_matches = False
+                    quote_matches_selected_source = False
                     for source in row_sources:
                         locator = locator_rows.get(str(source.get("locator")))
                         if not isinstance(locator, dict):
@@ -305,15 +310,199 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                                 or source.get("artifact_sha256") != resolved.get("sha256")):
                             source_rows_valid = False
                             break
-                        if quote and quote in str(resolved.get("excerpt") or ""):
-                            quote_matches = True
-                    if not source_rows_valid or not quote_matches:
+                        if (str(source.get("locator")) == reviewed_locator
+                                and quote
+                                and quote in str(resolved.get("excerpt") or "")):
+                            quote_matches_selected_source = True
+                    if not source_rows_valid or not quote_matches_selected_source:
                         source_rows_valid = False
                         break
                     if not source_rows_valid:
                         break
+            review_attempts = report_review.get("review_attempts")
+            call_records_valid = isinstance(review_attempts, list) and bool(review_attempts)
+            call_decisions: dict[str, dict] = {}
+            call_prompt_claims: dict[str, dict] = {}
+            if call_records_valid:
+                for attempt in review_attempts:
+                    artifacts = (attempt.get("call_artifacts")
+                                 if isinstance(attempt, dict) else None)
+                    if not isinstance(artifacts, dict):
+                        call_records_valid = False
+                        break
+                    request_rel = str(artifacts.get("request_path") or "")
+                    response_rel = str(artifacts.get("response_path") or "")
+                    request_file = (evidence / request_rel).resolve()
+                    response_file = (evidence / response_rel).resolve()
+                    if (not request_rel or not response_rel
+                            or evidence.resolve() not in request_file.parents
+                            or evidence.resolve() not in response_file.parents
+                            or not request_file.is_file() or not response_file.is_file()):
+                        call_records_valid = False
+                        break
+                    request_bytes = request_file.read_bytes()
+                    response_bytes = response_file.read_bytes()
+                    if (hashlib.sha256(request_bytes).hexdigest()
+                            != artifacts.get("request_sha256")
+                            or hashlib.sha256(response_bytes).hexdigest()
+                            != artifacts.get("response_sha256")):
+                        call_records_valid = False
+                        break
+                    request_doc = json.loads(request_bytes.decode("utf-8"))
+                    response_doc = json.loads(response_bytes.decode("utf-8"))
+                    payload = request_doc.get("payload")
+                    messages = payload.get("messages") if isinstance(payload, dict) else None
+                    prompt_text = next((message.get("content") for message in messages or []
+                                        if isinstance(message, dict)
+                                        and message.get("role") == "user"
+                                        and isinstance(message.get("content"), str)), None)
+                    response_content = response_doc.get("content")
+                    if (not isinstance(prompt_text, str)
+                            or hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+                                != artifacts.get("prompt_sha256")
+                            or len(prompt_text) != artifacts.get("prompt_chars")
+                            or not isinstance(response_content, str)
+                            or hashlib.sha256(response_content.encode("utf-8")).hexdigest()
+                                != attempt.get("response_sha256")
+                            or response_doc.get("finish_reason") != attempt.get("finish_reason")
+                            or response_doc.get("error") is not None
+                            or attempt.get("error") is not None):
+                        call_records_valid = False
+                        break
+
+                    # Bind the saved decision to the exact prompt batch and raw
+                    # model response. Hashing request/response files alone does
+                    # not establish that a given claim was the one reviewed.
+                    analysis_marker = "ANALYSIS_IDENTITY: "
+                    methodology_marker = "\nMETHODOLOGY: "
+                    claims_marker = "\nCLAIMS: "
+                    if (analysis_marker not in prompt_text
+                            or methodology_marker not in prompt_text
+                            or claims_marker not in prompt_text):
+                        call_records_valid = False
+                        break
+                    try:
+                        analysis_text = prompt_text.split(analysis_marker, 1)[1].split(
+                            methodology_marker, 1)[0]
+                        prompt_identity = json.loads(analysis_text)
+                        prompt_claim_rows = json.loads(prompt_text.rsplit(
+                            claims_marker, 1)[1])
+                        review_text = str(response_content).strip()
+                        review_text = re.sub(
+                            r"^```(?:json)?\s*|\s*```$", "", review_text,
+                            flags=re.IGNORECASE | re.DOTALL).strip()
+                        response_rows = json.loads(review_text).get("reviews")
+                    except (IndexError, json.JSONDecodeError, AttributeError):
+                        call_records_valid = False
+                        break
+                    if (prompt_identity != {"sha256": root_meta.get("sha256"),
+                                           "run_id": root_meta.get("run_id")}
+                            or prompt_text.split(methodology_marker, 1)[1].split(
+                                claims_marker, 1)[0] != report_review.get("methodology")
+                            or not isinstance(prompt_claim_rows, list)
+                            or not isinstance(response_rows, list)):
+                        call_records_valid = False
+                        break
+                    batch_claims: dict[str, dict] = {}
+                    for item in prompt_claim_rows:
+                        if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                                or item["id"] in batch_claims
+                                or not isinstance(item.get("claim"), str)
+                                or not isinstance(item.get("evidence"), list)):
+                            call_records_valid = False
+                            break
+                        batch_claims[item["id"]] = item
+                    attempt_ids = attempt.get("claim_ids")
+                    if (not call_records_valid
+                            or not isinstance(attempt_ids, list)
+                            or len(attempt_ids) != len(set(attempt_ids))
+                            or set(attempt_ids) != set(batch_claims)
+                            or any(claim_id in call_prompt_claims for claim_id in batch_claims)):
+                        call_records_valid = False
+                        break
+                    if (not isinstance(payload, dict)
+                            or payload.get("model") != report_review.get("reviewer_model")):
+                        call_records_valid = False
+                        break
+                    call_prompt_claims.update(batch_claims)
+
+                    batch_decisions: dict[str, dict] = {}
+                    for response_row in response_rows:
+                        if (not isinstance(response_row, list) or len(response_row) != 3
+                                or not all(isinstance(value, str) for value in response_row)):
+                            call_records_valid = False
+                            break
+                        claim_id, verdict, locator_id = response_row
+                        if (claim_id in batch_decisions
+                                or verdict not in {"supported", "contradicted", "insufficient"}):
+                            call_records_valid = False
+                            break
+                        batch_decisions[claim_id] = {
+                            "verdict": verdict, "locator": locator_id}
+                    if (not call_records_valid
+                            or set(batch_decisions) != set(batch_claims)):
+                        call_records_valid = False
+                        break
+                    call_decisions.update(batch_decisions)
+
+            # The exact claim and exact locator set sent to the model must
+            # match the report ledger, and the final decision must match the
+            # response bytes saved for that call. This closes a gap where a
+            # valid call artifact and a separate green result could be paired.
+            if call_records_valid and source_rows_valid:
+                reviewed_by_id = {str(row.get("claim_id")): row
+                                  for row in reviewed_claims if isinstance(row, dict)}
+                expected_claim_ids = {
+                    str(row.get("claim_id")) for row in reviewed_claims
+                    if isinstance(row, dict) and str(row.get("claim_id", "")).startswith("C")}
+                if set(call_prompt_claims) != expected_claim_ids \
+                        or set(call_decisions) != expected_claim_ids:
+                    call_records_valid = False
+                else:
+                    for claim_id in sorted(expected_claim_ids):
+                        reviewed = reviewed_by_id.get(claim_id) or {}
+                        prompt_claim = call_prompt_claims[claim_id]
+                        decision = call_decisions[claim_id]
+                        evidence_rows = prompt_claim.get("evidence") or []
+                        evidence_by_locator = {
+                            str(item.get("locator")): item for item in evidence_rows
+                            if isinstance(item, dict) and item.get("locator")}
+                        result_sources = {
+                            str(item.get("locator")): item
+                            for item in reviewed.get("evidence_sources") or []
+                            if isinstance(item, dict) and item.get("locator")}
+                        expected_locators = set(str(value) for value in
+                                                (reviewed.get("locators") or []))
+                        if (prompt_claim.get("claim") != reviewed.get("claim")
+                                or set(evidence_by_locator) != expected_locators
+                                or set(result_sources) != expected_locators
+                                or decision.get("locator") != reviewed.get("reviewed_locator")
+                                or decision.get("verdict") != reviewed.get("status")):
+                            call_records_valid = False
+                            break
+                        for locator_id, prompt_source in evidence_by_locator.items():
+                            locator = locator_rows.get(locator_id)
+                            source = result_sources.get(locator_id) or {}
+                            if not isinstance(locator, dict):
+                                call_records_valid = False
+                                break
+                            reference = str(locator.get("reference") or "")
+                            resolved = source_resolution_cache.get(reference)
+                            if (resolved is None or not resolved.get("ok")
+                                    or prompt_source.get("reference") != reference
+                                    or prompt_source.get("artifact") != resolved.get("artifact")
+                                    or prompt_source.get("json_path") != resolved.get("pointer")
+                                    or prompt_source.get("artifact_sha256") != resolved.get("sha256")
+                                    or prompt_source.get("excerpt") != resolved.get("excerpt")
+                                    or source.get("artifact") != resolved.get("artifact")
+                                    or source.get("json_path") != resolved.get("pointer")
+                                    or source.get("artifact_sha256") != resolved.get("sha256")):
+                                call_records_valid = False
+                                break
+                        if not call_records_valid:
+                            break
             report_review_ok = bool(
-                report_review.get("schema") == "winre-report-claim-review/v1"
+                report_review.get("schema") == "winre-report-claim-review/v2"
                 and report_review.get("ok") is True
                 and report_review.get("status") == "complete"
                 and report_review.get("sha256") == root_meta.get("sha256")
@@ -326,7 +515,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                 and locator_manifest.get("report_sha256") == report_sha
                 and total > 0 and supported == total
                 and sum(int(value or 0) for value in statuses.values()) == total
-                and source_rows_valid)
+                and source_rows_valid and call_records_valid)
             if not report_review_ok:
                 report_review = {**report_review, "ok": False,
                                  "status": "invalid-or-unsupported",

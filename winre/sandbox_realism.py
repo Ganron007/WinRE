@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""sandbox_realism.py — FlareVM detonation-environment realism (KB: Maldev
-73/74 anti-VM, Z2A 3_ Evasion; 2026-09-07 KB review item).
+"""sandbox_realism.py — FlareVM detonation-environment realism.
 
 Malware checks the environment before misbehaving: CPU/RAM/USBSTOR history,
 screen resolution, process baseline, boot age, mouse interaction, VMware

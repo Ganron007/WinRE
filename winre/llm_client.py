@@ -35,6 +35,7 @@ stages; it only interprets evidence. Every response is source-tagged
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import urllib.error
@@ -258,24 +259,58 @@ def chat_openai_options(max_tokens: int, base_url: str | None = None) -> dict:
     }
 
 
-def chat(messages: list[dict[str, str]], *, model: str | None = None,
-         timeout: int | None = None, temperature: float | None = None,
-         max_tokens: int = 4000) -> str:
-    """One chat completion. Returns the assistant text."""
-    m = model or MODEL
+def chat_request_payload(messages: list[dict[str, str]], *, model: str | None = None,
+                         temperature: float | None = None,
+                         max_tokens: int = 4000) -> dict[str, Any]:
+    """Build the exact credential-free JSON payload sent by ``chat_result``."""
     payload: dict[str, Any] = {
-        "model": m,
+        "model": model or MODEL,
         "messages": messages,
         "temperature": (request_temperature(default=0.1)
                         if temperature is None else temperature),
         "max_tokens": max_output_tokens(max_tokens),
     }
     payload.update(_reasoning_field())
+    return payload
+
+
+def chat_result(messages: list[dict[str, str]], *, model: str | None = None,
+                timeout: int | None = None, temperature: float | None = None,
+                max_tokens: int = 4000) -> dict[str, Any]:
+    """One chat completion with usage/finish metadata for auditable callers."""
+    payload = chat_request_payload(messages, model=model,
+                                   temperature=temperature, max_tokens=max_tokens)
     out = _post("/chat/completions", payload, timeout=request_timeout(timeout))
     try:
-        return out["choices"][0]["message"]["content"]
+        choice = out["choices"][0]
+        message = choice["message"]
+        content = message["content"]
+        if not isinstance(content, str):
+            raise TypeError("assistant content is not text")
+        return {
+            "content": content,
+            "finish_reason": choice.get("finish_reason"),
+            "usage": out.get("usage") if isinstance(out.get("usage"), dict) else None,
+            "model": out.get("model"),
+            "response_id": out.get("id"),
+            "request_audit": {
+                "payload": payload,
+                "payload_sha256": hashlib.sha256(json.dumps(
+                    payload, ensure_ascii=False, separators=(",", ":"),
+                    default=str).encode("utf-8")).hexdigest(),
+                "timeout_seconds": request_timeout(timeout),
+            },
+        }
     except (KeyError, IndexError, TypeError) as e:
         raise LLMError(f"LLM response missing content: {out!r:.200}") from e
+
+
+def chat(messages: list[dict[str, str]], *, model: str | None = None,
+         timeout: int | None = None, temperature: float | None = None,
+         max_tokens: int = 4000) -> str:
+    """One chat completion. Returns the assistant text."""
+    return chat_result(messages, model=model, timeout=timeout,
+                       temperature=temperature, max_tokens=max_tokens)["content"]
 
 
 def available() -> bool:

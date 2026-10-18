@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""post_mortem.py — post-detonation forensic harvest + telemetry integrity
-(KB: Volatility Part3 memory discipline + Maldev 83-89 unhooking; DFIR-Nexus
-handoff boundary: WinRE harvests process-level memory, DFIR-Nexus owns
-full-image analysis).
+"""post_mortem.py — post-detonation forensic harvest + telemetry integrity.
+
+WinRE harvests process-level memory; full-image analysis is outside this
+collector's scope.
 
 Steps (collection on the VM right after detonation, BEFORE snapshot restore):
   1. memory_harvest  — procdump -ma of the sample process + children

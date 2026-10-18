@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""test_gap_tools.py — host-runnable unit tests for the KB-derived gap tools
+"""test_gap_tools.py — host-runnable checks for supplemental static gap tools
 (2026-09-07). VM-only tools (pefile/r2/goresym-dependent) are exercised via
 the VM smoke script; anything pure-python is asserted here.
 

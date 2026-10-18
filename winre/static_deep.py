@@ -266,8 +266,8 @@ def _rules_verdict(ev: dict) -> dict:
                 "key_evidence": reasons, "rules_fired": ["suspicious-singles"]}
 
     if (packed or high_ent) and not is_dotnet:
-        # packed/encrypted with no decisive hit: static output is UNRELIABLE
-        # (KB: packer triage gates static conclusions). Say so explicitly.
+        # Packed/encrypted with no decisive hit: static output is unreliable.
+        # Keep that limitation explicit and require unpacking/dynamic validation.
         return {"verdict": "unknown", "confidence": "low",
                 "summary": ("Packed/high-entropy binary with no decisive static "
                             "match — static evidence is unreliable here; "
@@ -487,7 +487,7 @@ def run_static_deep_dive(sample_name: str, sha: str, *,
     _run("capa")
     _run("malcat_analyze")
     _run("malcat_functions", count=10)
-    # 2b. KB-derived static evidence
+    # 2b. Supplemental static-analysis evidence
     _run("crypto_constants")
     _run("mitigations")
     _run("ioc_extract")

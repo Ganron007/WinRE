@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""kb_gap_tools.py — KB-derived static gap tools (G:\\doc_extract review, 2026-09-07).
+"""kb_gap_tools.py — supplemental static-analysis gap tools.
 
 Pure-python (pefile where possible), all tolerant of absence, all bounded.
 Implements the recorded static gaps:
 
   crypto_constants   - magic constants + AES S-box scan (findcrypt equivalent;
-                       KB AMAT Track 4: crypto recognition by constants+shape)
+                       AMAT Track 4: crypto recognition by constants+shape)
   mitigations        - PE hardening/mitigation catalog (revai_tools_sec port)
   sink_sites         - dangerous-API call sites in functions, r2-assisted
                        (revai_tools_sinks/audit port, bounded)
@@ -221,7 +221,7 @@ _RTF_CTL = re.compile(rb"\\([a-z]+)(-?\d+)? ?", re.I)
 def rtf_predecode(sample: str, timeout: int = 120) -> dict:
     """RTF container decode: control words, hex escapes, \\bin blocks, OLE2.
 
-    KB: RTF is the container — decode it BEFORE olevba/peepdf. When embedded
+    RTF is the container — decode it BEFORE olevba/peepdf. When embedded
     OLE2 objects are found, the caller runs olevba against the extracted blob.
     """
     t0 = time.time()
@@ -333,7 +333,7 @@ def string_decode_emulate(sample: str, timeout: int = 300) -> dict:
     """Event-driven light emulation: locate likely-encoded config blobs and
     decode with candidate keys (xor/add/sub/rol, 1-2 byte + date-seeded).
 
-    KB AMAT Track 6 / FLARE encStrings: find address tables that reference
+    AMAT Track 6 / FLARE encStrings: find address tables that reference
     data inside high-entropy sections, decode those blobs, recover plaintext
     config. This is the bounded, deterministic approximation: entropy-guided
     blob selection + key search + known-plaintext scoring.
@@ -856,7 +856,7 @@ TOOL_FUNCS = {
 
 def main() -> int:
     import argparse
-    ap = argparse.ArgumentParser(description="KB-derived static gap tools")
+    ap = argparse.ArgumentParser(description="Supplemental static-analysis tools")
     ap.add_argument("tool", choices=list(TOOL_FUNCS.keys()))
     ap.add_argument("sample")
     ap.add_argument("--json", action="store_true")

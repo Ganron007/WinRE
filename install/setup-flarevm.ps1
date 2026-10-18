@@ -115,7 +115,7 @@ else {
     Manual "Install Python 3.13 for ALL USERS to C:\Python313 (python.org), then re-run."
 }
 if (Test-Path $py) {
-    # static-analysis python deps (KB-derived tools + revai-parity wrappers).
+    # Static-analysis Python dependencies (supplemental tools + parity wrappers).
     # Air-gapped friendly: when the host staged wheels under
     # C:\Tools-staged\wheels, try --no-index first; only fall back to the
     # network when the local wheel set does not satisfy the module.
