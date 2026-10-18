@@ -219,24 +219,25 @@ def test_setup_and_verify_agree_on_required_python_modules():
         assert "angr" not in re.findall(r'"([a-z0-9_]+)"', cm.group(1))
 
 
-def test_flare_isolation_enables_the_effective_public_firewall_profile():
+def test_guest_setup_preserves_firewall_profile_and_allows_vmnet2_management():
     setup, verify = _src("install/setup-flarevm.ps1"), _src("install/verify-flarevm.ps1")
-    assert "HKLM:\\SOFTWARE\\Policies\\Microsoft\\WindowsFirewall" in setup
-    assert "AllowLocalPolicyMerge" in setup and "gpupdate.exe /target:computer /force" in setup
-    assert "Get-NetFirewallProfile -PolicyStore ActiveStore" in setup
-    assert "Get-NetFirewallProfile -PolicyStore ActiveStore" in verify
-    assert "Get-NetRoute -PolicyStore PersistentStore" in setup
-    assert "only persistent IPv4 default route" in verify
-    assert "Test-NetConnection -ComputerName $peer -Port 22" in verify
+    assert "Set-NetFirewallProfile" not in setup
+    assert "gpupdate.exe /target:computer /force" not in setup
+    assert "elseif ($removedLegacyDefault -and $ifIndex)" in setup
+    assert 'NextHop $originalHostOnlyGateway' in setup
+    assert "RemoteAddress = \"LocalSubnet\"" in setup
+    assert "WinRE SSH (VMnet2 LocalSubnet)" in verify
+    assert "legacy REMnux default route" in verify
     assert "ManagementHostAddress" not in setup and "ManagementHostAddress" not in verify
 
 
-def test_host_side_flare_sync_and_reapply_use_the_revai_gateway_jump():
+def test_host_side_flare_sync_and_reapply_connect_directly_over_vmnet2():
     sync, reapply = _src("ops/sync_to_flare.ps1"), _src("ops/reapply_after_revert.ps1")
     for src in (sync, reapply):
-        assert "WINRE_GATEWAY_SSH_KEY" in src
-        assert "ProxyCommand=" in src
-        assert "-W %h:%p" in src
+        assert "FLARE_HOST" in src
+        assert "VMnet2" in src
+        assert "ProxyCommand=" not in src
+        assert "WINRE_GATEWAY_SSH_KEY" not in src
 
 
 def test_reapply_prunes_stale_guest_source_after_snapshot_restore():

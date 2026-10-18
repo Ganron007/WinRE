@@ -6,9 +6,8 @@
 
 .DESCRIPTION
     A snapshot revert rolls the VM back to an older baseline. This script
-    re-applies everything that lives outside the snapshot, in order. All
-    workstation-to-Flare SSH and SCP traffic uses REMnux `.43` as the jump
-    host because Flare blocks the workstation VMnet2 peer:
+    re-applies everything that lives outside the snapshot, in order. The
+    workstation connects directly to Flare over the private VMnet2 network.
 
       1. sync repo             -> C:\WinRE              (ops/sync_to_flare.ps1)
       2. stage integrations    -> C:\WinRE\integrations (gitignored, host-only)
@@ -37,12 +36,7 @@
       powershell -ExecutionPolicy Bypass -File ops\reapply_after_revert.ps1 -SkipSync
 #>
 param(
-    [switch]$SkipSync,
-    [string]$AnalysisGatewayAddress,
-    [string]$GatewaySshKey,
-    [string]$GatewayHost,
-    [string]$GatewayUser,
-    [string[]]$BlockedPeerAddresses = @()
+    [switch]$SkipSync
 )
 
 $ErrorActionPreference = "Continue"
@@ -61,39 +55,13 @@ if (Test-Path $dotenvPath) {
 $flareHost = if ($env:FLARE_HOST) { $env:FLARE_HOST } else { $dotenv["FLARE_HOST"] }
 $flareUser = if ($env:FLARE_USER) { $env:FLARE_USER } else { $dotenv["FLARE_USER"] }
 $flareKey  = if ($env:FLARE_SSH_KEY) { $env:FLARE_SSH_KEY } else { $dotenv["FLARE_SSH_KEY"] }
-$gatewayHost = if ($GatewayHost) { $GatewayHost } elseif ($env:WINRE_GATEWAY_HOST) { $env:WINRE_GATEWAY_HOST } else { $dotenv["WINRE_GATEWAY_HOST"] }
-$gatewayUser = if ($GatewayUser) { $GatewayUser } elseif ($env:WINRE_GATEWAY_USER) { $env:WINRE_GATEWAY_USER } else { $dotenv["WINRE_GATEWAY_USER"] }
-$gatewayKey = if ($GatewaySshKey) { $GatewaySshKey } elseif ($env:WINRE_GATEWAY_SSH_KEY) { $env:WINRE_GATEWAY_SSH_KEY } else { $dotenv["WINRE_GATEWAY_SSH_KEY"] }
-$analysisGateway = if ($env:WINRE_ANALYSIS_GATEWAY) { $env:WINRE_ANALYSIS_GATEWAY } else { $dotenv["WINRE_ANALYSIS_GATEWAY"] }
-$blockedPeers = if ($env:WINRE_BLOCKED_PEERS) { $env:WINRE_BLOCKED_PEERS } else { $dotenv["WINRE_BLOCKED_PEERS"] }
-if (-not $AnalysisGatewayAddress) { $AnalysisGatewayAddress = if ($analysisGateway) { $analysisGateway } else { "192.168.77.43" } }
-if (-not $gatewayHost) { $gatewayHost = "192.168.77.43" }
-if (-not $gatewayUser) { $gatewayUser = "remnux" }
-if (-not $gatewayKey) { $gatewayKey = Join-Path $env:USERPROFILE ".ssh\RevAI" }
-if (-not $BlockedPeerAddresses -or $BlockedPeerAddresses.Count -eq 0) {
-    if ($blockedPeers) { $BlockedPeerAddresses = @($blockedPeers -split "[,;\s]+" | Where-Object { $_ }) }
-    else { $BlockedPeerAddresses = @("192.168.77.41") }
-}
-try {
-    $gatewayIp = [System.Net.IPAddress]::Parse($AnalysisGatewayAddress)
-    if ($gatewayIp.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) { throw "gateway must be IPv4" }
-    if ($gatewayHost -ne $AnalysisGatewayAddress) { throw "SSH jump host must be the configured analysis gateway" }
-    foreach ($peer in $BlockedPeerAddresses) {
-        $peerIp = [System.Net.IPAddress]::Parse($peer)
-        if ($peerIp.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) { throw "blocked peers must be IPv4: $peer" }
-        if ($peerIp.Equals($gatewayIp)) { throw "gateway cannot also be a blocked peer: $peer" }
-    }
-} catch {
-    Write-Error "Invalid WinRE network policy: $($_.Exception.Message)"
-    exit 2
-}
-if (-not $flareHost -or -not $flareKey -or -not (Test-Path -LiteralPath $gatewayKey)) {
-    Write-Error "FLARE_HOST / FLARE_SSH_KEY / WINRE_GATEWAY_SSH_KEY not set or the gateway key is missing"
+if (-not $flareUser) { $flareUser = "FLARE-VM" }
+if (-not $flareHost -or -not $flareKey) {
+    Write-Error "FLARE_HOST / FLARE_SSH_KEY not set"
     exit 2
 }
 $t = "$flareUser@$flareHost"
-$gatewayProxyCommand = 'ssh -i "{0}" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -W %h:%p {1}@{2}' -f $gatewayKey, $gatewayUser, $gatewayHost
-$sshOpts = @("-i", $flareKey, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15", "-o", "ProxyCommand=$gatewayProxyCommand")
+$sshOpts = @("-i", $flareKey, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15", "-o", "BatchMode=yes")
 
 function Invoke-VM([string]$script, [int]$timeoutSec = 300) {
     # $timeoutSec used to be accepted and IGNORED: callers passed 60/600/1800
@@ -127,7 +95,7 @@ function Get-File([string]$local, [string]$remoteDir) {
 }
 
 Write-Host "=== WinRE re-apply after snapshot revert ===" -ForegroundColor Cyan
-Write-Host "  Analysis/SSH gateway: $AnalysisGatewayAddress ($gatewayUser@$gatewayHost); blocked peers: $($BlockedPeerAddresses -join ', ')"
+Write-Host "  Direct FlareVM connection: $t over VMnet2"
 
 # --- 0. reachability ----------------------------------------------------------
 Write-Host "`n--- 0. VM reachability ---"
@@ -202,12 +170,11 @@ foreach ($r in @("yara-rules", "capa-rules")) {
 
 # --- 5. setup on the VM -------------------------------------------------------
 Write-Host "`n--- 5. setup-flarevm.ps1 (VM) ---"
-$peerLiterals = ($BlockedPeerAddresses | ForEach-Object { "'$_'" }) -join ","
 # the remote exit code has to be ECHOED: `exit N` writes nothing to stdout,
 # so the capture came back EMPTY and the chain reported "FAILED (rc=)" and
 # exited 1 even on a healthy VM (code audit 2026-09-28). One call, output
 # and code together.
-$setupWrap = "Set-Location C:\WinRE; `$gateway = '$AnalysisGatewayAddress'; `$peers = @($peerLiterals); `$o = & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\setup-flarevm.ps1 -AnalysisGatewayAddress `$gateway -BlockedPeerAddresses `$peers 2>&1 | Select-Object -Last 40; `$rc = `$LASTEXITCODE; `$o | Out-String; Write-Output ('RC=' + `$rc)"
+$setupWrap = "Set-Location C:\WinRE; `$o = & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\setup-flarevm.ps1 2>&1 | Select-Object -Last 40; `$rc = `$LASTEXITCODE; `$o | Out-String; Write-Output ('RC=' + `$rc)"
 $out = Invoke-VM $setupWrap 1800
 Write-Host $out
 $setupRc = if ($out -match "RC=(\d+)") { $Matches[1] } else { "unknown" }
@@ -253,7 +220,7 @@ if ((Invoke-VM "Test-Path '$autostart'" 60).Trim() -eq "True") {
 
 # --- 6. verify ----------------------------------------------------------------
 Write-Host "`n--- 6. verify-flarevm.ps1 (VM) ---"
-$verifyWrap = "Set-Location C:\WinRE; `$gateway = '$AnalysisGatewayAddress'; `$peers = @($peerLiterals); `$o = & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\verify-flarevm.ps1 -AnalysisGatewayAddress `$gateway -BlockedPeerAddresses `$peers 2>&1; `$rc = `$LASTEXITCODE; `$o | Out-String; Write-Output ('RC=' + `$rc)"
+$verifyWrap = "Set-Location C:\WinRE; `$o = & powershell -NoProfile -ExecutionPolicy Bypass -File C:\WinRE\install\verify-flarevm.ps1 2>&1; `$rc = `$LASTEXITCODE; `$o | Out-String; Write-Output ('RC=' + `$rc)"
 $verify = Invoke-VM $verifyWrap 900
 Write-Host $verify
 $verifyRc = if ($verify -match "RC=(\d+)") { $Matches[1] } else { "unknown" }

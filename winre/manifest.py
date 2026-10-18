@@ -71,7 +71,7 @@ _PATH_MAP: dict[str, tuple[str, str, str]] = {
     "debug_monitor/process_summary.json": ("debug_monitor", DERIVED, "derived_summary"),
     # ---- memory: procdump of the live process, in-guest ---------------------
     "post_mortem.json":             ("memory", IN_GUEST, "raw_observation"),
-    # ---- network: guest FakeNet or off-box gateway capture ------------------
+    # ---- network: guest FakeNet plus optional passive off-box capture -------
     "network.json":                 ("network", IN_GUEST, "raw_observation"),
     "network_intel.json":           ("network_enrichment", DERIVED, "derived_summary"),
     "external_capture.json":        ("external_capture", OFF_BOX, "collector_status"),
@@ -592,7 +592,7 @@ def _terminal(source: str, stage_dir: Path, meta: dict, job: dict,
             return {"status": "failed", "reason": "external capture belongs to another run"}
         status = capture.get("status")
         if status == "collected":
-            pcap = stage_dir / "off_box" / "network_raw" / "gateway.pcapng"
+            pcap = stage_dir / "off_box" / "network_raw" / "vmnet2.pcap"
             if not pcap.is_file():
                 return {"status": "failed", "reason": "capture reports collected but pcap is absent"}
             expected_hash = capture.get("promoted_sha256") or capture.get("pcap_sha256")
@@ -773,13 +773,11 @@ def write_pack_manifests(pack_root: Path, *, run_id: str, sha256: str,
     if capture_record and capture_record.get("requested"):
         dynamic_meta["external_capture_requested"] = True
         dynamic_meta["external_capture"] = capture_record
-        dynamic_meta["network_mode"] = "gateway"
-    gateway_mode = dynamic_meta.get("network_mode") == "gateway"
+        dynamic_meta["network_mode"] = str(capture_record.get("mode") or "passive")
     dynamic_sources = {
         "frida": {"requested": dynamic_requested, "required": dynamic_requested},
         "procmon": {"requested": dynamic_requested, "required": dynamic_requested},
-        "network": {"requested": dynamic_requested and not gateway_mode,
-                     "required": dynamic_requested and not gateway_mode},
+        "network": {"requested": dynamic_requested, "required": dynamic_requested},
         "network_enrichment": {"requested": dynamic_requested, "required": False},
         "job": {"requested": dynamic_requested, "required": dynamic_requested},
         "process_snapshot": {"requested": dynamic_requested, "required": False},

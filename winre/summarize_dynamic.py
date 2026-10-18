@@ -402,9 +402,9 @@ def main() -> int:
     (out / "procmon_summary.json").write_text(json.dumps(pm, indent=2), encoding="utf-8")
     result = {"frida": fr.get("status"), "procmon": pm.get("status")}
     if args.skip_network:
-        # Gateway mode writes an explicit delegated-capture marker before this
-        # summarizer runs. Do not replace that evidence with a guest-local
-        # network summary; Frida and Procmon are still summarized here.
+        # A caller that explicitly delegates network parsing may already have
+        # written network.json. Preserve that record; Frida and Procmon remain
+        # local summaries regardless of the network collector.
         result["network"] = "preserved"
     else:
         net = summarize_network(out / "network_raw")

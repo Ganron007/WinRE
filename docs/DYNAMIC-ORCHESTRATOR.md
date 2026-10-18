@@ -79,79 +79,56 @@ from the separate control plane before another run. Keep the VM on an isolated
 lab network; FakeNet-NG does not replace hypervisor isolation or firewall
 controls.
 
-WinRE supports two network collection modes. Standalone Flare runs use the
-existing guest-side FakeNet-NG configuration and return its logs and PCAPs.
-When the remote driver runs on the configured REMnux control plane, it uses the
-off-box gateway mode: Flare's default route and DNS point to REMnux, FakeNet is
-disabled for that run, and the driver starts a run-scoped `dumpcap` capture on
-the private interface. The pcap is returned under
-`dynamic/off_box/network_raw/` and is covered by the artifact manifest.
-Gateway mode delegates network interpretation only: the guest still runs
-`summarize_dynamic.py --skip-network` to produce its Frida and Procmon summaries
-without replacing the delegated `network.json` marker. A missing summarizer
-produces explicit partial summaries and marks the job incomplete; an execution
-error or non-`ok` Frida/Procmon summary also marks the job incomplete instead of
-silently omitting those behavior artifacts.
+Standalone and remote-driver dynamic runs use the same guest networking path:
+FakeNet-NG stays active on Flare and the guest keeps its existing default route,
+DNS, and VMnet2 peer access. The setup scripts never point Flare at `.43`, add a
+NAT/bridged adapter, block VMnet2 peers, or route workstation SSH through RevAI.
+The workstation and `.43` connect directly to `.42` over VMnet2.
 
-The paired setup scripts make the intended lab topology persistent:
-`RevAI/install/setup-remnux.sh` installs the REMnux gateway policy whenever
-WinRE is present; `WinRE/install/setup-flarevm.ps1` sets Flare's gateway/DNS,
-allows routed outbound packets so literal-IP traffic reaches the gateway,
-blocks every other on-link VMnet2 peer (including the workstation host), and
-limits SSH and x64dbg control to REMnux `.43`. Host-side sync and reapply use
-`.43` as an SSH jump host; Flare has no direct host-management exception.
-REMnux is the egress boundary: it captures guest packets,
-redirects supported protocols to simulators, and drops every forwarded packet.
-`ops/reapply_after_revert.ps1` passes the same settings on each post-snapshot
-sync; the analysis gateway and additional blocked peers can be overridden with
-`WINRE_ANALYSIS_GATEWAY` and `WINRE_BLOCKED_PEERS`. The SSH jump host, user, and
-key are configured with `WINRE_GATEWAY_HOST`, `WINRE_GATEWAY_USER`, and
-`WINRE_GATEWAY_SSH_KEY` in the operator-host `.env`.
-Direct guest setup accepts `AnalysisGatewayAddress`, `BlockedPeerAddresses`,
-and `AnalysisInterfaceAlias`. The REMnux setup defaults can be changed with
-`WINRE_GATEWAY_IP`, `WINRE_GUEST_IP`, and `WINRE_ANALYSIS_INTERFACE`.
+When RevAI's remote driver runs a dynamic job, it starts a run-scoped `tcpdump`
+capture on the REMnux VMnet2 interface before the guest helper launches. The
+capture filter is exactly `host 192.168.77.42`; tcpdump's default promiscuous
+request is enabled by omitting `-p`. It stops after the remote helper completes,
+validates the classic pcap header and SHA-256, and places the pcap and capture
+record under `dynamic/off_box/`. RevAI setup requires `tcpdump` capabilities and
+writes `/etc/revai/winre-capture.json`; the remote dynamic path fails before
+launch if this configuration or capture startup is missing. Static analysis
+does not start a packet capture. The guest's FakeNet logs and the off-box pcap
+remain separate evidence sources and are both reported.
 
-REMnux binds a no-upstream dnsmasq instance and INetSim to the guest-facing
-interface. Its nftables policy redirects DNS to dnsmasq and common simulated
-service ports to INetSim, captures guest packets, and drops all forwarded
-traffic. The `.43` NAT interface is therefore not a route for Flare. DNS
-responses are served by no-upstream dnsmasq, and common HTTP(S), mail, FTP,
-IRC, TFTP, and NTP traffic is redirected to INetSim where the installed service
-supports it. Other routed traffic remains visible at the capture interface and
-is dropped by REMnux; Flare receives no Internet access. This does not decrypt
-TLS.
+Promiscuous mode asks Linux to accept frames that reach the REMnux VMnet2
+interface. VMware Workstation's host-only description guarantees a private LAN
+shared by the host and attached VMs, but does not promise that every unicast
+frame between other VM ports is mirrored to `.43`. Verify visibility on the
+actual host and Workstation build before relying on this sensor for complete
+network evidence. A valid pcap with zero packets is reported as collected with
+`packets_captured: 0`; it is not evidence that the sample made no network
+connections.
 
-Gateway mode is enabled only when the control plane has a valid
-`/etc/revai/winre-gateway.json` from the RevAI setup script. It fails closed
-before launching the sample if `dumpcap` cannot start. The off-box capture is a
-required source for that mode; reports identify the interface and pcap hash.
-Before the first sample run, verify the route, simulator listeners, forwarding
-state, and a benign DNS/HTTP packet exchange from Flare. The following smoke
-test uses only reserved test names and addresses; it does not execute a sample.
-
-On REMnux, capture both the private VMnet2 interface and the NAT-facing
-interface in separate terminals:
+Before the first sample run, test direct SSH from the workstation and `.43` to
+Flare, then verify that `.43` sees traffic from `.42` that is addressed to a
+different VMnet2 endpoint. On REMnUX, replace `<vmnet2-interface>` with the
+interface owning `.43` and start:
 
 ```bash
-sudo timeout 30 tcpdump -nni ens32 'host 192.168.77.42 and (port 53 or host 198.51.100.17)' -w /tmp/winre-vmnet2.pcap
-sudo timeout 30 tcpdump -nni ens33 'host 198.51.100.17 or host 192.168.77.42' -w /tmp/winre-nat.pcap
+sudo tcpdump -U -n -i <vmnet2-interface> -w /tmp/winre-vmnet2-smoke.pcap 'host 192.168.77.42'
 ```
 
-While both captures are running, use Flare's PowerShell prompt:
+While the capture runs, send a benign ping from Flare to the host-only VMware
+adapter address (commonly `192.168.77.1`, but use the actual configured address):
 
 ```powershell
-Resolve-DnsName "preflight-$([guid]::NewGuid().ToString('N')).invalid" `
-  -Server 192.168.77.43 -Type A -DnsOnly
-curl.exe --noproxy "*" --max-time 10 -sS -o NUL -w "HTTP=%{http_code}`n" `
-  http://198.51.100.17/
+ping.exe -n 3 192.168.77.1
 ```
 
-The DNS answer should be `192.168.77.43`, HTTP should return `200`, the VMnet2
-capture should contain the guest DNS and HTTP exchange, and the NAT capture
-should contain zero matching packets. Confirm `sysctl -n net.ipv4.ip_forward`
-returns `0` on REMnux. After setup/revert, run
-`ops/reapply_after_revert.ps1`; it resyncs local code and reapplies the guest
-policy. Continue to restore and verify the clean snapshot between sample runs.
+Stop tcpdump with Ctrl+C and inspect the capture with
+`tcpdump -nn -r /tmp/winre-vmnet2-smoke.pcap`. It should show the `.42` packets
+even though they were not addressed to `.43`. If it does not, the host-only
+network is not delivering those frames to the RevAI interface; promiscuous mode
+alone cannot fix that. Use host-side VMnet capture or a VMware-supported mirror
+path and record the resulting capture source accurately. After snapshot restore,
+run `ops/reapply_after_revert.ps1` to sync the current guest code and verify the
+network policy before the next run.
 
 ## Related documentation
 

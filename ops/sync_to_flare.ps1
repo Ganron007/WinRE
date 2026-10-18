@@ -9,18 +9,14 @@
 
     Usage:
       powershell -ExecutionPolicy Bypass -File ops\sync_to_flare.ps1
-      Set FLARE_HOST / FLARE_USER / FLARE_SSH_KEY and
-      WINRE_GATEWAY_HOST / WINRE_GATEWAY_USER / WINRE_GATEWAY_SSH_KEY in .env.
-      Flare is reached through the REMnux gateway; no direct workstation route is used.
+      Set FLARE_HOST / FLARE_USER / FLARE_SSH_KEY in .env.
+      The workstation and FlareVM must both be connected to the private VMnet2 network.
 #>
 param(
     [string]$FlareHost = $env:FLARE_HOST,
     [string]$User = $env:FLARE_USER,
     [string]$SshKey  = $env:FLARE_SSH_KEY,
     [string]$SshPort = $env:FLARE_SSH_PORT,
-    [string]$GatewayHost = $env:WINRE_GATEWAY_HOST,
-    [string]$GatewayUser = $env:WINRE_GATEWAY_USER,
-    [string]$GatewaySshKey = $env:WINRE_GATEWAY_SSH_KEY,
     [string]$RemoteRoot = $env:FLARE_REMOTE_ROOT,
     # Remove remote files inside the mirrored source trees that no longer exist
     # on the host. OFF by default: the sync is additive so a re-run can never
@@ -54,17 +50,6 @@ if (-not $SshPort) { $SshPort = $env:FLARE_SSH_PORT; if (-not $SshPort) { $SshPo
 if (-not $FlareHost -or -not $SshKey) {
     Die "FLARE_HOST / FLARE_SSH_KEY not set (neither env nor .env)"
 }
-if (-not $GatewayHost) { $GatewayHost = $env:WINRE_GATEWAY_HOST; if (-not $GatewayHost) { $GatewayHost = $dotenvVars["WINRE_GATEWAY_HOST"] } }
-if (-not $GatewayHost) { $GatewayHost = "192.168.77.43" }
-if (-not $GatewayUser) { $GatewayUser = $env:WINRE_GATEWAY_USER; if (-not $GatewayUser) { $GatewayUser = $dotenvVars["WINRE_GATEWAY_USER"] } }
-if (-not $GatewayUser) { $GatewayUser = "remnux" }
-if (-not $GatewaySshKey) { $GatewaySshKey = $env:WINRE_GATEWAY_SSH_KEY; if (-not $GatewaySshKey) { $GatewaySshKey = $dotenvVars["WINRE_GATEWAY_SSH_KEY"] } }
-if (-not $GatewaySshKey) { $GatewaySshKey = Join-Path $env:USERPROFILE ".ssh\RevAI" }
-if (-not (Test-Path -LiteralPath $GatewaySshKey)) {
-    Die "gateway SSH key missing: $GatewaySshKey (set WINRE_GATEWAY_SSH_KEY)"
-}
-$gatewayProxyCommand = 'ssh -i "{0}" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -W %h:%p {1}@{2}' -f $GatewaySshKey, $GatewayUser, $GatewayHost
-$gatewayProxyOption = "ProxyCommand=$gatewayProxyCommand"
 if (-not $SshPort) { $SshPort = "22" }
 $portNumber = 0
 if (-not [int]::TryParse([string]$SshPort, [ref]$portNumber) -or
@@ -123,11 +108,11 @@ foreach ($nested in @("docs\internal")) {
 }
 
 $dest = "$User@$FlareHost`:$($RemoteRoot.Replace('\','/'))"
-Step "scp -> $dest via $GatewayUser@$GatewayHost"
+Step "scp -> $dest over VMnet2"
 $null = New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP "winre-sync-tmp")
 # BatchMode: without it a rejected key makes scp prompt for a password and
 # hang forever inside a non-interactive chain
-scp -i "$SshKey" -P $SshPort -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 -o $gatewayProxyOption -r "$Staging\*" "$dest" 2>&1 | ForEach-Object { Write-Host $_ }
+scp -i "$SshKey" -P $SshPort -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 -r "$Staging\*" "$dest" 2>&1 | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) { Die "scp failed rc=$LASTEXITCODE" }
 
 # scp's glob does NOT pick up dotfiles on Windows, so `.env.template` and
@@ -140,7 +125,7 @@ $dotStaged = Get-ChildItem -LiteralPath $Staging -Force -File |
 if ($dotStaged) {
     Step ("scp dotfiles -> " + (($dotStaged.Name) -join ", "))
     foreach ($f in $dotStaged) {
-        scp -i "$SshKey" -P $SshPort -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 -o $gatewayProxyOption "$($f.FullName)" "$dest" 2>&1 |
+        scp -i "$SshKey" -P $SshPort -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 "$($f.FullName)" "$dest" 2>&1 |
             ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) { Die "scp dotfile $($f.Name) failed rc=$LASTEXITCODE" }
     }
@@ -164,7 +149,7 @@ if ($Prune -or $PruneDryRun) {
     [IO.File]::WriteAllText($stagedManifestLocal, ($rel -join [Environment]::NewLine),
                             [Text.UTF8Encoding]::new($false))
     $stagedManifestDest = "{0}@{1}:{2}" -f $User, $FlareHost, $stagedManifestRemoteUnix
-    scp -i "$SshKey" -P $SshPort -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 -o $gatewayProxyOption "$stagedManifestLocal" "$stagedManifestDest" 2>&1 |
+    scp -i "$SshKey" -P $SshPort -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 "$stagedManifestLocal" "$stagedManifestDest" 2>&1 |
         ForEach-Object { Write-Host $_ }
     $stagedManifestScpRc = $LASTEXITCODE
     Remove-Item -LiteralPath $stagedManifestLocal -Force -ErrorAction SilentlyContinue
@@ -201,7 +186,7 @@ if (`$cand.Count -eq 0) { 'PRUNE_NONE'; exit 0 }
 `$cand | Sort-Object | ForEach-Object { 'PRUNE ' + `$_ }
 "@
     $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($pruneScript))
-    $plist = ssh -i $SshKey -p $SshPort -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes -o $gatewayProxyOption "$User@$FlareHost" "powershell -NoProfile -EncodedCommand $enc" 2>&1 | Out-String
+    $plist = ssh -i $SshKey -p $SshPort -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes "$User@$FlareHost" "powershell -NoProfile -EncodedCommand $enc" 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0 -and $plist -notmatch "PRUNE_") {
         Write-Output $plist
         Die "prune probe failed (ssh rc=$LASTEXITCODE) - refusing to report an empty diff"
@@ -238,7 +223,7 @@ $($targets -join "`n")
 }
 "@
                         $denc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($del))
-            $dout = ssh -i $SshKey -p $SshPort -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes -o $gatewayProxyOption "$User@$FlareHost" "powershell -NoProfile -EncodedCommand $denc" 2>&1 | Out-String
+            $dout = ssh -i $SshKey -p $SshPort -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes "$User@$FlareHost" "powershell -NoProfile -EncodedCommand $denc" 2>&1 | Out-String
             $removed = @($dout -split "`r?`n" | Where-Object { $_.Trim() -like "REMOVED*" })
             $failed  = @($dout -split "`r?`n" | Where-Object { $_.Trim() -like "FAILED*" })
             $skipped = @($dout -split "`r?`n" | Where-Object { $_.Trim() -like "SKIPPED_OUTSIDE*" })
@@ -271,7 +256,7 @@ $manifestJsonLines = @($manifestRows | ForEach-Object {
 })
 [IO.File]::WriteAllLines($manifestLocal, $manifestJsonLines, [Text.UTF8Encoding]::new($false))
 $manifestDest = "$User@$FlareHost`:$manifestRemoteUnix"
-scp -i "$SshKey" -P $SshPort -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 -o $gatewayProxyOption "$manifestLocal" "$manifestDest" 2>&1 |
+scp -i "$SshKey" -P $SshPort -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 "$manifestLocal" "$manifestDest" 2>&1 |
     ForEach-Object { Write-Host $_ }
 $manifestScpRc = $LASTEXITCODE
 Remove-Item -LiteralPath $manifestLocal -Force -ErrorAction SilentlyContinue
@@ -325,7 +310,7 @@ if ($verifyParseErrors.Count -gt 0) {
     Die "generated remote parity script is invalid: $($verifyParseErrors[0].Message)"
 }
 $verifyEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($verifyScript))
-$probe = ssh -i "$SshKey" -p $SshPort -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes -o $gatewayProxyOption "$User@$FlareHost" "powershell -NoProfile -EncodedCommand $verifyEncoded" 2>&1 | Out-String
+$probe = ssh -i "$SshKey" -p $SshPort -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes "$User@$FlareHost" "powershell -NoProfile -EncodedCommand $verifyEncoded" 2>&1 | Out-String
 if ($LASTEXITCODE -eq 0 -and $probe -match "DEPLOY_PARITY_OK files=$($manifestRows.Count)(?:\s|$)") {
     Step "DEPLOY_OK — SHA-256 parity for $($manifestRows.Count) staged files"
 } else {

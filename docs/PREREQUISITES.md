@@ -130,28 +130,25 @@ choco install temurin21 -y
 
 ## Safety requirements
 
-- Keep Flare on the private VMnet2 network. In the paired RevAI/WinRE lab,
-  setup configures REMnux `.43` as Flare's default gateway and DNS server while
-  disabling IPv4/IPv6 forwarding on REMnux. Windows Firewall blocks inbound
-  traffic by default and blocks every on-link VMnet2 peer except `.43`,
-  including `.41` and the workstation host. Only `.43` can administer Flare
-  over SSH; workstation sync and reapply use `.43` as an SSH jump host. Routed
-  outbound packets reach `.43` so literal-IP
-  traffic can be captured. REMnux redirects DNS to no-upstream dnsmasq,
-  supported service ports to INetSim, and drops all forwarding. Do not add a
-  NAT or bridged adapter to Flare.
-- Standalone WinRE runs retain guest-side FakeNet-NG. Remote-driver runs from
-  the configured REMnux host use gateway mode: FakeNet is disabled for that
-  run, `dumpcap` records the guest traffic outside the VM, and the gateway
-  simulator handles DNS and supported common protocols. The manifest marks
-  off-box capture as required in gateway mode. Packets remain sample-controlled;
-  the capture file and interpretation are still subject to coverage and parser
-  limitations.
-- After first setup or a snapshot restore, verify the guest route/DNS, firewall
-  profiles, INetSim service, REMnux no-forward policy, and a benign packet
-  exchange before running a sample. See
-  [Dynamic Orchestrator](DYNAMIC-ORCHESTRATOR.md) for the two-mode contract and
-  limitations.
+- Keep Flare on the private VMnet2 network and do not add a NAT or bridged
+  adapter. WinRE preserves the guest's existing default route and DNS; its
+  setup does not point Flare at RevAI `.43` or block other VMnet2 peers. SSH
+  and x64dbg access are allowed from the VMnet2 `LocalSubnet`, so the operator
+  workstation and RevAI can connect directly when attached to that network.
+- Standalone and remote-driver WinRE runs both keep guest-side FakeNet-NG.
+  Remote-driver dynamic runs require a run-scoped `tcpdump` capture on the
+  control plane's VMnet2 interface and fail before guest launch if capture is
+  not configured or cannot start. `tcpdump` requests promiscuous mode by default.
+  VMware Workstation host-only
+  networks are private LANs, but visibility of unicast frames depends on what
+  the virtual network delivers to that interface; verify it with the benign
+  packet test in [Dynamic Orchestrator](DYNAMIC-ORCHESTRATOR.md). A valid pcap
+  proves the capture file was collected, not that every possible frame was
+  mirrored or that a protocol parser understood it.
+- After setup or a snapshot restore, verify Flare's existing route/DNS, direct
+  SSH from the workstation and `.43`, and passive packet visibility before a
+  sample run. The passive capture adds no guest route, DNS, firewall-peer, or
+  gateway dependency; capture is restricted to `host 192.168.77.42`.
 - **Snapshot discipline**: after setup creates `C:\WinRE\.clean_snapshot`,
   take/update the VM snapshot. After restoring it, verify the guest and attest
   the clean state from the separate control plane with

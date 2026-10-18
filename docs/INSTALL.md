@@ -35,9 +35,6 @@ Point `FLARE_*` environment variables at your VM (or put them in `.env`):
 | `FLARE_USER` | SSH user on the VM | `FLARE-VM` |
 | `FLARE_SSH_KEY` | path to your private key | `~/.ssh/<your-key>` |
 | `FLARE_SSH_PORT` | SSH port | `22` |
-| `WINRE_GATEWAY_HOST` | optional SSH jump host for callers that cannot reach Flare directly | `.43` in the paired lab |
-| `WINRE_GATEWAY_USER` | SSH user on the jump host | `remnux` |
-| `WINRE_GATEWAY_SSH_KEY` | operator-host private key used to reach the jump host | *set yours; leave unset on `.43`* |
 | `WINRE_REMOTE_PIPELINE` | repo location on the VM | `C:\WinRE` |
 
 Snapshot-gate config:
@@ -59,10 +56,10 @@ Smoke-check connectivity:
 python ops\smoke_flare.py
 ```
 
-`ops\smoke_flare.py` uses the configured SSH jump host for its SSH and SCP
-checks. From the workstation, set `WINRE_GATEWAY_HOST`, `WINRE_GATEWAY_USER`,
-and `WINRE_GATEWAY_SSH_KEY` as described above; the x64dbg HTTP probe remains
-advisory because its firewall rule accepts the `.43` control plane only. The
+`ops\smoke_flare.py`, repository sync, and post-revert reapply connect directly
+to `FLARE_HOST` over VMnet2. Connect the operator workstation and FlareVM to the
+same private VMnet2 network. The x64dbg HTTP probe remains advisory because the
+debugger server is launched on demand. The
 smoke check runs read-only checks and a per-run temporary compile helper, which
 it removes before returning. `install\verify-flarevm.ps1`
 performs live SQL checks using benign probe copies under `%TEMP%`; it isolates their cache,
@@ -94,8 +91,8 @@ repo `C:\WinRE` + layout, snapshot marker, `.env.template`; pip deps
 (source -> `tools\x64dbg-mcp-winre.patch` -> staged zig auto-unzip to
 `C:\Tools\zig` -> build -> deploy BOTH arches (`release\x64\plugins\x64dbg-MCP-Server.dp64`
 + `release\x32\plugins\x64dbg-MCP-Server.dp32` - x64dbg.exe loads only the dp64, the old
-single-select check silently shipped dp32-only and :9094 never bound); a firewall allow
-rule then scopes `:9094` to the REMnux gateway address);
+single-select check silently shipped dp32-only and :9094 never bound); firewall
+allow rules expose the debugger ports to VMnet2's LocalSubnet);
 the **SQL-first Ghidra/IDA stack** (staged `LibGhidraHost.zip` +
 `ghidrasql.exe` + `idasql.exe`; per-project HTTP servers with a reuse
 registry and end-of-run sweep - see [`SQL-GHIDRA.md`](SQL-GHIDRA.md))
@@ -110,23 +107,16 @@ Rules: `C:\Tools\capa-rules` (clone `mandiant/capa-rules`) and
 downloads/clones the free tools and stages them to `C:\Tools-staged\`.
 
 For the paired RevAI/WinRE topology, run RevAI's `install/setup-remnux.sh` on
-the control plane with WinRE installed. It binds no-upstream dnsmasq, INetSim,
-and the capture guard to the private VMnet2 interface and keeps IP forwarding
-disabled. Host-side sync and reapply reach Flare through `.43` as an SSH jump
-host; configure `WINRE_GATEWAY_HOST`, `WINRE_GATEWAY_USER`, and
-`WINRE_GATEWAY_SSH_KEY` in the operator-host `.env`. Then run
-`setup-flarevm.ps1` (or `ops/reapply_after_revert.ps1`) on Flare. The guest
-setup persists `.43` as its gateway and DNS, blocks inbound traffic by default,
-allows routed outbound packets to the gateway, blocks all other on-link VMnet2
-  IPv4 peers (including `.41` and the workstation host), blocks IPv6 in both
-  directions on all guest interfaces, and restricts SSH/x64dbg
-inbound access to `.43`. Direct host-to-Flare access is blocked; all VM
-administration and source synchronization pass through the gateway.
-REMnux captures those packets and never forwards them to its NAT interface. The
-remote driver uses off-box gateway capture; standalone Flare runs retain
-FakeNet. See
-[`DYNAMIC-ORCHESTRATOR.md`](DYNAMIC-ORCHESTRATOR.md) for validation and
-protocol coverage limits.
+the control plane with WinRE installed. RevAI prepares a run-scoped passive
+capture on its VMnet2 interface. `tcpdump` requests promiscuous mode while a
+remote dynamic run is active; Flare keeps its existing route/DNS and guest-side
+FakeNet configuration. The WinRE setup does not point the guest at `.43` or
+block other VMnet2 peers. Host-side sync and reapply connect directly to
+`FLARE_HOST`; RevAI connects directly to the Flare guest over VMnet2 as well.
+Keep Flare attached only to the private VMnet2 network. See
+[`DYNAMIC-ORCHESTRATOR.md`](DYNAMIC-ORCHESTRATOR.md) for the capture smoke test
+and the limitation that promiscuous mode requests all frames delivered by
+VMware but cannot guarantee the virtual network mirrors them.
 
 **Operator with staged assets** (`internal\reapply\`, air-gap safe): one
 command re-applies everything to a fresh/reverted VM -

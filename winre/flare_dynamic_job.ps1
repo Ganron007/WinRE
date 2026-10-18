@@ -24,7 +24,7 @@ param(
   # sample does something notable, then lets it settle.
   [string]$StopOn = "network,file",
   [int]$StopOnSettle = 20,
-  [ValidateSet("fakenet", "gateway")][string]$NetworkMode = "fakenet",
+  [ValidateSet("fakenet", "passive")][string]$NetworkMode = "fakenet",
   # A DLL cannot be spawned - Frida refuses it with "unsupported file
   # format". It is loaded through a host instead (rundll32 -<File>,<Entry>).
   # Empty means: derive the entry point from the file's own export directory.
@@ -34,7 +34,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $networkModeEnv = ($env:WINRE_NETWORK_MODE -as [string]).Trim().ToLowerInvariant()
-if ($networkModeEnv -eq "gateway") { $NetworkMode = "gateway" }
+if ($networkModeEnv -eq "passive") { $NetworkMode = $networkModeEnv }
 $Sha256 = $Sha256.Trim().ToLower()
 if (-not $WorkRoot) { $WorkRoot = "C:\samples\$Sha256" }
 if (-not $SamplePath) { $SamplePath = Join-Path $WorkRoot "sample.exe" }
@@ -151,7 +151,7 @@ foreach ($req in @(@{p=$Python;n="python"},@{p=$FridaScript;n="frida"},@{p=$Proc
     exit 3
   }
 }
-if ($NetworkMode -eq "fakenet" -and -not (Test-Path $FakeNetExe)) {
+if (-not (Test-Path $FakeNetExe)) {
   Log ("FATAL: fakenet missing: {0}" -f $FakeNetExe)
   exit 3
 }
@@ -165,24 +165,20 @@ Log ("pre_snapshot processes={0}" -f $pre.Count)
 $fnWork = Join-Path $WorkRoot "fakenet"
 New-Item -ItemType Directory -Force -Path $fnWork | Out-Null
 $fnProc = $null
-if ($NetworkMode -eq "gateway") {
-  Log "gateway mode: FakeNet is disabled; .43 provides DNS/service simulation and off-box capture"
-} else {
-  Copy-Item "C:\Tools\fakenet\fakenet3.5\configs\default.ini" (Join-Path $fnWork "default.ini") -Force
-  Log "starting FakeNet..."
-  try {
-    $fnProc = Start-Process -FilePath $FakeNetExe -WorkingDirectory $fnWork -PassThru -WindowStyle Minimized
-    Start-Sleep -Seconds 4
-    if ($fnProc.HasExited) {
-      Log ("WARN: FakeNet exited early rc={0}" -f $fnProc.ExitCode)
-      $fnProc = $null
-    } else {
-      Log ("FakeNet pid={0}" -f $fnProc.Id)
-    }
-  } catch {
-    Log "WARN: FakeNet start failed: $_"
+Copy-Item "C:\Tools\fakenet\fakenet3.5\configs\default.ini" (Join-Path $fnWork "default.ini") -Force
+Log "starting FakeNet..."
+try {
+  $fnProc = Start-Process -FilePath $FakeNetExe -WorkingDirectory $fnWork -PassThru -WindowStyle Minimized
+  Start-Sleep -Seconds 4
+  if ($fnProc.HasExited) {
+    Log ("WARN: FakeNet exited early rc={0}" -f $fnProc.ExitCode)
     $fnProc = $null
+  } else {
+    Log ("FakeNet pid={0}" -f $fnProc.Id)
   }
+} catch {
+  Log "WARN: FakeNet start failed: $_"
+  $fnProc = $null
 }
 
 $pml = Join-Path $OutDir "procmon.pml"
@@ -615,15 +611,9 @@ Log ("new_processes={0}" -f $newProcs.Count)
 $summaryPy = Join-Path $PSScriptRoot "summarize_dynamic.py"
 if (-not (Test-Path $summaryPy)) { $summaryPy = "C:\tools\reveng-dynamic\summarize_dynamic.py" }
 $summaryErrors = @()
-if ($NetworkMode -eq "gateway") {
-  @{ status = "delegated_external"; collector = "REMnux gateway capture";
-     reason = "guest FakeNet is disabled in gateway mode" } |
-    ConvertTo-Json -Depth 3 | Set-Content (Join-Path $OutDir "network.json") -Encoding UTF8
-}
 if (Test-Path $summaryPy) {
   Log "running summarize_dynamic.py"
   $summaryArgs = @("--out-dir", $OutDir, "--sample-name", "$SampleProcName.exe")
-  if ($NetworkMode -eq "gateway") { $summaryArgs += "--skip-network" }
   & $Python $summaryPy @summaryArgs 2>&1 | ForEach-Object { Log "$_" }
   if ($LASTEXITCODE -ne 0) {
     $summaryErrors += "summarize_dynamic.py exited $LASTEXITCODE"
@@ -631,9 +621,7 @@ if (Test-Path $summaryPy) {
 } else {
   Log "WARN: summarize_dynamic.py missing"
   $summaryErrors += "summarize_dynamic.py missing"
-  if ($NetworkMode -ne "gateway") {
-    @{ status = "partial"; reason = "summarizer missing" } | ConvertTo-Json | Set-Content (Join-Path $OutDir "network.json") -Encoding UTF8
-  }
+  @{ status = "partial"; reason = "summarizer missing" } | ConvertTo-Json | Set-Content (Join-Path $OutDir "network.json") -Encoding UTF8
 }
 foreach ($summaryName in @("frida_summary.json", "procmon_summary.json")) {
   $summaryPath = Join-Path $OutDir $summaryName
@@ -727,7 +715,7 @@ if (Test-Path $trace) {
   frida_exit = $fridaExit
   fakenet_started = [bool]$fnProc
   network_mode = $NetworkMode
-  external_capture_requested = ($NetworkMode -eq "gateway")
+  external_capture_requested = ($NetworkMode -eq "passive")
   procmon_pml = (Test-Path $pml)
   procmon_csv = (Test-Path $csv)
   pe_sieve_enabled = [bool]$EnablePeSieve

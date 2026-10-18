@@ -15,8 +15,7 @@
       powershell -ExecutionPolicy Bypass -File C:\WinRE\install\verify-flarevm.ps1
 #>
 param(
-    [string]$AnalysisGatewayAddress = "192.168.77.43",
-    [string[]]$BlockedPeerAddresses = @("192.168.77.41")
+    [string]$LegacyAnalysisGatewayAddress = "192.168.77.43"
 )
 
 $ErrorActionPreference = "Continue"
@@ -361,183 +360,60 @@ if (Test-Path $plug64) { Ok "MCP plugin dp64 -> $plug64" }
 else { Fail "x64dbg MCP dp64 plugin missing ($plug64) - :9094 cannot bind" }
 if (Test-Path $plug32) { Ok "MCP plugin dp32 -> $plug32" }
 else { Warn "MCP plugin dp32 missing ($plug32) - x32dbg debug loop unavailable" }
-$fwName = "WinRE x64dbg MCP (lab subnet)"
-$fw = Get-NetFirewallRule -DisplayName $fwName -ErrorAction SilentlyContinue
-if ($fw) {
-    $fwRemote = (Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $fw -ErrorAction SilentlyContinue).RemoteAddress
-    if ($fwRemote -contains $AnalysisGatewayAddress) { Ok "firewall: :9094 scoped to gateway $AnalysisGatewayAddress" }
-    else { Fail "firewall rule '$fwName' is not restricted to gateway $AnalysisGatewayAddress" }
-} else { Fail "no firewall rule '$fwName' for :9094 - run setup-flarevm.ps1 elevated" }
-
-Write-Host "`n--- Isolated analysis network ---"
-$analysisGateway = $AnalysisGatewayAddress
-$gatewayOctets = $analysisGateway.Split('.')
-$analysisPrefix = ($gatewayOctets[0..2] -join '.') + '.'
+Write-Host "`n--- VMnet2 guest networking ---"
+$legacyGateway = [System.Net.IPAddress]::Parse($LegacyAnalysisGatewayAddress).ToString()
+$gatewayOctets = $legacyGateway.Split('.')
+$vmnetPrefix = ($gatewayOctets[0..2] -join '.') + '.'
 $analysisAddress = Get-NetIPAddress -AddressFamily IPv4 -Type Unicast -ErrorAction SilentlyContinue |
-    Where-Object { $_.IPAddress.StartsWith($analysisPrefix) -and $_.PrefixLength -eq 24 } |
+    Where-Object { $_.IPAddress.StartsWith($vmnetPrefix) -and $_.PrefixLength -eq 24 } |
     Select-Object -First 1
 if (-not $analysisAddress) {
-    Fail "VMnet2 /24 address not found; run setup-flarevm.ps1 with the analysis adapter connected"
+    Fail "VMnet2 /24 address not found; connect the analysis adapter before verification"
 } else {
-    $activeDefaults = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix "0.0.0.0/0" `
-        -ErrorAction SilentlyContinue)
-    $activeGateway = @($activeDefaults | Where-Object {
-        $_.InterfaceIndex -eq $analysisAddress.InterfaceIndex -and $_.NextHop -eq $analysisGateway
-    })
-    if ($activeDefaults.Count -eq 1 -and $activeGateway.Count -eq 1) {
-        Ok "only active IPv4 default route -> $analysisGateway"
-    } else {
-        $routeSummary = ($activeDefaults | ForEach-Object {
-            "$($_.NextHop) via ifIndex $($_.InterfaceIndex)"
-        }) -join ', '
-        Fail "expected only one active IPv4 default route through $analysisGateway; found: $routeSummary"
-    }
-    $persistentDefaults = @(Get-NetRoute -PolicyStore PersistentStore -AddressFamily IPv4 `
+    $activeDefaults = @(Get-NetRoute -PolicyStore ActiveStore -AddressFamily IPv4 `
         -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue)
-    $persistentGateway = @($persistentDefaults | Where-Object {
-        $_.InterfaceIndex -eq $analysisAddress.InterfaceIndex -and $_.NextHop -eq $analysisGateway
-    })
-    if ($persistentDefaults.Count -eq 1 -and $persistentGateway.Count -eq 1) {
-        Ok "only persistent IPv4 default route -> $analysisGateway"
+    if (@($activeDefaults | Where-Object NextHop -eq $legacyGateway).Count -eq 0) {
+        Ok "no forced default route through legacy REMnux address $legacyGateway"
     } else {
-        $routeSummary = ($persistentDefaults | ForEach-Object {
-            "$($_.NextHop) via ifIndex $($_.InterfaceIndex)"
-        }) -join ', '
-        Fail "expected only one persistent IPv4 default route through $analysisGateway; found: $routeSummary"
+        Fail "legacy REMnux default route $legacyGateway remains; rerun setup-flarevm.ps1"
     }
+    $routeSummary = if ($activeDefaults.Count) { ($activeDefaults | ForEach-Object NextHop) -join ", " } else { "none" }
+    Ok "preserved existing default route(s): $routeSummary"
     $dns = (Get-DnsClientServerAddress -InterfaceIndex $analysisAddress.InterfaceIndex `
         -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
-    if ($dns -contains $analysisGateway) { Ok "DNS -> $analysisGateway" }
-    else { Fail "analysis interface DNS is not $analysisGateway" }
-    $dnsClientService = Get-CimInstance Win32_Service -Filter "Name='Dnscache'" -ErrorAction SilentlyContinue
-    if ($dnsClientService -and $dnsClientService.State -eq "Running" -and
-        $dnsClientService.StartMode -eq "Auto") {
-        Ok "Windows DNS Client service running and enabled at boot"
-    } else {
-        Fail "Windows DNS Client service must be running with automatic startup"
-    }
-}
-$profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction SilentlyContinue)
-if ($profiles.Count -eq 3 -and @($profiles | Where-Object {
-    -not $_.Enabled -or $_.DefaultInboundAction -ne "Block" -or
-    $_.DefaultOutboundAction -ne "Allow" -or -not $_.AllowLocalFirewallRules
-}).Count -eq 0) { Ok "effective firewall profiles enabled; local rules merged; inbound blocked, routed outbound allowed to the no-forward gateway" }
-else { Fail "effective firewall profiles must be enabled, merge local rules, block inbound, and allow routed outbound" }
-$firewallPolicyRoot = "HKLM:\SOFTWARE\Policies\Microsoft\WindowsFirewall"
-$policyFailures = @()
-foreach ($profileName in @("DomainProfile", "PrivateProfile", "PublicProfile")) {
-    $profilePath = Join-Path $firewallPolicyRoot $profileName
-    $policy = if (Test-Path -LiteralPath $profilePath) { Get-ItemProperty -LiteralPath $profilePath -ErrorAction SilentlyContinue } else { $null }
-    if (-not $policy -or $policy.EnableFirewall -ne 1 -or
-        $policy.AllowLocalPolicyMerge -ne 1 -or
-        $policy.DefaultInboundAction -ne 1 -or $policy.DefaultOutboundAction -ne 0) {
-        $policyFailures += $profileName
-    }
-}
-$standardProfilePath = Join-Path $firewallPolicyRoot "StandardProfile"
-$standardPolicy = if (Test-Path -LiteralPath $standardProfilePath) {
-    Get-ItemProperty -LiteralPath $standardProfilePath -ErrorAction SilentlyContinue
-} else { $null }
-if (-not $standardPolicy -or $standardPolicy.EnableFirewall -ne 1) { $policyFailures += "StandardProfile" }
-if ($policyFailures.Count -eq 0) { Ok "persistent policy enables firewall and local-rule merge for all profiles" }
-else { Fail "firewall policy registry settings missing or incorrect: $($policyFailures -join ', ') (rerun setup-flarevm.ps1)" }
-
-# Check effective filters, not merely a matching display name. Disabled,
-# wrong-direction or port-scoped rules must not certify IPv6 isolation.
-$ipv6Failures = @()
-foreach ($direction in @("Inbound", "Outbound")) {
-    $name = "WinRE isolated analysis network - block IPv6 $direction"
-    $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -DisplayName $name -ErrorAction SilentlyContinue)
-    if ($rules.Count -ne 1) { $ipv6Failures += $direction; continue }
-    $rule = $rules[0]
-    $address = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue
-    $port = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue
-    $interface = Get-NetFirewallInterfaceFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue
-    if ($rule.Enabled -ne "True" -or $rule.Action -ne "Block" -or
-        $rule.Direction -ne $direction -or [string]$rule.Profile -ne "Any" -or
-        $address.RemoteAddress -notcontains "::/1" -or
-        $address.RemoteAddress -notcontains "8000::/1" -or
-        $address.LocalAddress -notcontains "Any" -or
-        $port.Protocol -ne "Any" -or $port.LocalPort -notcontains "Any" -or
-        $port.RemotePort -notcontains "Any" -or $interface.InterfaceAlias -notcontains "Any") {
-        $ipv6Failures += $direction
-    }
-}
-if ($ipv6Failures.Count -eq 0) { Ok "IPv6 blocked in both directions on all interfaces (IPv4-only simulator)" }
-else { Fail "IPv6 isolation missing or ineffective: $($ipv6Failures -join ', ') (rerun setup-flarevm.ps1)" }
-if ($analysisAddress) {
-    $octets = $analysisGateway.Split('.')
-    $prefix = ($octets[0..2] -join '.') + '.'
-    $gatewayLast = [int]$octets[3]
-    $excludedHostOctets = @($gatewayLast)
-    $peerRanges = @()
-    $rangeStart = 1
-    foreach ($excludedHostOctet in $excludedHostOctets) {
-        if ($excludedHostOctet -gt $rangeStart) {
-            $peerRanges += "${prefix}${rangeStart}-${prefix}$($excludedHostOctet - 1)"
-        }
-        $rangeStart = $excludedHostOctet + 1
-    }
-    if ($rangeStart -le 254) { $peerRanges += "${prefix}${rangeStart}-${prefix}254" }
-    $peerRangeFailures = @()
-    foreach ($range in $peerRanges) {
-        foreach ($direction in @("Inbound", "Outbound")) {
-            $name = "WinRE isolated analysis network - block VMnet2 peers $direction $range"
-            $rule = Get-NetFirewallRule -PolicyStore ActiveStore -DisplayName $name -ErrorAction SilentlyContinue
-            $remote = if ($rule) { (Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue).RemoteAddress } else { @() }
-            if (-not $rule -or $rule.Action -ne "Block" -or $remote -notcontains $range) {
-                $peerRangeFailures += "$direction $range"
-            }
-        }
-    }
-    if ($peerRangeFailures.Count -eq 0) { Ok "all VMnet2 peers except the .43 gateway are blocked in both directions" }
-    else { Fail "missing VMnet2 peer isolation rule(s): $($peerRangeFailures -join ', ')" }
-    $legacyManagementRules = @(Get-NetFirewallRule -PolicyStore ActiveStore -DisplayName @(
-        "WinRE isolated analysis network - SSH from management host",
-        "WinRE isolated analysis network - block outbound to management host"
-    ) -ErrorAction SilentlyContinue)
-    if ($legacyManagementRules.Count -eq 0) { Ok "direct workstation access disabled; Flare management uses gateway .43" }
-    else { Fail "stale direct-management firewall exception exists; rerun setup-flarevm.ps1" }
     $adapter = Get-NetAdapter -InterfaceIndex $analysisAddress.InterfaceIndex -ErrorAction SilentlyContinue
     $adapterGuid = if ($adapter) { ([Guid]$adapter.InterfaceGuid).ToString("B") } else { "" }
     $tcpipKey = if ($adapterGuid) { "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$adapterGuid" } else { "" }
     $registryDns = if ($tcpipKey -and (Test-Path -LiteralPath $tcpipKey)) {
         (Get-ItemProperty -LiteralPath $tcpipKey -Name NameServer -ErrorAction SilentlyContinue).NameServer
     } else { $null }
-    if ($registryDns -eq $analysisGateway) { Ok "persistent interface DNS registry -> $analysisGateway" }
-    else { Fail "persistent interface DNS registry is not $analysisGateway" }
-    $ipInterface = Get-NetIPInterface -InterfaceIndex $analysisAddress.InterfaceIndex `
-        -AddressFamily IPv4 -ErrorAction SilentlyContinue
-    if ($ipInterface -and $ipInterface.Forwarding -eq "Disabled") { Ok "guest IPv4 forwarding disabled" }
-    else { Fail "guest IPv4 forwarding must be disabled on the analysis interface" }
-    $ipv6Interface = Get-NetIPInterface -InterfaceIndex $analysisAddress.InterfaceIndex `
-        -AddressFamily IPv6 -ErrorAction SilentlyContinue
-    if ($ipv6Interface -and $ipv6Interface.Forwarding -eq "Disabled") { Ok "guest IPv6 forwarding disabled" }
-    else { Fail "guest IPv6 forwarding must be disabled on the analysis interface" }
+    if ($dns -notcontains $legacyGateway -and $registryDns -ne $legacyGateway) {
+        Ok "DNS does not point to REMnux; guest resolver configuration is independent"
+    } else { Fail "legacy REMnux DNS configuration remains; rerun setup-flarevm.ps1" }
 }
-foreach ($peer in $BlockedPeerAddresses) {
-    $peerRules = @()
-    foreach ($direction in @("Inbound", "Outbound")) {
-        $peerRule = Get-NetFirewallRule -PolicyStore ActiveStore -DisplayName "WinRE isolated analysis network - block $direction $peer" `
-            -ErrorAction SilentlyContinue
-        if ($peerRule) { $peerRules += $peerRule }
-    }
-    if ($peerRules.Count -eq 2 -and @($peerRules | Where-Object Action -ne "Block").Count -eq 0) {
-        Ok "firewall blocks peer $peer in both directions"
-    }
-    else { Fail "peer $peer is not blocked in both directions; rerun setup-flarevm.ps1" }
-    $peerSshReachable = Test-NetConnection -ComputerName $peer -Port 22 `
-        -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-    if ($peerSshReachable) { Fail "peer $peer TCP 22 is reachable despite the isolation rule" }
-    else { Ok "peer $peer TCP 22 probe is blocked/unreachable" }
+
+$legacyNetworkRules = @(
+    Get-NetFirewallRule -PolicyStore ActiveStore `
+        -DisplayName "WinRE isolated analysis network -*" -ErrorAction SilentlyContinue
+    Get-NetFirewallRule -PolicyStore ActiveStore `
+        -DisplayName "WinRE x64dbg MCP (lab subnet)" -ErrorAction SilentlyContinue
+)
+if (-not $legacyNetworkRules) { Ok "legacy gateway, IPv6, and VMnet2 peer-block rules are absent" }
+else { Fail "legacy gateway/isolation firewall rules remain; rerun setup-flarevm.ps1" }
+
+foreach ($port in @(22, 9094, 9095)) {
+    $ruleName = if ($port -eq 22) { "WinRE SSH (VMnet2 LocalSubnet)" } `
+        elseif ($port -eq 9094) { "WinRE x64dbg MCP (VMnet2 x64)" } `
+        else { "WinRE x64dbg MCP (VMnet2 x86)" }
+    $rule = Get-NetFirewallRule -PolicyStore ActiveStore -DisplayName $ruleName -ErrorAction SilentlyContinue
+    $remote = if ($rule) { (Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue).RemoteAddress } else { @() }
+    $portFilter = if ($rule) { Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue } else { $null }
+    if ($rule -and $rule.Enabled -eq "True" -and $rule.Action -eq "Allow" -and
+        $rule.Direction -eq "Inbound" -and $remote -contains "LocalSubnet" -and
+        $portFilter.LocalPort -contains [string]$port) {
+        Ok "TCP $port is allowed from VMnet2 LocalSubnet"
+    } else { Fail "TCP $port is not allowed from the VMnet2 LocalSubnet; rerun setup-flarevm.ps1" }
 }
-$sshRule = Get-NetFirewallRule -PolicyStore ActiveStore -DisplayName "WinRE isolated analysis network - SSH from gateway" `
-    -ErrorAction SilentlyContinue
-$sshRemote = if ($sshRule) {
-    (Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $sshRule -ErrorAction SilentlyContinue).RemoteAddress
-} else { @() }
-if ($sshRule -and $sshRemote -contains $analysisGateway) { Ok "SSH inbound restricted to $analysisGateway" }
-else { Fail "WinRE SSH inbound rule is missing or not restricted to $analysisGateway" }
 
 Write-Host ""
 Write-Host "--- Dynamic prerequisites ---"

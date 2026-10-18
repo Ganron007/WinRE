@@ -19,7 +19,7 @@ become remote:
     - LLM          : local endpoint on this host
 
 Env:
-    FLARE_HOST / FLARE_USER / FLARE_SSH_KEY / FLARE_SSH_PORT   (SSH to VM)
+    FLARE_HOST / FLARE_USER / FLARE_SSH_KEY / FLARE_SSH_PORT   (direct SSH on the lab network)
     WINRE_LLM_BASE_URL / WINRE_LLM_API_KEY / WINRE_LLM_MODEL   (LLM here)
     WINRE_REMOTE_LOGS=logs   (local evidence root; pulled from VM)
     WINRE_REMOTE_PIPELINE=C:\WinRE   (repo path on the VM)
@@ -51,21 +51,7 @@ LOCAL_LOGS = _evidence_root()
 
 
 def flare_cfg() -> dict:
-    """Execution-plane connection config. All values from env/.env —
-    no lab defaults in code (see .env.template for the full block)."""
-    gateway_host = os.environ.get("WINRE_GATEWAY_HOST", "").strip()
-    gateway_user = os.environ.get("WINRE_GATEWAY_USER", "remnux").strip()
-    gateway_key = os.environ.get("WINRE_GATEWAY_SSH_KEY", "").strip()
-    proxy_command = ""
-    if gateway_host:
-        if not gateway_key:
-            raise ValueError(
-                "WINRE_GATEWAY_SSH_KEY is required when "
-                "WINRE_GATEWAY_HOST is configured")
-        proxy_command = (
-            f'ssh -i "{gateway_key}" -o IdentitiesOnly=yes '
-            f'-o BatchMode=yes -o StrictHostKeyChecking=no '
-            f'-W %h:%p {gateway_user}@{gateway_host}')
+    """Execution-plane connection config for direct access on the lab network."""
     return {
         "host": os.environ.get("FLARE_HOST", ""),
         "user": os.environ.get("FLARE_USER", "FLARE-VM"),
@@ -73,7 +59,7 @@ def flare_cfg() -> dict:
                               str(Path.home() / ".ssh" / "id_ed25519")),
         "port": int(os.environ.get("FLARE_SSH_PORT", "22")),
         "remote_pipeline": os.environ.get("WINRE_REMOTE_PIPELINE", r"C:\WinRE"),
-        "proxy_command": proxy_command,
+        "proxy_command": "",
     }
 
 
@@ -878,8 +864,7 @@ def _requested_sources(pack, meta: dict) -> dict:
     req = {
         "frida": {"requested": dyn, "required": dyn},
         "procmon": {"requested": dyn, "required": dyn},
-        "network": {"requested": dyn and meta.get("network_mode") != "gateway",
-                    "required": dyn and meta.get("network_mode") != "gateway"},
+        "network": {"requested": dyn, "required": dyn},
         "network_enrichment": {"requested": dyn, "required": False},
         "process_snapshot": {"requested": dyn, "required": False},
         "memory": {"requested": dyn, "required": False},
@@ -1027,14 +1012,15 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     # this ("inline -Command strings get mangled by the nesting") and the rest
     # of the VM plumbing already uses it.
     capture_session = None
+    capture_mode = ""
     capture_record: dict | None = None
     capture_requested = False
     try:
-        from .external_capture import CaptureSession, load_config
-        capture_config = load_config()
-        if capture_config:
-            capture_requested = True
-            capture_session = CaptureSession.start(capture_config)
+        from .external_capture import CaptureSession, require_config
+        capture_config = require_config()
+        capture_requested = True
+        capture_mode = str(capture_config.get("mode") or "passive")
+        capture_session = CaptureSession.start(capture_config)
     except Exception as e:
         capture_requested = True
         failed_capture = {"schema": "winre-external-capture/v1",
@@ -1049,7 +1035,8 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
         pack.write("dynamic", "STAGE.json", failed)
         return failed
 
-    _capture_env = "$env:WINRE_NETWORK_MODE='gateway'; " if capture_session else ""
+    _capture_env = (f"$env:WINRE_NETWORK_MODE='{capture_mode}'; "
+                    if capture_session else "")
     _script = (_capture_env + f"$env:WINRE_SNAPSHOT_GATE='{_sg.mode()}'; "
                + _marker_fwd
                + f"& '{py}' "
@@ -1213,7 +1200,7 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     else:
         meta = pack.read("dynamic", "META.json") or {}
     if capture_requested:
-        meta["network_mode"] = "gateway"
+        meta["network_mode"] = capture_mode or "passive"
         meta["external_capture_requested"] = True
         meta["external_capture"] = capture_record or {
             "schema": "winre-external-capture/v1", "requested": True,

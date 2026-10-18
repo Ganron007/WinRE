@@ -30,8 +30,8 @@ param(
     [switch]$CheckMode,
     [switch]$KeepUAC,
     [switch]$DisableUAC,  # legacy no-op: UAC-off is now the default
-    [string]$AnalysisGatewayAddress = "192.168.77.43",
-    [string[]]$BlockedPeerAddresses = @("192.168.77.41"),
+    [string]$LegacyAnalysisGatewayAddress = "192.168.77.43",
+    [string]$OriginalHostOnlyGatewayAddress = "192.168.77.1",
     [string]$AnalysisInterfaceAlias = ""
 )
 
@@ -571,246 +571,145 @@ if (Test-Path $x64) {
     }
 } else { Manual "REQUIRED (free): install x64dbg to C:\Tools\x64dbg - run the FlareVM base installer (brings it) or download the release; then re-run setup. docs\PREREQUISITES.md." }
 
-# --- isolated analysis network -------------------------------------------------
-# The lab's only guest-facing path is VMnet2. .43 is both the default gateway
-# and DNS/simulation endpoint. The guest must be allowed to send packets for
-# arbitrary destinations to .43 so literal-IP traffic is captured; .43 drops
-# all forwarding. Firewall blocks other on-link VMnet2 peers, including the
-# workstation host and .41; .43 is the only peer exception.
+# --- VMnet2 guest networking --------------------------------------------------
+# Flare stays a standalone Windows analysis guest. Preserve its route/DNS
+# configuration; remove only the legacy .43 route/resolver written by the old
+# gateway deployment. If that was the only route, restore the lab's previously
+# observed host-only gateway (.1); otherwise preserve the routes as configured.
 $networkRulePrefix = "WinRE isolated analysis network"
 if ($CheckMode) {
-    Act "set VMnet2 default route and DNS to $AnalysisGatewayAddress; permit routed traffic to the no-forward gateway; block other VMnet2 peers and $($BlockedPeerAddresses -join ', ')"
+    Act "preserve Flare's route/DNS, remove legacy .43 route/peer rules, and permit VMnet2 SSH/x64dbg from LocalSubnet"
 } else {
     try {
-        $gateway = [System.Net.IPAddress]::Parse($AnalysisGatewayAddress)
-        if ($gateway.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
-            throw "Analysis gateway must be an IPv4 address"
-        }
-        $gatewayBytes = $gateway.GetAddressBytes()
-        $gatewayPrefix = "{0}.{1}.{2}." -f $gatewayBytes[0],$gatewayBytes[1],$gatewayBytes[2]
-        $gatewayHostOctet = [int]$gatewayBytes[3]
-        if ($gatewayHostOctet -lt 1 -or $gatewayHostOctet -gt 254) {
-            throw "Analysis gateway must be a usable host address in the /24"
-        }
-        $excludedHostOctets = @($gatewayHostOctet)
-        $onLinkPeerRanges = @()
-        $rangeStart = 1
-        foreach ($excludedHostOctet in $excludedHostOctets) {
-            if ($excludedHostOctet -gt $rangeStart) {
-                $onLinkPeerRanges += "${gatewayPrefix}${rangeStart}-${gatewayPrefix}$($excludedHostOctet - 1)"
-            }
-            $rangeStart = $excludedHostOctet + 1
-        }
-        if ($rangeStart -le 254) { $onLinkPeerRanges += "${gatewayPrefix}${rangeStart}-${gatewayPrefix}254" }
+        $legacyGateway = [System.Net.IPAddress]::Parse($LegacyAnalysisGatewayAddress).ToString()
+        $originalHostOnlyGateway = [System.Net.IPAddress]::Parse($OriginalHostOnlyGatewayAddress).ToString()
+        $gatewayOctets = $legacyGateway.Split('.')
+        $vmnetPrefix = ($gatewayOctets[0..2] -join '.') + '.'
         $candidateAddresses = @(Get-NetIPAddress -AddressFamily IPv4 -Type Unicast -ErrorAction Stop |
-            Where-Object { $_.IPAddress.StartsWith($gatewayPrefix) -and $_.PrefixLength -eq 24 })
+            Where-Object { $_.IPAddress.StartsWith($vmnetPrefix) -and $_.PrefixLength -eq 24 })
         if ($AnalysisInterfaceAlias) {
             $candidateAddresses = @($candidateAddresses | Where-Object { $_.InterfaceAlias -eq $AnalysisInterfaceAlias })
         }
-        if ($candidateAddresses.Count -ne 1) {
-            throw "Expected one /24 analysis interface in $gatewayPrefix; found $($candidateAddresses.Count). Set -AnalysisInterfaceAlias explicitly."
+        if ($candidateAddresses.Count -gt 1) {
+            throw "Multiple VMnet2 /24 interfaces found in $vmnetPrefix; set -AnalysisInterfaceAlias explicitly"
         }
-        $guestAddress = $candidateAddresses[0]
-        $ifIndex = [int]$guestAddress.InterfaceIndex
-        $ifAlias = [string]$guestAddress.InterfaceAlias
+        $guestAddress = if ($candidateAddresses.Count -eq 1) { $candidateAddresses[0] } else { $null }
+        $ifIndex = if ($guestAddress) { [int]$guestAddress.InterfaceIndex } else { $null }
+        $ifAlias = if ($guestAddress) { [string]$guestAddress.InterfaceAlias } else { $null }
+
+        $removedLegacyDefault = $false
         foreach ($store in @("ActiveStore", "PersistentStore")) {
-            $otherDefaultRoutes = @(Get-NetRoute -PolicyStore $store -AddressFamily IPv4 `
+            $legacyRoutes = @(Get-NetRoute -PolicyStore $store -AddressFamily IPv4 `
                 -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
-                Where-Object { $_.InterfaceIndex -ne $ifIndex })
-            foreach ($route in $otherDefaultRoutes) {
+                Where-Object { $_.NextHop -eq $legacyGateway })
+            foreach ($route in $legacyRoutes) {
                 Remove-NetRoute -PolicyStore $store -DestinationPrefix $route.DestinationPrefix `
                     -InterfaceIndex $route.InterfaceIndex -NextHop $route.NextHop `
-                    -Confirm:$false -ErrorAction SilentlyContinue
+                    -Confirm:$false -ErrorAction Stop
+                $removedLegacyDefault = $true
             }
         }
-        $gatewayRoute = @(Get-NetRoute -AddressFamily IPv4 -InterfaceIndex $ifIndex `
+        $activeDefaults = @(Get-NetRoute -PolicyStore ActiveStore -AddressFamily IPv4 `
             -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue)
-        foreach ($route in $gatewayRoute) {
-            if ($route.NextHop -ne $AnalysisGatewayAddress) {
-                Remove-NetRoute -DestinationPrefix $route.DestinationPrefix `
-                    -InterfaceIndex $ifIndex -NextHop $route.NextHop `
-                    -Confirm:$false -ErrorAction SilentlyContinue
-            }
-        }
-        $persistentGateway = @(Get-NetRoute -PolicyStore PersistentStore -AddressFamily IPv4 `
-            -InterfaceIndex $ifIndex -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
-            Where-Object { $_.NextHop -eq $AnalysisGatewayAddress })
-        if (-not $persistentGateway) {
-            # New-NetRoute writes to both ActiveStore and PersistentStore by
-            # default; the NetTCPIP provider rejects an explicit
-            # -PolicyStore PersistentStore value on this Windows release.
+        if ($activeDefaults) {
+            $routeSummary = ($activeDefaults | ForEach-Object { $_.NextHop }) -join ", "
+            Ok "preserved existing default route(s): $routeSummary"
+        } elseif ($removedLegacyDefault -and $ifIndex) {
             New-NetRoute -DestinationPrefix "0.0.0.0/0" -InterfaceIndex $ifIndex `
-                -NextHop $AnalysisGatewayAddress -RouteMetric 1 -ErrorAction Stop | Out-Null
-        }
-        $persistentGateway = @(Get-NetRoute -PolicyStore PersistentStore -AddressFamily IPv4 `
-            -InterfaceIndex $ifIndex -DestinationPrefix "0.0.0.0/0" -ErrorAction Stop |
-            Where-Object { $_.NextHop -eq $AnalysisGatewayAddress })
-        if ($persistentGateway.Count -ne 1) {
-            throw "Expected one persistent default route through $AnalysisGatewayAddress; found $($persistentGateway.Count)"
-        }
-        Set-NetIPInterface -InterfaceIndex $ifIndex -AddressFamily IPv4 `
-            -AutomaticMetric Disabled -InterfaceMetric 5 -Forwarding Disabled `
-            -ErrorAction Stop
-        Set-NetIPInterface -InterfaceIndex $ifIndex -AddressFamily IPv6 `
-            -Forwarding Disabled -ErrorAction Stop
-        # Some FlareVM images disable the Windows DNS Client service. Its
-        # protected service ACL can reject Set-Service even for an elevated
-        # administrator. Stage the supported service startup and per-interface
-        # resolver values in the registry; if SCM has cached the old disabled
-        # state, reapply_after_revert.ps1 will reboot and verify the setting.
-        $dnsClientService = Get-CimInstance Win32_Service -Filter "Name='Dnscache'" -ErrorAction Stop
-        if (-not $dnsClientService) { throw "Windows DNS Client service (Dnscache) is missing" }
-        $dnsServiceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache"
-        $dnsStart = [int](Get-ItemProperty -LiteralPath $dnsServiceKey -Name Start -ErrorAction Stop).Start
-        if ($dnsStart -ne 2) {
-            Set-ItemProperty -LiteralPath $dnsServiceKey -Name Start -Value 2 -ErrorAction Stop
-        }
-        $adapter = Get-NetAdapter -InterfaceIndex $ifIndex -ErrorAction Stop
-        $adapterGuid = ([Guid]$adapter.InterfaceGuid).ToString("B")
-        $tcpipInterfaceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$adapterGuid"
-        if (-not (Test-Path -LiteralPath $tcpipInterfaceKey)) {
-            throw "TCP/IP registry key for $ifAlias ($adapterGuid) is missing"
-        }
-        New-ItemProperty -LiteralPath $tcpipInterfaceKey -Name NameServer `
-            -PropertyType String -Value $AnalysisGatewayAddress -Force -ErrorAction Stop | Out-Null
-        if ($dnsClientService.StartMode -eq "Auto" -and $dnsClientService.State -ne "Running") {
-            try {
-                Start-Service -Name Dnscache -ErrorAction Stop
-                Start-Sleep -Seconds 2
-                $dnsClientService = Get-CimInstance Win32_Service -Filter "Name='Dnscache'" -ErrorAction Stop
-            } catch {
-                # The service is sometimes protected from runtime start as well
-                # as configuration; the staged Start value takes effect at boot.
-            }
-        }
-        if ($dnsClientService.StartMode -eq "Auto" -and $dnsClientService.State -eq "Running") {
-            Set-DnsClientServerAddress -InterfaceIndex $ifIndex `
-                -ServerAddresses $AnalysisGatewayAddress -ErrorAction Stop
-            $servers = (Get-DnsClientServerAddress -InterfaceIndex $ifIndex `
-                -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses
-            if ($servers -notcontains $AnalysisGatewayAddress) {
-                throw "DNS server assignment did not persist on $ifAlias"
-            }
+                -NextHop $originalHostOnlyGateway -RouteMetric 25 -ErrorAction Stop | Out-Null
+            Ok "restored the previously observed host-only default route through $originalHostOnlyGateway after removing legacy .43"
         } else {
-            $script:RebootRequired = $true
-            Warn "DNS Client is $($dnsClientService.State) ($($dnsClientService.StartMode)); .43 resolver and automatic startup are staged; reboot required"
+            Ok "no default route is configured; no route was created"
         }
-        $ruleSpecs = @(
-            # The simulator contract is IPv4-only. IPv4 peer ranges do not
-            # constrain IPv6 link-local peers, multicast, or a later IPv6 route.
-            # Block IPv6 on all interfaces without disabling the Windows stack.
-            # Windows 10's NetSecurity provider rejects ::/0. The two /1
-            # prefixes cover the same complete IPv6 address space.
-            @{ Name = "$networkRulePrefix - block IPv6 Inbound"; Direction = "Inbound"; Action = "Block"; RemoteAddress = @("::/1", "8000::/1"); Protocol = "Any" },
-            @{ Name = "$networkRulePrefix - block IPv6 Outbound"; Direction = "Outbound"; Action = "Block"; RemoteAddress = @("::/1", "8000::/1"); Protocol = "Any" },
-            @{ Name = "$networkRulePrefix - outbound to gateway"; Direction = "Outbound"; Action = "Allow"; RemoteAddress = $AnalysisGatewayAddress; Protocol = "Any" },
-            @{ Name = "$networkRulePrefix - DHCP outbound"; Direction = "Outbound"; Action = "Allow"; Protocol = "UDP"; LocalPort = "68"; RemotePort = "67"; RemoteAddress = "LocalSubnet" },
-            @{ Name = "$networkRulePrefix - DHCP inbound"; Direction = "Inbound"; Action = "Allow"; Protocol = "UDP"; LocalPort = "68"; RemotePort = "67"; RemoteAddress = "LocalSubnet" },
-            @{ Name = "$networkRulePrefix - SSH from gateway"; Direction = "Inbound"; Action = "Allow"; Protocol = "TCP"; LocalPort = "22"; RemoteAddress = $AnalysisGatewayAddress },
-            @{ Name = "$networkRulePrefix - x64dbg x64 from gateway"; Direction = "Inbound"; Action = "Allow"; Protocol = "TCP"; LocalPort = "9094"; RemoteAddress = $AnalysisGatewayAddress },
-            @{ Name = "$networkRulePrefix - x64dbg x86 from gateway"; Direction = "Inbound"; Action = "Allow"; Protocol = "TCP"; LocalPort = "9095"; RemoteAddress = $AnalysisGatewayAddress }
-        )
-        foreach ($spec in $ruleSpecs) {
-            Remove-NetFirewallRule -DisplayName $spec.Name -ErrorAction SilentlyContinue
-            $newRule = @{
-                DisplayName = $spec.Name; Direction = $spec.Direction; Action = $spec.Action
-                Profile = "Any"; ErrorAction = "Stop"
+
+        if ($ifIndex) {
+            $adapter = Get-NetAdapter -InterfaceIndex $ifIndex -ErrorAction Stop
+            $adapterGuid = ([Guid]$adapter.InterfaceGuid).ToString("B")
+            $tcpipKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$adapterGuid"
+            $registryDns = if (Test-Path -LiteralPath $tcpipKey) {
+                (Get-ItemProperty -LiteralPath $tcpipKey -Name NameServer -ErrorAction SilentlyContinue).NameServer
+            } else { $null }
+            if ($registryDns -eq $legacyGateway) {
+                Remove-ItemProperty -LiteralPath $tcpipKey -Name NameServer -ErrorAction Stop
             }
-            foreach ($key in @("Protocol", "LocalPort", "RemotePort", "RemoteAddress")) {
-                if ($spec.ContainsKey($key)) { $newRule[$key] = $spec[$key] }
+            $dnsServers = (Get-DnsClientServerAddress -InterfaceIndex $ifIndex `
+                -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
+            if ($dnsServers -contains $legacyGateway) {
+                Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses -ErrorAction Stop
             }
-            New-NetFirewallRule @newRule | Out-Null
+            Ok "preserved VMnet2 adapter $ifAlias and its DNS configuration; removed only legacy .43 resolver settings"
+        } else {
+            Warn "VMnet2 adapter not found; legacy DNS settings could not be inspected"
         }
-        foreach ($range in $onLinkPeerRanges) {
-            foreach ($direction in @("Inbound", "Outbound")) {
-                $name = "$networkRulePrefix - block VMnet2 peers $direction $range"
-                Remove-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue
-                New-NetFirewallRule -DisplayName $name -Direction $direction -Action Block `
-                    -RemoteAddress $range -Profile Any -ErrorAction Stop | Out-Null
-            }
-        }
-        foreach ($peer in $BlockedPeerAddresses) {
-            $null = [System.Net.IPAddress]::Parse($peer)
-            foreach ($direction in @("Inbound", "Outbound")) {
-                $name = "$networkRulePrefix - block $direction $peer"
-                Remove-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue
-                New-NetFirewallRule -DisplayName $name -Direction $direction -Action Block `
-                    -RemoteAddress $peer -Profile Any -ErrorAction Stop | Out-Null
-            }
-        }
-        # Flare images can ship a policy value that disables the Public
-        # firewall profile even while PersistentStore says Enabled=True.
-        # VMnet2 is classified Public, so the local isolation rules otherwise
-        # remain inert. Persist the policy-level profile state, allow local
-        # rules to merge, and refresh computer policy before reporting ready.
-        $firewallPolicyRoot = "HKLM:\SOFTWARE\Policies\Microsoft\WindowsFirewall"
-        foreach ($profileName in @("DomainProfile", "PrivateProfile", "PublicProfile")) {
-            $profilePath = Join-Path $firewallPolicyRoot $profileName
-            New-Item -Path $profilePath -Force -ErrorAction Stop | Out-Null
-            New-ItemProperty -LiteralPath $profilePath -Name EnableFirewall `
-                -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
-            New-ItemProperty -LiteralPath $profilePath -Name AllowLocalPolicyMerge `
-                -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
-            New-ItemProperty -LiteralPath $profilePath -Name DefaultInboundAction `
-                -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
-            New-ItemProperty -LiteralPath $profilePath -Name DefaultOutboundAction `
-                -PropertyType DWord -Value 0 -Force -ErrorAction Stop | Out-Null
-        }
-        $standardProfilePath = Join-Path $firewallPolicyRoot "StandardProfile"
-        New-Item -Path $standardProfilePath -Force -ErrorAction Stop | Out-Null
-        New-ItemProperty -LiteralPath $standardProfilePath -Name EnableFirewall `
-            -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
-        Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True `
-            -DefaultInboundAction Block -DefaultOutboundAction Allow `
-            -AllowLocalFirewallRules True -ErrorAction Stop
-        $gpUpdateOutput = & gpupdate.exe /target:computer /force 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "computer policy refresh failed (rc=$LASTEXITCODE): $($gpUpdateOutput -join ' ')"
-        }
-        $activeProfiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop)
-        if ($activeProfiles.Count -ne 3 -or @($activeProfiles | Where-Object {
-            -not $_.Enabled -or $_.DefaultInboundAction -ne "Block" -or
-            $_.DefaultOutboundAction -ne "Allow" -or -not $_.AllowLocalFirewallRules
-        }).Count -gt 0) {
-            throw "effective firewall policy is not enabled with local rule merge on all profiles"
-        }
+
+        # Remove every firewall rule this gateway policy created. Do not set
+        # firewall profile state or isolate other VMnet2 peers here.
+        Get-NetFirewallRule -DisplayName "$networkRulePrefix -*" -ErrorAction SilentlyContinue |
+            Remove-NetFirewallRule -ErrorAction SilentlyContinue
         foreach ($legacyRuleName in @(
             "$networkRulePrefix - SSH from management host",
-            "$networkRulePrefix - block outbound to management host"
+            "$networkRulePrefix - block outbound to management host",
+            "WinRE isolated analysis network - SSH from gateway",
+            "WinRE x64dbg MCP (lab subnet)"
         )) {
             Remove-NetFirewallRule -DisplayName $legacyRuleName -ErrorAction SilentlyContinue
         }
-        Ok "network policy: $ifAlias ($($guestAddress.IPAddress)/24), gateway/DNS $AnalysisGatewayAddress, forwarding disabled"
-        Ok "firewall: only gateway $AnalysisGatewayAddress is exempt from VMnet2 peer blocks; other peer traffic blocked both ways"
-        Ok "firewall: all effective profiles enabled with local rule merge; inbound default blocked, routed outbound permitted to no-forward gateway"
-        Ok "firewall: IPv6 blocked in both directions on all interfaces (IPv4-only simulator)"
-        if ($BlockedPeerAddresses.Count) { Ok "firewall: explicitly blocked peer(s) $($BlockedPeerAddresses -join ', ')" }
+        $policyRoot = "HKLM:\SOFTWARE\Policies\Microsoft\WindowsFirewall"
+        foreach ($profileName in @("DomainProfile", "PrivateProfile", "PublicProfile", "StandardProfile")) {
+            $profilePath = Join-Path $policyRoot $profileName
+            foreach ($policyValue in @("EnableFirewall", "AllowLocalPolicyMerge", "DefaultInboundAction", "DefaultOutboundAction")) {
+                $value = (Get-ItemProperty -LiteralPath $profilePath -Name $policyValue -ErrorAction SilentlyContinue).$policyValue
+                $ownedValue = switch ($policyValue) {
+                    "EnableFirewall" { 1 }
+                    "AllowLocalPolicyMerge" { 1 }
+                    "DefaultInboundAction" { 1 }
+                    "DefaultOutboundAction" { 0 }
+                }
+                if ($null -ne $value -and [int]$value -eq $ownedValue) {
+                    Remove-ItemProperty -LiteralPath $profilePath -Name $policyValue -ErrorAction SilentlyContinue
+                }
+            }
+        }
+
+        $sshRuleName = "WinRE SSH (VMnet2 LocalSubnet)"
+        Get-NetFirewallRule -DisplayName "WinRE SSH *" -ErrorAction SilentlyContinue |
+            Remove-NetFirewallRule -ErrorAction SilentlyContinue
+        Remove-NetFirewallRule -DisplayName $sshRuleName -ErrorAction SilentlyContinue
+        $sshRule = @{ DisplayName = $sshRuleName; Direction = "Inbound"; Action = "Allow";
+            Protocol = "TCP"; LocalPort = 22; RemoteAddress = "LocalSubnet"; Profile = "Any";
+            ErrorAction = "Stop" }
+        if ($ifAlias) { $sshRule.InterfaceAlias = $ifAlias }
+        New-NetFirewallRule @sshRule | Out-Null
+        Ok "SSH allowed from the full VMnet2 LocalSubnet; no .43-only or peer-block rule remains"
     } catch {
-        Fail "isolated analysis network configuration failed: $($_.Exception.Message)"
+        Fail "VMnet2 network restoration failed: $($_.Exception.Message)"
     }
 }
 
-# --- x64dbg MCP :9094 exposure -------------------------------------------------
-# The plugin binds 0.0.0.0 by default. Binding 127.0.0.1 would break the
-# control plane (it drives :9094 from the host over the LAN), so the port is
-# restricted with the Windows Firewall to the configured REMnux gateway; all
-# other inbound peers stay blocked by the default policy.
-# For an air-gapped box that only debugs locally, set
-#   <x64dbgRoot>\mcp_config.json  -> {"IpAddress":"127.0.0.1"}
-# and drop the rule below.
-$fwName = "WinRE x64dbg MCP (lab subnet)"
+# --- x64dbg MCP :9094/:9095 exposure -----------------------------------------
+# Remote debugger access is available to operators on the VMnet2 local subnet.
+$x64dbgRules = @(
+    @{ DisplayName = "WinRE x64dbg MCP (VMnet2 x64)"; Port = 9094 },
+    @{ DisplayName = "WinRE x64dbg MCP (VMnet2 x86)"; Port = 9095 }
+)
 if (-not $CheckMode) {
-    Remove-NetFirewallRule -DisplayName $fwName -ErrorAction SilentlyContinue
-    New-NetFirewallRule -DisplayName $fwName -Direction Inbound -Action Allow `
-        -Protocol TCP -LocalPort 9094 -RemoteAddress $AnalysisGatewayAddress `
-        -Profile Any -ErrorAction SilentlyContinue | Out-Null
-    if (Get-NetFirewallRule -DisplayName $fwName -ErrorAction SilentlyContinue) {
-        Ok "firewall: TCP 9094 allowed from $AnalysisGatewayAddress only"
-    } else {
-        Warn "firewall rule for :9094 not created (run setup elevated)"
+    Get-NetFirewallRule -DisplayName "WinRE x64dbg MCP *" -ErrorAction SilentlyContinue |
+        Remove-NetFirewallRule -ErrorAction SilentlyContinue
+}
+foreach ($item in $x64dbgRules) {
+    if ($CheckMode) {
+        Act "allow TCP $($item.Port) from VMnet2 LocalSubnet"
+        continue
     }
-} else {
-    Act "ensure firewall rule '$fwName' (TCP 9094, $AnalysisGatewayAddress only)"
+    Remove-NetFirewallRule -DisplayName $item.DisplayName -ErrorAction SilentlyContinue
+    $rule = @{ DisplayName = $item.DisplayName; Direction = "Inbound"; Action = "Allow";
+        Protocol = "TCP"; LocalPort = $item.Port; RemoteAddress = "LocalSubnet";
+        Profile = "Any"; ErrorAction = "Stop" }
+    if ($ifAlias) { $rule.InterfaceAlias = $ifAlias }
+    try {
+        New-NetFirewallRule @rule | Out-Null
+        Ok "TCP $($item.Port) allowed from VMnet2 LocalSubnet"
+    } catch { Warn "firewall allow rule for TCP $($item.Port) not created: $($_.Exception.Message)" }
 }
 
 foreach ($t in @(@("FakeNet-NG (REQUIRED free)", @("C:\Tools\fakenet\fakenet3.5\fakenet.exe"), @("fakenet.exe")),

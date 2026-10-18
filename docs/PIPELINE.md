@@ -58,8 +58,9 @@ more conservative label until execution evidence is available. An unknown
 dynamic or debugger result does not erase a definite static result.
 
 Dynamic collection uses Frida, Procmon, and optional memory and debugger
-tooling. Standalone Flare runs use FakeNet-NG; configured remote-driver runs use
-INetSim plus run-scoped off-box packet capture through the REMnux gateway.
+tooling. Standalone and remote-driver Flare runs use guest-side FakeNet-NG;
+remote-driver runs also collect a run-scoped `tcpdump` pcap on the REMnux VMnet2
+interface, filtered to the Flare guest IP.
 The default detonation cap is 150 seconds. `--stop-on`
 controls the behavior gate and `--stop-on-settle` controls how long collection
 continues after it fires. `--adaptive` enables an idle-based stop; because a

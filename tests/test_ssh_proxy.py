@@ -1,7 +1,7 @@
 from winre import remote_driver
 
 
-def test_flare_cfg_uses_optional_gateway_for_ssh_and_scp(monkeypatch):
+def test_flare_cfg_uses_direct_vmnet2_ssh_even_with_legacy_gateway_env(monkeypatch):
     monkeypatch.setenv("FLARE_HOST", "192.168.77.42")
     monkeypatch.setenv("FLARE_USER", "FLARE-VM")
     monkeypatch.setenv("FLARE_SSH_KEY", r"C:\keys\flare")
@@ -11,24 +11,21 @@ def test_flare_cfg_uses_optional_gateway_for_ssh_and_scp(monkeypatch):
 
     cfg = remote_driver.flare_cfg()
 
-    assert cfg["proxy_command"] == (
-        'ssh -i "C:\\keys\\gateway" -o IdentitiesOnly=yes '
-        "-o BatchMode=yes -o StrictHostKeyChecking=no "
-        "-W %h:%p remnux@192.168.77.43")
-    assert "ProxyCommand=" + cfg["proxy_command"] in remote_driver._ssh_base(cfg)
-    assert "ProxyCommand=" + cfg["proxy_command"] in remote_driver._scp_base(cfg)
+    assert cfg["proxy_command"] == ""
+    assert not any(arg.startswith("ProxyCommand=")
+                   for arg in remote_driver._ssh_base(cfg))
+    assert not any(arg.startswith("ProxyCommand=")
+                   for arg in remote_driver._scp_base(cfg))
 
 
-def test_gateway_host_without_gateway_key_fails_early(monkeypatch):
+def test_legacy_gateway_host_does_not_route_winre_ssh_through_revai(monkeypatch):
     monkeypatch.setenv("WINRE_GATEWAY_HOST", "192.168.77.43")
     monkeypatch.delenv("WINRE_GATEWAY_SSH_KEY", raising=False)
 
-    try:
-        remote_driver.flare_cfg()
-    except ValueError as exc:
-        assert "WINRE_GATEWAY_SSH_KEY" in str(exc)
-    else:
-        raise AssertionError("incomplete gateway configuration was accepted")
+    cfg = remote_driver.flare_cfg()
+    assert cfg["proxy_command"] == ""
+    assert not any(arg.startswith("ProxyCommand=")
+                   for arg in remote_driver._ssh_base(cfg))
 
 
 def test_flare_cfg_keeps_direct_route_when_no_gateway_is_configured(monkeypatch):
