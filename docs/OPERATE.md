@@ -9,10 +9,10 @@ Day-2 operation of the WinRE lab. Install first: [`INSTALL.md`](INSTALL.md).
 | Mode | Command | What runs |
 |---|---|---|
 | **Agentic engine (default)** | `python -m winre.pipeline "C:\samples\s.exe" --driver remote --mode agentic` | intake → quick → deep (LangGraph and configured LLM) → YARA → report → audit → `logs/<sha>/agentic/` |
-| **Deterministic engine** | add `--mode static` | same analysis stages; deep uses the fixed checklist and deterministic verdict, with no LLM calls → `logs/<sha>/static/` |
+| **Deterministic engine** | add `--mode static` | same analysis stages; deep uses the fixed checklist and deterministic verdict without agentic calls; the report still receives claim-level evidence review → `logs/<sha>/static/` |
 | **Debugger execution** | add `--agentic-dbg` to an agentic run from an active FlareVM desktop session | entry-point or packed-file OEP probe, up to 30 seconds of x64dbg execution, ETW process trace, and scoped cleanup → `logs/<sha>/dbg/` |
 | **Dynamic capability** | add `--dynamic --max-seconds 150` to an agentic run | static stages first, then gated detonation → `logs/<sha>/dynamic/` |
-| **Dry LLM** | add `--dry-llm` (agentic mode) | no LLM calls; deep stays `deterministic_fallback` (honest, not green) |
+| **Dry LLM** | add `--dry-llm` | no LLM calls; agentic deep stays `deterministic_fallback` and report review is not requested, so the audit is red |
 | **Publish case** | add `--publish` | sanitized case → `docs/case-studies/<section>/<sha>/` (no binaries) |
 
 The deterministic `static` engine cannot be combined with `--dynamic` or
@@ -42,7 +42,8 @@ pipeline (agentic/static, optional agentic-dbg, optional dynamic), watch
 the live stage board, browse packs, rerun single stages, fire single
 tools, attest the snapshot gate. Dry-LLM defaults to **off** when the LLM
 endpoint answers (`/settings` shows reachability); it stays on when no LLM is
-configured, so the deterministic pipeline remains usable. Configured LLM calls
+configured, so deterministic analysis remains usable while report review is
+explicitly incomplete. Configured LLM calls, including the report claim review,
 use `WINRE_LLM_TIMEOUT` (default 120 seconds). MCP badges: x64dbg
 is probed directly (`:9094` binds `0.0.0.0`, restricted by a Windows Firewall
 allow rule to `LocalSubnet` only), Malcat `:9009` and mcp-windbg `:9097` are
@@ -90,16 +91,16 @@ WINRE_LLM_MAX_OUTPUT_TOKENS=32768    # assistant output cap (default; clamped to
 
 **Role routing (optional).** Two pins split the LLM roles so the expensive
 model is paid for once: the **planner** runs the agent tool loop (the
-token- and call-heavy part) and the **judgment** model produces the verdict
-and its finalize pass. Everything else in WinRE is deterministic, so there is
-nothing else to route.
+token- and call-heavy part) and the **judgment** model produces the verdict,
+its finalize pass, and the separate report-claim support review. Deterministic
+triage, findings, and report rendering do not use the planner.
 
 - Each pin defaults to `WINRE_LLM_MODEL`; a pin **never** moves another role.
   `WINRE_LLM_MODEL` is the default for every unpinned role and is resolved
   from that variable alone.
 - The resolved routing is recorded **per run** in `deep.json → llm_roles`,
-  `report.json` and `audit.json`, so which model produced the tool loop and
-  which produced the verdict is verifiable per case rather than trusted.
+  `report.json` and `audit.json`, including the claim-review model, so the
+  planner, verdict and report-review calls can be distinguished per case.
 - `/settings` shows the pins verbatim, the resolved routing, and whether each
   pinned model actually answers — a pin to a model the provider does not
   serve shows as *no answer* instead of silently becoming a deterministic
@@ -369,7 +370,7 @@ Common failures:
 
 | Symptom | Fix |
 |---|---|
-| deep shows `deterministic_fallback` | LLM endpoint down / `.env` keys empty (`llm_client.available()`), or `--dry-llm` on agentic mode. Static mode (`--mode static`) never needs the LLM — expect `static_deterministic` |
+| deep shows `deterministic_fallback` | LLM endpoint down / `.env` keys empty (`llm_client.available()`), or `--dry-llm` on agentic mode. Static mode (`--mode static`) uses `static_deterministic` for deep analysis and still needs the configured reviewer for a green report-quality gate |
 | `snapshot gate` reports dirty or unattested | restore the known-clean snapshot, verify the marker, then attest `verified_clean` from the separate control plane |
 | MCP x64dbg down | scheduled task `WinRE-X64dbg-Once`, or let the manager ensure it on demand |
 | Malcat calls fail from host | expected — localhost-bound; the SSH bridge handles it. If the bridge fails, restart `start_servers.ps1` on the VM |

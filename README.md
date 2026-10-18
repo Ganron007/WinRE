@@ -28,7 +28,7 @@ capabilities determine the evidence-pack section:
 
 | Command | Analysis | Evidence section |
 |---|---|---|
-| `--mode static` | Deterministic checklist; no LLM calls | `logs/<sha256>/static/` |
+| `--mode static` | Deterministic checklist; no agentic analysis call; report claims use the configured evidence reviewer | `logs/<sha256>/static/` |
 | `--mode agentic` | LangGraph investigation with an OpenAI-compatible LLM | `logs/<sha256>/agentic/` |
 | `--mode agentic --agentic-dbg` | Agentic investigation with an x64dbg OEP/unpack probe, bounded 30-second target run, and ETW process observation | `logs/<sha256>/dbg/` |
 | `--mode agentic --dynamic` | Agentic static analysis followed by a separately gated detonation | `logs/<sha256>/dynamic/` |
@@ -48,8 +48,10 @@ Read the deployment and safety requirements before connecting a FlareVM:
 
 From the control-plane checkout, install the Python dependencies listed in
 `docs/INSTALL.md`, copy `.env.template` to `.env`, and configure the FlareVM
-SSH connection. An LLM endpoint is needed for agentic analysis; deterministic
-static mode does not make LLM calls.
+SSH connection. An LLM endpoint is needed for agentic analysis and for the
+claim-level report review required by a green audit. The static checklist itself
+does not make agentic analysis calls. `--dry-llm` disables all LLM calls and
+leaves the claim review not requested, so the run is intentionally not green.
 
 ```powershell
 python -m winre.pipeline "C:\samples\sample.exe" --driver remote --mode static

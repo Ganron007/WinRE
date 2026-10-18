@@ -86,14 +86,15 @@ never moves the other role:
 
 ```
 #WINRE_LLM_PLANNER_MODEL=         # agent tool loop
-#WINRE_LLM_VERDICT_MODEL=         # final judge (verdict + finalize pass)
+#WINRE_LLM_VERDICT_MODEL=         # final judge and report-claim reviewer
 ```
 
 The resolved routing is recorded per run (`deep.json → llm_roles`,
-`report.json`, `audit.json`) so which model produced the tool loop and which
-produced the verdict is verifiable per case. Mapping to RevAI's three roles:
-WinRE's triage, scripted deep dive and reports are deterministic (zero LLM
-calls), so `REVAI_LLM_MODEL` is the direct equivalent of `WINRE_LLM_MODEL`,
+`report.json`, `report/claim-review.json`, `audit.json`) so the model used for
+the tool loop, verdict and claim review is verifiable per case. Mapping to
+RevAI's three roles: WinRE's triage, fixed-checklist deep dive and report
+rendering are deterministic; the judgment role separately reviews report
+claims against source-bound evidence. `REVAI_LLM_MODEL` is the direct equivalent of `WINRE_LLM_MODEL`,
 `REVAI_LLM_PLANNER_MODEL` of `WINRE_LLM_PLANNER_MODEL`, and
 `REVAI_LLM_VERDICT_MODEL` of `WINRE_LLM_VERDICT_MODEL`.
 
@@ -174,7 +175,15 @@ WinRE's own env file (§3.1), or their respective process exports. The RevAI
 bridge resolves only `WINRE_LLM_*` settings and removes `REVAI_LLM_*` values
 from the WinRE child environment. A missing WinRE key is reported rather than
 filled from RevAI. This applies to ordinary agentic, debugger and detonation
-modes; deterministic static mode makes no LLM calls.
+modes; deterministic static mode makes no agentic analysis calls, but a green
+audit still requires the separate report-claim review.
+
+For remote dynamic runs, the RevAI bridge passes
+`--require-external-capture`. A missing or unhealthy passive sensor therefore
+blocks the integrated detonation before the guest runs. Standalone WinRE does
+not require that sensor; if its optional capture config cannot start, WinRE
+records the failure and continues with guest-side FakeNet and telemetry. No
+guest gateway or SSH policy change is needed for either path.
 
 When updating a Linux driver from an operator's Windows checkout, sync the
 package and LLM fields separately. Preserve that driver's native `FLARE_*`,
@@ -194,15 +203,21 @@ settings or operator-host SSH paths. The FlareVM receives no LLM env file.
 
 | Mode | LLM variables on driver box | Internet on driver box | Internet/keys on VM |
 |---|---|---|---|
-| `--mode static` | not needed (zero LLM calls) | not needed | no |
+| `--mode static` | **required for a green report review** | **required for review** | no |
 | `--mode agentic` | **required** | **required** (to the endpoint) | no |
 | `--mode agentic --agentic-dbg` | **required** | **required** | no (debug tools run on VM) |
-| `--mode agentic --dynamic` | **required** for the agentic deep stage | **required** for that stage | no (detonation job does not call the LLM) |
+| `--mode agentic --dynamic` | **required** for analysis and report review | **required** for those calls | no (detonation job does not call the LLM) |
 
 A deterministic `--mode static` run cannot request `--dynamic` or
 `--agentic-dbg`. Agentic debug and dynamic runs write to separate `dbg/` and
 `dynamic/` evidence sections. Each capability is a distinct gated execution;
 restore and attest the clean snapshot between them.
+
+Standalone WinRE dynamic runs use guest FakeNet telemetry and continue when no
+passive sensor is configured. The RevAI bridge adds
+`--require-external-capture`, so an integrated dynamic run fails before guest
+execution if the REMnux sensor is absent or unhealthy. Passive capture does not
+change Flare's gateway, DNS, SSH access or standalone behavior.
 
 ## 7. Verify the wiring (on the driver box)
 

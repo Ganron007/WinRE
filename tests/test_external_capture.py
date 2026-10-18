@@ -119,20 +119,22 @@ def test_passive_capture_preflight_does_not_require_gateway_services(monkeypatch
     assert any(argv[:4] == ["ip", "-o", "link", "show"] for argv in calls)
 
 
-def test_external_capture_is_required_in_passive_mode():
+def test_external_capture_can_be_optional_for_standalone_runs():
     requested = remote_driver._requested_sources(None, {
         "execution_kind": "dynamic", "network_mode": "passive",
         "external_capture_requested": True,
+        "external_capture_required": False,
     })
 
     assert requested["network"] == {"requested": True, "required": True}
-    assert requested["external_capture"] == {"requested": True, "required": True}
+    assert requested["external_capture"] == {"requested": True, "required": False}
 
 
-def test_passive_capture_keeps_guest_network_evidence_required():
+def test_integrated_capture_is_required_when_explicitly_marked():
     requested = remote_driver._requested_sources(None, {
         "execution_kind": "dynamic", "network_mode": "passive",
         "external_capture_requested": True,
+        "external_capture_required": True,
     })
 
     assert requested["network"] == {"requested": True, "required": True}

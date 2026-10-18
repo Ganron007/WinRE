@@ -118,6 +118,10 @@ Keep Flare attached only to the private VMnet2 network. See
 and the limitation that promiscuous mode requests all frames delivered by
 VMware but cannot guarantee the virtual network mirrors them.
 
+The RevAI bridge requires the sensor for an integrated dynamic run. Standalone
+WinRE keeps the sensor optional and records capture startup or collection
+failures while continuing its normal guest-side analysis.
+
 **Operator with staged assets** (`internal\reapply\`, air-gap safe): one
 command re-applies everything to a fresh/reverted VM -
 `powershell -ExecutionPolicy Bypass -File ops\reapply_after_revert.ps1`.
@@ -187,7 +191,7 @@ python -m winre.ui.app          # http://127.0.0.1:5001
 > without using a malware sample.
 
 ```powershell
-# deterministic static analysis; no LLM calls
+# deterministic deep analysis; report review uses the configured judgment model
 python -m winre.pipeline "C:\samples\notepad.exe" --driver remote --mode static
 
 # or agentic engine (needs the LLM endpoint for llm_judge)
@@ -197,8 +201,10 @@ python -m winre.pipeline "C:\samples\notepad.exe" --driver remote --mode agentic
 ```
 
 Open the Cases page and confirm the section rows (`static` /
-`agentic`): audit `truly_green`, deep source `static_deterministic`
-(static mode) or `llm_judge` (agentic with LLM). `--dry-llm` on agentic
+`agentic`): audit `truly_green`, report claim review `complete`, deep source `static_deterministic`
+(static mode) or `llm_judge` (agentic with LLM). Static deep analysis does not
+call an agent, but the configured judgment role still checks report claims.
+`--dry-llm` on agentic
 mode honestly shows `deterministic_fallback`. Then see
 [`OPERATE.md`](OPERATE.md).
 

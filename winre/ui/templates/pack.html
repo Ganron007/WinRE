@@ -10,7 +10,7 @@
   <div class="page-head">
     <h1>Case <span class="mono" style="color:var(--tx-mono)">{{ pack.short }}…</span></h1>
     <span class="sub mono">{{ pack.sha }}</span>
-    {% if pack.mode == 'static' %}<span class="badge flat" title="deterministic deep dive — zero LLM">section: static</span>
+    {% if pack.mode == 'static' %}<span class="badge flat" title="deterministic deep analysis; report claim review uses the configured LLM">section: static</span>
     {% elif pack.mode == 'agentic' %}<span class="badge flat" title="LangGraph agentic deep dive">section: agentic</span>
     {% elif pack.mode %}<span class="badge flat">section: {{ pack.mode }}</span>
     {% else %}<span class="badge flat" title="pre-sectioning pack">legacy</span>{% endif %}

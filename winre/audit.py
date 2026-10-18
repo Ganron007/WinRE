@@ -16,6 +16,7 @@ Every audit entry records per-stage ok, any fallbacks, failed tools and
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -196,15 +197,154 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
         if gm == "enforce" and dynamic.get("ran"):
             gate_ok = False
 
+    unmet: list[str] = []
+    # The technical report is part of the product output, not a decorative
+    # afterthought. Its source-bound claim review must match this exact report,
+    # sample and run. A present citation file or a successful LLM HTTP status
+    # is not sufficient; every report claim must have a supported review.
+    report_review: dict = {"ok": False, "status": "missing"}
+    report_review_ok = False
+    review_path = evidence / "report" / "claim-review.json"
+    report_path = evidence / "report" / "REPORT-TECHNICAL-v3.md"
+    locator_path = evidence / "report" / "evidence-locators.json"
+    if review_path.is_file() and report_path.is_file():
+        try:
+            report_review = json.loads(review_path.read_text(encoding="utf-8"))
+            report_sha = hashlib.sha256(report_path.read_bytes()).hexdigest()
+            root_meta = json.loads((evidence / "META.json").read_text(encoding="utf-8"))
+            locator_bytes = locator_path.read_bytes()
+            locator_sha = hashlib.sha256(locator_bytes).hexdigest()
+            locator_manifest = json.loads(locator_bytes.decode("utf-8"))
+            if not all(isinstance(value, dict) for value in
+                       (report_review, root_meta, locator_manifest)):
+                raise ValueError("report review provenance documents must be JSON objects")
+            locator_rows = locator_manifest.get("locators")
+            if not isinstance(locator_rows, dict):
+                raise ValueError("evidence locator rows are malformed")
+            statuses = report_review.get("by_status") or {}
+            if not isinstance(statuses, dict):
+                raise ValueError("claim review status counts are malformed")
+            total = int(report_review.get("claims_total") or 0)
+            supported = int(statuses.get("supported") or 0)
+            reviewed_claims = report_review.get("claims")
+            manifest_claims = locator_manifest.get("claims")
+            claim_rows_valid = (isinstance(reviewed_claims, list)
+                                and len(reviewed_claims) == total
+                                and isinstance(manifest_claims, list)
+                                and all(isinstance(row, dict)
+                                        and isinstance(row.get("text"), str)
+                                        and isinstance(row.get("locators"), list)
+                                        for row in manifest_claims)
+                                and len([row for row in reviewed_claims
+                                         if isinstance(row, dict)
+                                         and str(row.get("claim_id", "")).startswith("C")])
+                                    == len(manifest_claims)
+                                and all(isinstance(row, dict)
+                                        and row.get("status") == "supported"
+                                        and row.get("evidence_quote_valid") is True
+                                        and isinstance(row.get("evidence_sources"), list)
+                                        and all(isinstance(source, dict)
+                                                for source in row.get("evidence_sources", []))
+                                        and bool(row.get("evidence_sources"))
+                                        and not row.get("unresolved_locators")
+                                        for row in reviewed_claims))
+            source_rows_valid = bool(claim_rows_valid)
+            source_resolution_cache: dict[str, dict] = {}
+            source_decoded_cache: dict = {}
+            source_hash_cache: dict = {}
+            from .report_quality import index_jsonl_references
+            source_jsonl_cache = index_jsonl_references(
+                evidence,
+                [str(locator.get("reference"))
+                 for locator in locator_rows.values()
+                 if isinstance(locator, dict) and locator.get("reference")])
+            if source_rows_valid:
+                for index, row in enumerate(
+                        (item for item in reviewed_claims
+                         if str(item.get("claim_id", "")).startswith("C")), 1):
+                    ledger = manifest_claims[index - 1]
+                    expected_id = f"C{index:04d}"
+                    if (row.get("claim_id") != expected_id
+                            or row.get("claim") != ledger.get("text")
+                            or row.get("locators") != ledger.get("locators")):
+                        source_rows_valid = False
+                        break
+            if source_rows_valid:
+                for row in reviewed_claims:
+                    if not str(row.get("claim_id", "")).startswith("C"):
+                        source_rows_valid = False
+                        break
+                    row_locators = set(str(value) for value in (row.get("locators") or []))
+                    row_sources = row.get("evidence_sources") or []
+                    if not row_locators or row_locators != {
+                            str(source.get("locator")) for source in row_sources}:
+                        source_rows_valid = False
+                        break
+                    quote = str(row.get("evidence_quote") or "")
+                    quote_matches = False
+                    for source in row_sources:
+                        locator = locator_rows.get(str(source.get("locator")))
+                        if not isinstance(locator, dict):
+                            source_rows_valid = False
+                            break
+                        reference = str(locator.get("reference") or "")
+                        resolved = source_resolution_cache.get(reference)
+                        if resolved is None:
+                            from .report_quality import resolve_reference
+                            resolved = resolve_reference(
+                                evidence, reference,
+                                decoded_cache=source_decoded_cache,
+                                hash_cache=source_hash_cache,
+                                jsonl_cache=source_jsonl_cache)
+                            source_resolution_cache[reference] = resolved
+                        if not resolved.get("ok"):
+                            source_rows_valid = False
+                            break
+                        if (source.get("artifact") != resolved.get("artifact")
+                                or source.get("json_path") != resolved.get("pointer")
+                                or source.get("artifact_sha256") != resolved.get("sha256")):
+                            source_rows_valid = False
+                            break
+                        if quote and quote in str(resolved.get("excerpt") or ""):
+                            quote_matches = True
+                    if not source_rows_valid or not quote_matches:
+                        source_rows_valid = False
+                        break
+                    if not source_rows_valid:
+                        break
+            report_review_ok = bool(
+                report_review.get("schema") == "winre-report-claim-review/v1"
+                and report_review.get("ok") is True
+                and report_review.get("status") == "complete"
+                and report_review.get("sha256") == root_meta.get("sha256")
+                and report_review.get("run_id") == root_meta.get("run_id")
+                and bool(root_meta.get("sha256")) and bool(root_meta.get("run_id"))
+                and report_review.get("report_sha256") == report_sha
+                and report_review.get("locators_sha256") == locator_sha
+                and locator_manifest.get("sha256") == root_meta.get("sha256")
+                and locator_manifest.get("run_id") == root_meta.get("run_id")
+                and locator_manifest.get("report_sha256") == report_sha
+                and total > 0 and supported == total
+                and sum(int(value or 0) for value in statuses.values()) == total
+                and source_rows_valid)
+            if not report_review_ok:
+                report_review = {**report_review, "ok": False,
+                                 "status": "invalid-or-unsupported",
+                                 "report_sha256_current": report_sha}
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            report_review = {"ok": False, "status": "unreadable",
+                             "reason": f"{type(exc).__name__}: {exc}"}
+    if not report_review_ok:
+        unmet.append("report claim support review missing, stale, or not fully supported")
+
     quality_green = not fallbacks and not failed_tools \
-        and not dynamic_conflict and gate_ok
+        and not dynamic_conflict and gate_ok and report_review_ok
 
     # Unmet expectations (RevAI handoff 2026-09-27 item 2). A stage can be
     # "ran" and still have produced nothing usable — the deep dive finishing
     # with verdict: null used to be written ok=true, so `truly_green: true`
     # sat next to a missing verdict. These are named, recorded, and they DO
     # consume truly_green.
-    unmet: list[str] = []
     if deep_check.get("ran"):
         if not isinstance(composition, dict) or composition.get("error"):
             unmet.append("current-run composite selection missing or unreadable")
@@ -366,6 +506,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
         "capability_failures": capability_failures,
         "artifact_coverage": artifact_coverage,
         "artifact_coverage_failures": coverage_failures,
+        "report_claim_review": report_review,
         "unmet_expectations": unmet,
         "dynamic_conflict": dynamic_conflict,
         "dynamic_blocked": dynamic_blocked,

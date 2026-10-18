@@ -876,8 +876,14 @@ def _requested_sources(pack, meta: dict) -> dict:
         "x64dbg": {"requested": bool((meta.get("x64dbg_dump") or {}).get("attempted")),
                    "required": False},
         "windbg": {"requested": dyn, "required": False},
-        "external_capture": {"requested": bool(meta.get("external_capture_requested")),
-                              "required": bool(meta.get("external_capture_requested"))},
+        "external_capture": {
+            "requested": bool(meta.get("external_capture_requested")),
+            # Older integrated records had no separate required bit and
+            # treated any explicit capture request as mandatory. New
+            # standalone records can request capture as an optional extra.
+            "required": bool(meta.get(
+                "external_capture_required",
+                meta.get("external_capture_requested")))},
     }
     return req
 
@@ -890,7 +896,8 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                    stop_on_settle: int = 20,
                    clock: dict | None = None,
                    remote_sample: str | None = None,
-                   run_id: str | None = None) -> dict:
+                   run_id: str | None = None,
+                   require_external_capture: bool = False) -> dict:
     """SSH: run orchestrator --mode local on the VM via helper, scp pack back."""
     t0 = time.time()
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -1016,24 +1023,47 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     capture_record: dict | None = None
     capture_requested = False
     try:
-        from .external_capture import CaptureSession, require_config
-        capture_config = require_config()
-        capture_requested = True
-        capture_mode = str(capture_config.get("mode") or "passive")
-        capture_session = CaptureSession.start(capture_config)
+        from .external_capture import CaptureSession, load_config, require_config
+        # WinRE is a standalone product. Its dynamic run must not depend on a
+        # RevAI/REMnux sensor being installed. When this is an integrated
+        # RevAI run, the bridge opts into a hard requirement so missing or
+        # unhealthy passive capture blocks detonation instead of silently
+        # weakening the integrated evidence contract.
+        capture_config = (require_config() if require_external_capture
+                          else load_config())
+        if capture_config is not None:
+            capture_requested = True
+            capture_mode = str(capture_config.get("mode") or "passive")
+            capture_session = CaptureSession.start(capture_config)
     except Exception as e:
         capture_requested = True
         failed_capture = {"schema": "winre-external-capture/v1",
                           "requested": True, "status": "failed",
+                          "required": bool(require_external_capture),
                           "reason": f"capture startup failed: {type(e).__name__}: {e}"[:300],
                           "run_id": run_id}
-        failed = stage_result("dynamic", False, error=failed_capture["reason"],
-                              elapsed_s=round(time.time() - t0, 1),
-                              run_id=run_id, gate=gate.get("gate"),
-                              external_capture=failed_capture)
-        pack.write("dynamic", "external_capture.json", failed_capture)
-        pack.write("dynamic", "STAGE.json", failed)
-        return failed
+        if require_external_capture:
+            failed = stage_result("dynamic", False, error=failed_capture["reason"],
+                                  elapsed_s=round(time.time() - t0, 1),
+                                  run_id=run_id, gate=gate.get("gate"),
+                                  external_capture=failed_capture)
+            pack.write("dynamic", "external_capture.json", failed_capture)
+            pack.write("dynamic", "STAGE.json", failed)
+            return failed
+        # Capture is an optional enhancement for standalone WinRE. Preserve the
+        # startup failure in the pack, but let the normal guest detonation and
+        # WinRE-owned FakeNet/telemetry continue.
+        capture_record = failed_capture
+
+    if not capture_requested:
+        capture_record = {
+            "schema": "winre-external-capture/v1",
+            "requested": False,
+            "required": False,
+            "status": "not_requested",
+            "reason": "no passive capture sensor configured for this standalone run",
+            "run_id": run_id,
+        }
 
     _capture_env = (f"$env:WINRE_NETWORK_MODE='{capture_mode}'; "
                     if capture_session else "")
@@ -1060,9 +1090,11 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
             try:
                 capture_record = capture_session.stop()
                 capture_record["run_id"] = run_id
+                capture_record["required"] = bool(require_external_capture)
             except Exception as e:
                 capture_record = {"schema": "winre-external-capture/v1",
                                   "requested": True, "status": "failed",
+                                  "required": bool(require_external_capture),
                                   "reason": f"capture shutdown failed: {type(e).__name__}: {e}"[:300],
                                   "run_id": run_id}
     # honest RC check: the helper prints RC=<code> as its last line
@@ -1202,9 +1234,11 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     if capture_requested:
         meta["network_mode"] = capture_mode or "passive"
         meta["external_capture_requested"] = True
+        meta["external_capture_required"] = bool(require_external_capture)
         meta["external_capture"] = capture_record or {
             "schema": "winre-external-capture/v1", "requested": True,
-            "status": "failed", "reason": "capture did not produce a terminal record",
+            "status": "failed", "required": bool(require_external_capture),
+            "reason": "capture did not produce a terminal record",
             "run_id": run_id}
         if capture_session:
             try:
@@ -1225,7 +1259,26 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
                 remote_meta = json.loads(remote_meta_path.read_text(encoding="utf-8"))
                 if remote_meta.get("run_id") == run_id:
                     remote_meta.update({key: meta[key] for key in (
-                        "network_mode", "external_capture_requested", "external_capture")})
+                        "network_mode", "external_capture_requested",
+                        "external_capture_required", "external_capture")})
+                    remote_meta_path.write_text(json.dumps(remote_meta, indent=2) + "\n",
+                                                encoding="utf-8")
+        except (OSError, json.JSONDecodeError) as e:
+            meta["external_capture_metadata_error"] = str(e)[:200]
+    else:
+        meta["external_capture_requested"] = False
+        meta["external_capture_required"] = False
+        meta["external_capture"] = capture_record
+        try:
+            (local_dyn / "external_capture.json").write_text(
+                json.dumps(capture_record, indent=2) + "\n", encoding="utf-8")
+            remote_meta_path = local_dyn / "META.json"
+            if remote_meta_path.is_file():
+                remote_meta = json.loads(remote_meta_path.read_text(encoding="utf-8"))
+                if remote_meta.get("run_id") == run_id:
+                    remote_meta.update({"external_capture_requested": False,
+                                        "external_capture_required": False,
+                                        "external_capture": capture_record})
                     remote_meta_path.write_text(json.dumps(remote_meta, indent=2) + "\n",
                                                 encoding="utf-8")
         except (OSError, json.JSONDecodeError) as e:
@@ -1238,7 +1291,7 @@ def remote_dynamic(sample_name: str, sha: str, pack: EvidencePack, cfg: dict,
     gate_mode = snapshot_gate.mode()
     gate_pass = (gate_mode != "enforce") or bool(meta.get("gate_marker_consumed"))
     # ok=sample-ran without the tracer surviving is not a green detonation.
-    capture_ok = (not capture_requested or
+    capture_ok = (not require_external_capture or not capture_requested or
                   (meta.get("external_capture") or {}).get("status") == "collected")
     ok = bool(transfer_complete and fresh and meta.get("ok") and capture_ok)
     if capture_requested and not capture_ok and err is None:
@@ -1604,7 +1657,8 @@ def remote_deep(sample_name: str, pack: EvidencePack, cfg: dict, dry_llm: bool,
     (Ghidra/IDA SQL over SSH + Malcat MCP over HTTP). When the LLM endpoint is
     configured the agent runs and the result is `llm_judge`; otherwise the
     stage records `deterministic_fallback` (honest, not green).
-    mode="static": deterministic fixed-checklist deep dive, zero LLM calls
+    mode="static": deterministic fixed-checklist deep dive; report claim review
+    still uses the configured LLM unless --dry-llm is selected
     (RevAI scripted). dry_llm is orthogonal.
     Set dynamic=True to also expose the bounded x64dbg debug-loop tools
     to the agent (agentic mode only).
@@ -1862,6 +1916,7 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
                         enable_pesieve: bool = False, enable_dynamic: bool = False,
                         dry_llm: bool = False,
                         enable_agentic_dbg: bool = False,
+                        require_external_capture: bool = False,
                         mode: str = "agentic",
                         adaptive: bool = False,
                         idle_stop_seconds: int = 0,
@@ -2036,7 +2091,8 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
                                             stop_on_settle=stop_on_settle,
                                             clock=clock,
                                             remote_sample=remote_sample,
-                                            run_id=run_id)
+                                            run_id=run_id,
+                                            require_external_capture=require_external_capture)
 
     # yara (local, from evidence)
     try:
@@ -2088,15 +2144,26 @@ def run_remote_pipeline(sample: Path, *, max_seconds: int = 150,
         results["artifact_manifests"] = {
             "ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
 
+    # Render and source-review the report before the final audit. Claim support
+    # is part of the quality gate, so the report cannot be generated only after
+    # the run has already been declared green.
+    try:
+        from .reporting import generate_all
+        results["reporting"] = generate_all(
+            pack.root, review_claims=not dry_llm)
+    except Exception as e:
+        results["reporting"] = {"error": str(e)[:200]}
+
     audit_res = audit_mod.audit(pack.root, require_dynamic=enable_dynamic)
     (pack.root / "audit.json").write_text(
         json.dumps(audit_res, indent=2) + "\n", encoding="utf-8")
     results["audit"] = audit_res
     try:
-        from .reporting import generate_all
-        results["reporting"] = generate_all(pack.root)
+        from .reporting import build_audit_report, build_evidence_bundle
+        results["reporting"]["audit_report"] = build_audit_report(pack.root)
+        results["reporting"]["evidence_bundle"] = build_evidence_bundle(pack.root)
     except Exception as e:
-        results["reporting"] = {"error": str(e)[:200]}
+        results.setdefault("reporting", {})["finalize_error"] = str(e)[:200]
 
     # pack-level META: mode/engine/source for UI rows + publish paths
     try:
@@ -2244,9 +2311,12 @@ def main() -> int:
     ap.add_argument("--mode", choices=["agentic", "static"], default="agentic",
                     help="deep-dive engine: agentic = LangGraph ReAct (RevAI "
                          "agentic); static = deterministic fixed-checklist, "
-                         "zero LLM calls (RevAI scripted)")
+                         "no agentic analysis calls; report claim review still uses the configured LLM")
     ap.add_argument("--run-id", default=None,
                     help="parent execution ID (RevAI remote-driver integration)")
+    ap.add_argument("--require-external-capture", action="store_true",
+                    help="require the REMnux passive sensor before detonation; "
+                         "used by the integrated RevAI path")
     ap.add_argument("--publish", action="store_true",
                     help="publish sanitized case to docs/case-studies/<mode>/<sha>/")
     args = ap.parse_args()
@@ -2267,7 +2337,8 @@ def main() -> int:
                               idle_stop_seconds=getattr(args, "idle_stop_seconds", 0),
                                stop_on=getattr(args, "stop_on", "network,file"),
                                stop_on_settle=getattr(args, "stop_on_settle", 20),
-                               run_id=args.run_id)
+                              run_id=args.run_id,
+                              require_external_capture=args.require_external_capture)
     if res.get("aborted"):
         # fail fast BEFORE anything executed (execution plan over budget)
         return 2

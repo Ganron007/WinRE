@@ -90,9 +90,12 @@ corroborate a static result but does not clear a high-signal static YARA
 finding.
 
 The report records whether its judgment came from the configured LLM, the
-deterministic engine, or a deterministic fallback. Static mode has no LLM
-analysis. An agentic run with `--dry-llm` records `deterministic_fallback` so
-the fallback is visible to the operator and audit.
+deterministic engine, or a deterministic fallback. Static mode has no agentic
+LLM analysis, but the final report still receives a separate claim-support
+review. That review records field-level evidence keys and fails closed when a
+claim cannot be supported. An agentic run with `--dry-llm` records
+`deterministic_fallback`; report review is also marked not requested, so the
+fallback and missing report review remain visible to the operator and audit.
 
 Dynamic findings separate process launch from evidence quality. `run_observed`
 records whether the sample PID was observed, while `evidence_complete` and

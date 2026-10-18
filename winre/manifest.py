@@ -772,6 +772,10 @@ def write_pack_manifests(pack_root: Path, *, run_id: str, sha256: str,
         capture_record = _load_json(pack_root / "dynamic" / "external_capture.json")
     if capture_record and capture_record.get("requested"):
         dynamic_meta["external_capture_requested"] = True
+        dynamic_meta["external_capture_required"] = bool(
+            capture_record.get("required",
+                               dynamic_meta.get("external_capture_required",
+                                               dynamic_meta.get("external_capture_requested"))))
         dynamic_meta["external_capture"] = capture_record
         dynamic_meta["network_mode"] = str(capture_record.get("mode") or "passive")
     dynamic_sources = {
@@ -794,7 +798,7 @@ def write_pack_manifests(pack_root: Path, *, run_id: str, sha256: str,
                          (mode == "agentic-dbg" or dynamic_meta.get("x64dbg_dump", {}).get("attempted"))),
                    "required": False},
         "external_capture": {"requested": bool(dynamic_meta.get("external_capture_requested")),
-                              "required": bool(dynamic_meta.get("external_capture_requested"))},
+                              "required": bool(dynamic_meta.get("external_capture_required"))},
     }
     static_sources = {
         "intake": {"requested": True, "required": True},

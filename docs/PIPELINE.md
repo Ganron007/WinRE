@@ -16,7 +16,7 @@ overwrite evidence produced by another capability.
 
 | CLI selection | Deep-analysis engine | Additional execution | Pack section |
 |---|---|---|---|
-| `--mode static` | Fixed deterministic checklist; zero LLM calls | None | `static/` |
+| `--mode static` | Fixed deterministic checklist; no agentic analysis calls | Configured-model review of the finished technical report (unless `--dry-llm`) | `static/` |
 | `--mode agentic` | LangGraph tool loop and configured judgment role | None | `agentic/` |
 | `--mode agentic --agentic-dbg` | Agentic | Entry-point or packed-file OEP probe; bounded x64dbg execution with ETW observation and scoped process cleanup | `dbg/` |
 | `--mode agentic --dynamic` | Agentic | Gated detonation after the static stages | `dynamic/` |
@@ -27,6 +27,12 @@ execution capabilities. Dynamic and debugger work are separate producers and
 cannot be combined in one pipeline invocation. Under the default `enforce`
 snapshot gate, one verified restore permits one gated sample execution, so
 restore and attest between them.
+
+When enabled, report quality review is a separate configured-model check that
+receives each report claim with its source-bound evidence fields. It does not
+rewrite the report. `--dry-llm` disables this check as well as agentic calls;
+the resulting `claim-review.json` records the review as not requested and the
+final audit remains red until the report is reviewed.
 
 ## Stage order
 
@@ -97,7 +103,9 @@ recovery procedure.
 
 ## Common runs
 
-Run the deterministic engine without LLM calls:
+Run the deterministic deep-analysis engine. Its fixed checklist does not make
+agentic analysis calls; with a configured endpoint, the separate report
+claim-support reviewer still runs before the final audit:
 
 ```powershell
 python -m winre.pipeline "C:\samples\sample.exe" --driver remote --mode static
@@ -159,7 +167,10 @@ failure. `--publish` writes a sanitized report-level copy to
 
 `audit.json → truly_green` is a run-quality gate. It checks required stages,
 the requested dynamic/debug capability, required tool outcomes, fallback
-status, expected verdict/composition records, and snapshot-gate evidence. A
+status, expected verdict/composition records, snapshot-gate evidence, and
+claim-level support for the exact report draft. The report's evidence keys
+resolve to artifact fields; missing, stale, unsupported, or unreviewed claims
+keep the audit red. The report is preserved as drafted. A
 green audit means the requested workflow produced acceptable evidence under
 its declared contract. It does not establish that the sample is benign, that
 all behavior was observed, or that the analysis is complete.

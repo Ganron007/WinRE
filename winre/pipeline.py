@@ -559,9 +559,9 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
     """Deep dive — mode selects the engine (same contract either way).
 
     mode="agentic" (default): LangGraph ReAct agent (RevAI agentic).
-    mode="static": deterministic fixed-checklist deep dive, zero LLM calls
-        (RevAI scripted). dry_llm is orthogonal: agentic+dry_llm falls back
-        honestly; static mode never touches the LLM.
+    mode="static": deterministic fixed-checklist deep dive (RevAI scripted).
+        Static deep analysis makes no LLM call; the separate report claim review
+        may call it. dry_llm disables both; agentic+dry_llm falls back honestly.
     enable_agentic_dbg: give the deep-dive agent the bounded x64dbg
         debug-loop tools (engine langgraph+dbg; agentic mode only — no
         detonation).
@@ -859,7 +859,7 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
     → report → audit. Never detonates. Safe on any host.
 
     mode: "agentic" (default) = LangGraph ReAct deep dive (RevAI agentic);
-          "static" = deterministic deep dive, zero LLM calls (RevAI scripted).
+          "static" = deterministic deep dive, no agentic analysis calls (RevAI scripted).
     dry_llm stays orthogonal: agentic+dry_llm = honest deterministic_fallback.
     enable_agentic_dbg: deep agent gets bounded x64dbg tools (langgraph+dbg,
         agentic mode only; no detonation).
@@ -1035,19 +1035,27 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
         results["artifact_manifests"] = {
             "ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
 
-    # audit: static truly_green independent of dynamic; dynamic is a note
+    # Render and source-review the first report draft before the final audit.
+    # The audit consumes report/claim-review.json, so publishing after audit
+    # would leave the most important prose-quality gate outside truly_green.
+    try:
+        from .reporting import generate_all
+        results["reporting"] = generate_all(
+            pack.root, review_claims=not dry_llm)
+    except Exception as e:
+        results["reporting"] = {"error": str(e)[:200]}
+
+    # Final audit includes source-bound claim support for the exact report above.
     audit_res = audit_mod.audit(pack.root, require_dynamic=enable_dynamic)
     (pack.root / "audit.json").write_text(
         json.dumps(audit_res, indent=2) + "\n", encoding="utf-8")
     results["audit"] = audit_res
-
-    # RevAI-contract reporting chain (tools-raw, stage_trace, iocs,
-    # REPORT-TECHNICAL-v3.md, AUDIT-REPORT, EVIDENCE-BUNDLE)
     try:
-        from .reporting import generate_all
-        results["reporting"] = generate_all(pack.root)
+        from .reporting import build_audit_report, build_evidence_bundle
+        results["reporting"]["audit_report"] = build_audit_report(pack.root)
+        results["reporting"]["evidence_bundle"] = build_evidence_bundle(pack.root)
     except Exception as e:
-        results["reporting"] = {"error": str(e)[:200]}
+        results.setdefault("reporting", {})["finalize_error"] = str(e)[:200]
 
     # pack-level META: mode/engine/source for UI rows + publish paths
     try:
@@ -1168,12 +1176,15 @@ def main() -> int:
     ap.add_argument("--mode", choices=["agentic", "static"], default="agentic",
                     help="deep-dive engine: agentic = LangGraph ReAct (RevAI "
                          "agentic); static = deterministic fixed-checklist, "
-                         "zero LLM calls (RevAI scripted)")
+                         "no agentic analysis calls; report claim review still uses the configured LLM")
     ap.add_argument("--driver", choices=["local", "remote"], default="local",
                     help="local = run on FlareVM itself; remote = control-plane "
                          "driver (SSH to FlareVM + HTTP MCP + local LLM)")
     ap.add_argument("--run-id", default=None,
                     help="parent execution ID (RevAI remote-driver integration)")
+    ap.add_argument("--require-external-capture", action="store_true",
+                    help="require the REMnux passive sensor before remote detonation; "
+                         "used by integrated RevAI runs")
     ap.add_argument("--publish", action="store_true",
                     help="publish sanitized case to docs/case-studies/<mode>/<sha>/")
     args = ap.parse_args()
@@ -1190,6 +1201,10 @@ def main() -> int:
               "execution because it runs on Flare and cannot perform trusted "
               "post-execution analysis. Use --driver remote.", file=sys.stderr)
         return 2
+    if args.require_external_capture and (args.driver != "remote" or not enable_dynamic):
+        print("ERROR: --require-external-capture requires --driver remote and --dynamic",
+              file=sys.stderr)
+        return 2
     if args.driver == "remote":
         from . import remote_driver
         res = remote_driver.run_remote_pipeline(
@@ -1201,7 +1216,8 @@ def main() -> int:
             idle_stop_seconds=args.idle_stop_seconds,
             stop_on=args.stop_on,
             stop_on_settle=args.stop_on_settle,
-            run_id=args.run_id)
+            run_id=args.run_id,
+            require_external_capture=args.require_external_capture)
         if res.get("aborted"):
             return 2   # fail fast before anything executed
         if args.publish:
