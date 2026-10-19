@@ -205,19 +205,34 @@ def _observations(dyn: Path, fr: dict, ni: dict) -> list[dict]:
     for path, effect in (fr.get("file_effects") or {}).items():
         if not isinstance(effect, dict) or not int(effect.get("successful_writes") or 0):
             continue
-        event_refs = [str(value) for value in effect.get("event_refs") or []
-                      if isinstance(value, (str, int)) and str(value)]
-        if event_refs:
-            source_ref = "dynamic/frida_trace.jsonl#@invocation_id=" + event_refs[0]
-        else:
-            event_index = next((i for i, row in enumerate(file_events)
-                                if isinstance(row, dict)
-                                and str(row.get("path") or "") == str(path)), None)
-            if event_index is None:
+        raw_event_refs = effect.get("event_refs")
+        if not isinstance(raw_event_refs, (list, tuple)):
+            raw_event_refs = []
+        event_ref = None
+        for value in raw_event_refs:
+            if not isinstance(value, (str, int)):
                 continue
+            candidate = str(value).strip()
+            if candidate and len(candidate) <= 256 and "#" not in candidate:
+                event_ref = candidate
+                break
+        if event_ref:
+            source_ref = "dynamic/frida_trace.jsonl#@invocation_id=" + event_ref
+        else:
+            event_row = next(((i, row) for i, row in enumerate(file_events)
+                              if isinstance(row, dict)
+                              and str(row.get("path") or "") == str(path)), None)
+            if event_row is None:
+                continue
+            event_index, summary_event = event_row
             source_ref = f"dynamic/frida_summary.json#$.file_events[{event_index}]"
+            summary_ref = summary_event.get("event_ref")
+            if isinstance(summary_ref, (str, int)):
+                candidate = str(summary_ref).strip()
+                if candidate and len(candidate) <= 256 and "#" not in candidate:
+                    event_ref = candidate
         add("path", str(path), source_ref,
-            "sample-process-api-observation", (effect.get("event_refs") or [None])[0],
+            "sample-process-api-observation", event_ref,
             attribution="sample-process API only; caller/control-flow unresolved",
             successful_writes=effect.get("successful_writes"))
     return observations
