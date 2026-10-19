@@ -178,6 +178,10 @@ all behavior was observed, or that the analysis is complete.
 Dynamic evidence can corroborate static analysis. The `static_yara_wins`
 policy prevents dynamic output from clearing a high-signal static YARA result;
 unresolved conflicts and coverage gaps remain visible in the audit and pack.
+Packet captures on the shared VMnet are guest-wide. WinRE reports keep their
+observations with capture provenance and unresolved process attribution; those
+observations are not sample indicators or command-and-control evidence unless
+a process- or flow-level link is established.
 
 ## Standalone dynamic orchestrator
 

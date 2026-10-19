@@ -375,16 +375,50 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                                         and message.get("role") == "user"
                                         and isinstance(message.get("content"), str)), None)
                     response_content = response_doc.get("content")
+                    response_tool_calls = response_doc.get("tool_calls")
+                    if response_content is None:
+                        response_content = ""
+                    if not isinstance(response_tool_calls, list):
+                        response_tool_calls = []
+                    response_digest = hashlib.sha256(json.dumps(
+                        {"content": response_content,
+                         "tool_calls": response_tool_calls},
+                        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                        default=str).encode("utf-8")).hexdigest()
                     if (not isinstance(prompt_text, str)
                             or hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
                                 != artifacts.get("prompt_sha256")
                             or len(prompt_text) != artifacts.get("prompt_chars")
                             or not isinstance(response_content, str)
-                            or hashlib.sha256(response_content.encode("utf-8")).hexdigest()
-                                != attempt.get("response_sha256")
+                            or response_digest != attempt.get("response_sha256")
+                            or int(attempt.get("response_tool_calls") or 0)
+                                != len(response_tool_calls)
                             or response_doc.get("finish_reason") != attempt.get("finish_reason")
                             or response_doc.get("error") is not None
                             or attempt.get("error") is not None):
+                        call_records_valid = False
+                        break
+
+                    # The reviewer is forced to emit one constrained function
+                    # call. Free-form text/JSON is not a valid decision payload.
+                    request_tools = payload.get("tools") if isinstance(payload, dict) else None
+                    request_tool = (request_tools[0] if isinstance(request_tools, list)
+                                    and len(request_tools) == 1 else None)
+                    request_function = (request_tool.get("function")
+                                        if isinstance(request_tool, dict) else None)
+                    response_tool = (response_tool_calls[0]
+                                     if len(response_tool_calls) == 1 else None)
+                    response_function = (response_tool.get("function")
+                                         if isinstance(response_tool, dict) else None)
+                    if (not isinstance(payload, dict)
+                            or payload.get("tool_choice") != {
+                                "type": "function", "function": {
+                                    "name": "submit_claim_reviews"}}
+                            or not isinstance(request_function, dict)
+                            or request_function.get("name") != "submit_claim_reviews"
+                            or len(response_tool_calls) != 1
+                            or not isinstance(response_function, dict)
+                            or response_function.get("name") != "submit_claim_reviews"):
                         call_records_valid = False
                         break
 
@@ -405,11 +439,11 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                         prompt_identity = json.loads(analysis_text)
                         prompt_claim_rows = json.loads(prompt_text.rsplit(
                             claims_marker, 1)[1])
-                        review_text = str(response_content).strip()
-                        review_text = re.sub(
-                            r"^```(?:json)?\s*|\s*```$", "", review_text,
-                            flags=re.IGNORECASE | re.DOTALL).strip()
-                        response_rows = json.loads(review_text).get("reviews")
+                        tool_function = response_tool_calls[0].get("function") or {}
+                        arguments_text = tool_function.get("arguments")
+                        if not isinstance(arguments_text, str):
+                            raise ValueError("structured reviewer arguments are missing")
+                        response_rows = json.loads(arguments_text).get("reviews")
                     except (IndexError, json.JSONDecodeError, AttributeError):
                         call_records_valid = False
                         break
@@ -446,18 +480,29 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
 
                     batch_decisions: dict[str, dict] = {}
                     for response_row in response_rows:
-                        if (not isinstance(response_row, list) or len(response_row) != 3
-                                or not isinstance(response_row[0], str)
-                                or not isinstance(response_row[1], str)
-                                or not isinstance(response_row[2], list)
+                        if (not isinstance(response_row, dict)
+                                or set(response_row) != {
+                                    "claim_id", "verdict", "locator_ids"}
+                                or not isinstance(response_row.get("claim_id"), str)
+                                or not isinstance(response_row.get("verdict"), str)
+                                or not isinstance(response_row.get("locator_ids"), list)
                                 or any(not isinstance(value, str)
-                                       for value in response_row[2])
-                                or len(response_row[2]) != len(set(response_row[2]))):
+                                       for value in response_row["locator_ids"])
+                                or len(response_row["locator_ids"])
+                                   != len(set(response_row["locator_ids"]))):
                             call_records_valid = False
                             break
-                        claim_id, verdict, locator_ids = response_row
+                        claim_id = response_row["claim_id"]
+                        verdict = response_row["verdict"]
+                        locator_ids = response_row["locator_ids"]
                         if (claim_id in batch_decisions
-                                or verdict not in {"supported", "contradicted", "insufficient"}):
+                                or claim_id not in batch_claims
+                                or verdict not in {"supported", "contradicted", "insufficient"}
+                                or any(locator_id not in {
+                                    str(item.get("locator")) for item in
+                                    (batch_claims[claim_id].get("evidence") or [])
+                                    if isinstance(item, dict)}
+                                       for locator_id in locator_ids)):
                             call_records_valid = False
                             break
                         batch_decisions[claim_id] = {
@@ -512,7 +557,9 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                             reference = str(locator.get("reference") or "")
                             resolved = source_resolution_cache.get(reference)
                             if (resolved is None or not resolved.get("ok")
+                                    or resolved.get("excerpt_truncated") is True
                                     or prompt_source.get("reference") != reference
+                                    or prompt_source.get("excerpt_truncated") is True
                                     or prompt_source.get("artifact") != resolved.get("artifact")
                                     or prompt_source.get("json_path") != resolved.get("pointer")
                                     or prompt_source.get("artifact_sha256") != resolved.get("sha256")
@@ -525,7 +572,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                         if not call_records_valid:
                             break
             report_review_ok = bool(
-                report_review.get("schema") == "winre-report-claim-review/v3"
+                report_review.get("schema") == "winre-report-claim-review/v4"
                 and report_review.get("ok") is True
                 and report_review.get("status") == "complete"
                 and report_review.get("sha256") == root_meta.get("sha256")

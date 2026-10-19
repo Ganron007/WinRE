@@ -546,32 +546,50 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "",
     net["beacons"] = ba.get("beacons") or []
     net["beacon_scope"] = "vm-wide capture; sample process/flow ownership unresolved"
 
-    # every host the sample resolved or negotiated with, and HOW
-    seen: dict[str, set[str]] = {}
-    for cap in (ni.get("captures") or []):
-        for q in cap.get("dns_queries") or []:
+    # Preserve exact source fields for VM-wide packet-capture leads. A host
+    # observed in a whole-guest capture is not proof that the sample resolved
+    # or contacted it.
+    seen: dict[str, dict[str, set[str]]] = {}
+    captures = ni.get("captures") or []
+    for capture_index, cap in enumerate(captures):
+        if not isinstance(cap, dict):
+            continue
+        for observation_index, q in enumerate(cap.get("dns_queries") or []):
             if isinstance(q, str) and q.strip():
-                seen.setdefault(q.strip().lower(), set()).add("dns")
-        for h in cap.get("tls_sni") or []:
+                row = seen.setdefault(q.strip().lower(), {
+                    "observed_as": set(), "evidence_refs": set()})
+                row["observed_as"].add("dns")
+                row["evidence_refs"].add(
+                    f"dynamic/network_intel.json#$.captures[{capture_index}].dns_queries[{observation_index}]")
+        for observation_index, h in enumerate(cap.get("tls_sni") or []):
             if isinstance(h, str) and h.strip():
-                seen.setdefault(h.strip().lower(), set()).add("tls-sni")
-        for line in cap.get("http_requests") or []:
+                row = seen.setdefault(h.strip().lower(), {
+                    "observed_as": set(), "evidence_refs": set()})
+                row["observed_as"].add("tls-sni")
+                row["evidence_refs"].add(
+                    f"dynamic/network_intel.json#$.captures[{capture_index}].tls_sni[{observation_index}]")
+        for observation_index, line in enumerate(cap.get("http_requests") or []):
             # tshark -T fields: host, method, uri
             host = str(line).split("\t")[0].strip().lower()
             if host:
-                seen.setdefault(host, set()).add("http")
+                row = seen.setdefault(host, {
+                    "observed_as": set(), "evidence_refs": set()})
+                row["observed_as"].add("http")
+                row["evidence_refs"].add(
+                    f"dynamic/network_intel.json#$.captures[{capture_index}].http_requests[{observation_index}]")
         net["pcaps"].extend(cap.get("pcap") and [cap["pcap"]] or [])
 
-    for host, how in sorted(seen.items()):
+    for host, observation in sorted(seen.items()):
         if not _looks_like_c2(host):
             continue
         # network_intel is tshark over the whole guest. DNS/HTTP/SNI/beacon
         # presence has no process association, so communication semantics do
         # not justify the phrase "the sample sent" or a C2 verdict.
         net["leads"].append({
-            "host": host, "observed_as": sorted(how),
+            "host": host, "observed_as": sorted(observation["observed_as"]),
             "scope": "vm-wide-pcap", "attribution": "unresolved",
             "status": "unattributed network observation; not promoted to C2",
+            "evidence_refs": sorted(observation["evidence_refs"]),
         })
     net["leads"] = net["leads"][:80]
     net["lead_note"] = (

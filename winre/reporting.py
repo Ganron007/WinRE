@@ -32,7 +32,7 @@ URL_RE = re.compile(
     r"(?:(?:https?|ftp)://|www\.)[^\s\"'<>`]{4,200}", re.IGNORECASE)
 IP_RE = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b"
                    r"(?::\d{1,5})?")
-SHA_RE = re.compile(r"\b[0-9a-f]{32,64}\b")
+SHA_RE = re.compile(r"\b(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})\b", re.IGNORECASE)
 PATH_RE = re.compile(
     r"(?:[A-Za-z]:\\[^\s\"'<>|*:?\[\]]{2,160}|/opt/[^\s\"'<>]{2,160}|"
     r"%[A-Z_]+%\\[^\s\"'<>]{2,160})")
@@ -99,86 +99,126 @@ def write_stage_trace(pack_root: Path) -> dict:
 
 
 def extract_iocs(quick: dict, deep: dict, dynamic: dict | None) -> dict:
-    """Deterministic IOC extraction from static (and dynamic when present).
-    Sources: malcat strings/yara, floss decoded, strings tool, xor candidates,
-    pe version_info, network intel. No LLM."""
-    urls: set[str] = set()
-    ips: set[str] = set()
-    domains: set[str] = set()
-    emails: set[str] = set()
-    paths: set[str] = set()
-    mutexes: set[str] = set()
-    registry: set[str] = set()
-    hashes: set[str] = set()
+    """Extract static indicator candidates with exact source provenance.
 
-    def scan_text(text: str):
-        urls.update(u.rstrip(".,;)") for u in URL_RE.findall(text))
-        for ip in IP_RE.findall(text):
-            if not ip.startswith(("0.", "127.", "255.")):
-                ips.add(ip)
-        for e in EMAIL_RE.findall(text):
-            emails.add(e.lower())
-            domains.add(e.split("@")[-1].lower())
-        for p in PATH_RE.findall(text):
-            paths.add(p.rstrip("\\/"))
-        for mx in MUTEX_RE.findall(text):
-            mutexes.add(mx)
-        for r in REGISTRY_RE.findall(text):
-            registry.add(r.rstrip("\\/"))
-        for d in DOMAIN_RE.findall(text):
-            domains.add(d.lower())
+    LLM-written analysis is never an IOC source. VM-wide packet captures are
+    retained separately as unattributed observations; they are not promoted
+    into sample IOC lists without process-level attribution.
+    """
+    categories = {
+        "urls": set(), "ips": set(), "domains": set(), "emails": set(),
+        "file_paths": set(), "mutexes": set(), "registry_keys": set(),
+        "hashes": set(),
+    }
+    provenance: dict[tuple[str, str], set[str]] = {}
+
+    def add(category: str, value: str, source_ref: str) -> None:
+        value = str(value).strip()
+        if not value:
+            return
+        categories[category].add(value)
+        provenance.setdefault((category, value), set()).add(source_ref)
+
+    def scan_text(text: str, source_ref: str) -> None:
+        # Preserve conventional digest indicators found in sample-derived
+        # static text. Accept only common digest lengths; arbitrary 33–63
+        # character hex runs are not a recognized file-hash format.
+        for value in SHA_RE.findall(text):
+            add("hashes", value.lower(), source_ref)
+        for value in URL_RE.findall(text):
+            add("urls", value.rstrip(".,;)"), source_ref)
+        for value in IP_RE.findall(text):
+            if not value.startswith(("0.", "127.", "255.")):
+                add("ips", value, source_ref)
+        for value in EMAIL_RE.findall(text):
+            email = value.lower()
+            add("emails", email, source_ref)
+            add("domains", email.split("@")[-1], source_ref)
+        for value in PATH_RE.findall(text):
+            add("file_paths", value.rstrip("\\/"), source_ref)
+        for value in MUTEX_RE.findall(text):
+            add("mutexes", value, source_ref)
+        for value in REGISTRY_RE.findall(text):
+            add("registry_keys", value.rstrip("\\/"), source_ref)
+        for value in DOMAIN_RE.findall(text):
+            add("domains", value.lower(), source_ref)
 
     q = (quick or {}).get("evidence") or {}
     mal = q.get("malcat") or {}
-    for s in (mal.get("strings") or []):
-        if isinstance(s, str):
-            scan_text(s)
-    for s in (q.get("floss") or {}).get("decoded_strings") or []:
-        scan_text(str(s))
-    for s in (q.get("strings") or {}).get("strings") or []:
-        scan_text(str(s))
-    for c in (q.get("xor_string_search") or {}).get("candidates") or []:
-        scan_text(str(c.get("string", "")))
-    pe = q.get("pe") or {}
-    for entry in pe.get("imports") or []:
-        if isinstance(entry, dict):
-            scan_text(entry.get("dll", ""))
-    for k, v in (pe.get("version_info") or {}).items():
-        scan_text(f"{k}={v}")
-    for cap in (q.get("capa") or {}).get("capabilities") or []:
-        scan_text(str(cap.get("name", "")))
+    for index, value in enumerate(mal.get("strings") or []):
+        if isinstance(value, str):
+            scan_text(value, f"quick/quick.json#$.evidence.malcat.strings[{index}]")
+    for tool_name, field in (("floss", "decoded_strings"),
+                             ("strings", "strings")):
+        values = (q.get(tool_name) or {}).get(field) or []
+        for index, value in enumerate(values):
+            if isinstance(value, str):
+                scan_text(value, f"quick/quick.json#$.evidence.{tool_name}.{field}[{index}]")
+    for index, candidate in enumerate(
+            (q.get("xor_string_search") or {}).get("candidates") or []):
+        if isinstance(candidate, dict) and isinstance(candidate.get("string"), str):
+            scan_text(candidate["string"],
+                      f"quick/quick.json#$.evidence.xor_string_search.candidates[{index}].string")
+    version_info = (q.get("pe") or {}).get("version_info") or {}
+    if isinstance(version_info, dict):
+        # The compact metadata object preserves exact fields while avoiding
+        # invalid JSON-path expressions for arbitrary version-info keys.
+        source_ref = "quick/quick.json#$.evidence.pe.version_info"
+        for key, value in version_info.items():
+            scan_text(f"{key}={value}", source_ref)
 
-    # agent narrative (deep) — LLM-tagged source
-    agent = (deep or {}).get("agent") or {}
-    scan_text(str(agent.get("llm_analysis") or ""))
-    for h in (agent.get("history") or []):
-        scan_text(json.dumps(h.get("result") or "")[:4000])
+    limits = {"urls": 80, "ips": 80, "domains": 80, "emails": 40,
+              "file_paths": 60, "mutexes": 40, "registry_keys": 40,
+              "hashes": 20}
+    indicators = []
+    for category in sorted(categories):
+        for value in sorted(categories[category])[:limits[category]]:
+            indicators.append({
+                "category": category,
+                "value": value,
+                "attribution": "sample-embedded-static-data",
+                "evidence_refs": sorted(provenance.get((category, value), set())),
+            })
 
-    # dynamic (when present)
-    if dynamic:
-        ni = dynamic.get("network_intel") or {}
-        for cap in ni.get("captures") or []:
-            for d_ in cap.get("dns_queries") or []:
-                domains.add(str(d_).lower())
-            for h in cap.get("http_requests") or []:
-                scan_text(str(h))
+    network_observations = []
+    network_intel = (dynamic or {}).get("network_intel") or {}
+    captures = network_intel.get("captures") or []
+    for capture_index, capture in enumerate(captures):
+        if not isinstance(capture, dict):
+            continue
+        for field, kind in (("dns_queries", "dns"), ("http_requests", "http"),
+                            ("tls_sni", "tls_sni")):
+            for observation_index, value in enumerate(capture.get(field) or []):
+                if value in (None, ""):
+                    continue
+                network_observations.append({
+                    "kind": kind,
+                    "value": str(value),
+                    "capture_index": capture_index,
+                    "capture": str(capture.get("name") or capture.get("interface") or ""),
+                    "scope": str(capture.get("scope") or capture.get("capture_scope")
+                                  or "vm-wide-pcap"),
+                    "attribution": "unresolved",
+                    "eligible_as_sample_ioc": False,
+                    "evidence_ref": (
+                        f"dynamic/network_intel.json#$.captures[{capture_index}]."
+                        f"{field}[{observation_index}]"),
+                })
 
-    iocs = {
-        "schema": "winre-iocs/v1",
+    result = {
+        "schema": "winre-iocs/v2",
         "generated_at": _utc(),
-        "urls": sorted(urls)[:80],
-        "ips": sorted(ips)[:80],
-        "domains": sorted(d for d in domains if d)[:80],
-        "emails": sorted(emails)[:40],
-        "file_paths": sorted(paths)[:60],
-        "mutexes": sorted(mutexes)[:40],
-        "registry_keys": sorted(registry)[:40],
-        "hashes": sorted(hashes)[:20],
-        "sources": ["malcat", "floss", "strings", "xor_string_search",
-                    "pe_version_info", "agent_narrative(llm_tagged)"]
-        + (["dynamic_network"] if dynamic else []),
+        **{name: sorted(values)[:limits[name]]
+           for name, values in categories.items()},
+        "indicator_count": len(indicators),
+        "network_observation_count": len(network_observations),
+        "indicators": indicators,
+        "network_observations": network_observations,
+        "sources": ["malcat_strings", "floss_decoded_strings", "strings_tool",
+                    "xor_string_search", "pe_version_info"],
+        "excluded_sources": ["agent_llm_narrative", "vm_wide_packet_capture"],
     }
-    return iocs
+    return result
 
 
 def _cite(raw_path: str, note: str) -> str:
@@ -586,31 +626,24 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
 
     A("## 5. IOC table")
     A("")
-    _ioc_refs = ["report/iocs.json#$.urls", "report/iocs.json#$.domains",
-                 "report/iocs.json#$.ips", "report/iocs.json#$.emails",
-                 "report/iocs.json#$.file_paths",
-                 "report/iocs.json#$.mutexes",
-                 "report/iocs.json#$.registry_keys",
-                 "quick/quick.json#$.evidence"]
-    if agent.get("history"):
-        _ioc_refs.append("deep/deep.json#$.agent.history[*].result")
-    if has_dynamic:
-        _ioc_refs.append("dynamic/network_intel.json#$.network")
-    set_evidence(*_ioc_refs)
-    if iocs:
-        A(f"- URLs: {len(iocs.get('urls') or [])}" +
-          (": " + ", ".join(f"`{u}`" for u in iocs["urls"][:8]) if iocs.get("urls") else ""))
-        A(f"- Domains: {len(iocs.get('domains') or [])}" +
-          (": " + ", ".join(f"`{d}`" for d in iocs["domains"][:8]) if iocs.get("domains") else ""))
-        A(f"- IPs: {len(iocs.get('ips') or [])}" +
-          (": " + ", ".join(f"`{i}`" for i in iocs["ips"][:8]) if iocs.get("ips") else ""))
-        A(f"- Emails: {len(iocs.get('emails') or [])}" +
-          (": " + ", ".join(f"`{e}`" for e in iocs["emails"][:8]) if iocs.get("emails") else ""))
-        A(f"- File paths: {len(iocs.get('file_paths') or [])}")
-        A(f"- Mutexes: {len(iocs.get('mutexes') or [])}")
-        A(f"- Registry keys: {len(iocs.get('registry_keys') or [])}")
+    indicators = iocs.get("indicators") or []
+    if indicators:
+        for index, item in enumerate(indicators):
+            refs = [f"report/iocs.json#$.indicators[{index}]"]
+            refs.extend(str(ref) for ref in item.get("evidence_refs") or [])
+            set_evidence(*refs)
+            A(f"- **{item.get('category')} candidate:** `{item.get('value')}` "
+              "(embedded static data; not proof of runtime use).")
     else:
-        A("- (no iocs.json)")
+        set_evidence("report/iocs.json#$.indicator_count")
+        A("- No static indicator candidates were extracted from the configured sources.")
+    network_observations = iocs.get("network_observations") or []
+    if network_observations:
+        set_evidence("report/iocs.json#$.excluded_sources",
+                     "report/iocs.json#$.network_observations[0]",
+                     str(network_observations[0].get("evidence_ref") or ""))
+        A("- VM-wide packet-capture observations are retained separately with "
+          "unresolved process attribution and are excluded from sample IOC claims.")
     A("")
     crypto = ev.get("crypto_constants") or {}
     crypto_ids = crypto.get("crypto_identified") or []
@@ -851,20 +884,26 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                   + ", ".join(f"`{x}`" for x in fd["device_writes"][:4])
                   + " - a wiper or raw-disk tamper")
             net = fd.get("network") or {}
-            if net.get("c2"):
-                set_evidence("findings.json#$.findings.network.c2",
-                             "dynamic/network_intel.json#$.captures[*]",
-                             "dynamic/network.json#$.connections")
-                A(f"  - **C2 candidates ({len(net['c2'])}):**")
-                for c in net["c2"][:6]:
-                    set_evidence("findings.json#$.findings.network.c2",
-                                 "dynamic/network_intel.json#$.captures[*]",
-                                 "dynamic/network.json#$.connections")
-                    A(f"    - `{c.get('host')}` ({c.get('kind')})")
+            leads = net.get("leads") or []
+            for index, lead in enumerate(leads[:12]):
+                refs = [f"findings.json#$.findings.network.leads[{index}]"]
+                refs.extend(str(ref) for ref in lead.get("evidence_refs") or [])
+                set_evidence(*refs)
+                A(f"  - VM-wide network lead `{lead.get('host')}` observed as "
+                  f"{', '.join(lead.get('observed_as') or [])}; process attribution "
+                  "is unresolved, so this is not a sample contact or C2 finding.")
+            # Legacy packs may still contain hosts in `c2`; preserve them as
+            # explicitly unverified leads rather than repeating the old label.
+            for index, candidate in enumerate((net.get("c2") or [])[:12]):
+                set_evidence(f"findings.json#$.findings.network.c2[{index}]")
+                A(f"  - Legacy network candidate `{candidate.get('host')}` is "
+                  "not promoted to sample C2 because process attribution and "
+                  "communication intent are not established.")
             if net.get("beacons"):
                 set_evidence("findings.json#$.findings.network.beacons",
-                             "dynamic/network_intel.json#$.captures[*]")
-                A(f"  - beacon candidates: {len(net['beacons'])}")
+                             "findings.json#$.findings.network.beacon_scope")
+                A(f"  - VM-wide beacon-pattern leads: {len(net['beacons'])}; "
+                  "sample process/flow attribution is unresolved.")
             if net.get("frida_endpoint_count"):
                 set_evidence("findings.json#$.findings.network",
                              "dynamic/frida_summary.json#$.network_endpoints")

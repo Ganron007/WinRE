@@ -261,7 +261,9 @@ def chat_openai_options(max_tokens: int, base_url: str | None = None) -> dict:
 
 def chat_request_payload(messages: list[dict[str, str]], *, model: str | None = None,
                          temperature: float | None = None,
-                         max_tokens: int = 4000) -> dict[str, Any]:
+                         max_tokens: int = 4000,
+                         tools: list[dict[str, Any]] | None = None,
+                         tool_choice: str | dict[str, Any] | None = None) -> dict[str, Any]:
     """Build the exact credential-free JSON payload sent by ``chat_result``."""
     payload: dict[str, Any] = {
         "model": model or MODEL,
@@ -271,24 +273,37 @@ def chat_request_payload(messages: list[dict[str, str]], *, model: str | None = 
         "max_tokens": max_output_tokens(max_tokens),
     }
     payload.update(_reasoning_field())
+    if tools is not None:
+        payload["tools"] = tools
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
     return payload
 
 
 def chat_result(messages: list[dict[str, str]], *, model: str | None = None,
                 timeout: int | None = None, temperature: float | None = None,
-                max_tokens: int = 4000) -> dict[str, Any]:
+                max_tokens: int = 4000,
+                tools: list[dict[str, Any]] | None = None,
+                tool_choice: str | dict[str, Any] | None = None) -> dict[str, Any]:
     """One chat completion with usage/finish metadata for auditable callers."""
     payload = chat_request_payload(messages, model=model,
-                                   temperature=temperature, max_tokens=max_tokens)
+                                   temperature=temperature, max_tokens=max_tokens,
+                                   tools=tools, tool_choice=tool_choice)
     out = _post("/chat/completions", payload, timeout=request_timeout(timeout))
     try:
         choice = out["choices"][0]
         message = choice["message"]
-        content = message["content"]
+        content = message.get("content")
+        tool_calls = message.get("tool_calls")
+        if content is None:
+            content = ""
         if not isinstance(content, str):
             raise TypeError("assistant content is not text")
+        if not content and not isinstance(tool_calls, list):
+            raise TypeError("assistant response contains neither text nor tool calls")
         return {
             "content": content,
+            "tool_calls": tool_calls if isinstance(tool_calls, list) else [],
             "finish_reason": choice.get("finish_reason"),
             "usage": out.get("usage") if isinstance(out.get("usage"), dict) else None,
             "model": out.get("model"),

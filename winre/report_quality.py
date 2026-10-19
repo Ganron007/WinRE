@@ -220,6 +220,44 @@ def _parse_json(content: str) -> dict:
     return value
 
 
+_CLAIM_REVIEW_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_claim_reviews",
+        "description": "Return one evidence-bound decision for every supplied report claim.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reviews": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "claim_id": {"type": "string"},
+                            "verdict": {"type": "string", "enum": [
+                                "supported", "contradicted", "insufficient"]},
+                            "locator_ids": {"type": "array", "items": {
+                                "type": "string"}},
+                        },
+                        "required": ["claim_id", "verdict", "locator_ids"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["reviews"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def _claim_review_response_digest(content: str, tool_calls: list[dict]) -> str:
+    payload = {"content": content, "tool_calls": tool_calls}
+    return hashlib.sha256(json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        default=str).encode("utf-8")).hexdigest()
+
+
 def review_report(pack_root: Path, *, report_path: Path | None = None,
                   enabled: bool = True) -> dict:
     """Review every substantive report line against its source-bound locators."""
@@ -249,6 +287,7 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
         }
         response_doc = {
             "content": response_meta.get("content"),
+            "tool_calls": response_meta.get("tool_calls") or [],
             "finish_reason": response_meta.get("finish_reason"),
             "usage": response_meta.get("usage"),
             "model": response_meta.get("model"),
@@ -281,7 +320,7 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
         locator_manifest = json.loads(locator_path.read_text(encoding="utf-8"))
         root_meta = json.loads((root / "META.json").read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return finish({"schema": "winre-report-claim-review/v3", "ok": False,
+        return finish({"schema": "winre-report-claim-review/v4", "ok": False,
                        "status": "input-invalid",
                        "reason": f"report/provenance input missing or invalid: {exc}"})
 
@@ -291,7 +330,7 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
     if (locator_manifest.get("sha256") != sha
             or locator_manifest.get("run_id") != run_id
             or locator_manifest.get("report_sha256") != report_digest):
-        return finish({"schema": "winre-report-claim-review/v3", "ok": False,
+        return finish({"schema": "winre-report-claim-review/v4", "ok": False,
                        "status": "provenance-invalid", "sha256": sha,
                        "run_id": run_id, "report_sha256": report_digest,
                        "reason": "report, sample, run ID, and locator manifest do not match"})
@@ -303,13 +342,13 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
                    or not isinstance(item.get("text"), str)
                    or not isinstance(item.get("locators"), list)
                    for item in claims)):
-        return finish({"schema": "winre-report-claim-review/v3", "ok": False,
+        return finish({"schema": "winre-report-claim-review/v4", "ok": False,
                        "status": "provenance-invalid", "sha256": sha,
                        "run_id": run_id,
                        "reason": "claim or locator manifest is malformed"})
 
     if not enabled:
-        return finish({"schema": "winre-report-claim-review/v3", "ok": False,
+        return finish({"schema": "winre-report-claim-review/v4", "ok": False,
                        "status": "not_requested", "sha256": sha,
                        "run_id": run_id, "report_sha256": report_digest,
                        "claims_total": len(claims),
@@ -396,6 +435,13 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
             if not resolved.get("ok"):
                 failures.append(f"{reference}: {resolved.get('reason')}")
                 continue
+            if resolved.get("excerpt_truncated") is True:
+                # A clipped source is not the source the reviewer was asked to
+                # assess. Keep it in the diagnostic failures, but never let a
+                # partial excerpt support a claim. Builders should narrow broad
+                # references to the exact scalar or row used by the prose.
+                failures.append(f"{reference}: evidence excerpt exceeds review limit")
+                continue
             evidence.append({"locator": str(locator_id),
                              "reference": reference,
                              "artifact": resolved["artifact"],
@@ -452,10 +498,14 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
             prompt = (
                 "Assess every report claim against ONLY the evidence excerpts in "
                 "that claim's item. Review the complete claim, including each "
-                "clause and any causal or ATT&CK statement. Return one JSON object "
-                "with `reviews` as an array of three-item arrays, for example "
-                "{\"reviews\":[[\"C0001\",\"supported\",[\"E001\",\"E002\"]]]}. Use only the exact claim "
-                "IDs and locator IDs supplied. Verdict must be supported, "
+                "clause and any causal or ATT&CK statement. You MUST call the "
+                "submit_claim_reviews function exactly once. Its `reviews` array "
+                "must contain one object per supplied claim with exactly these "
+                "fields: `claim_id`, `verdict`, and `locator_ids`. Example shape: "
+                "{\"reviews\":[{\"claim_id\":\"C0001\",\"verdict\":\"supported\","
+                "\"locator_ids\":[\"E001\",\"E002\"]}]}. Do not return JSON "
+                "in message text. Use only the exact claim IDs and locator IDs "
+                "supplied. Verdict must be supported, "
                 "contradicted, or insufficient. Never copy evidence text, add "
                 "explanations, or use Markdown. For supported or contradicted, "
                 "select every locator needed to establish the verdict for the "
@@ -480,30 +530,54 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
             messages = [{"role": "user", "content": prompt}]
             request_timeout = llm_client.request_timeout()
             request_payload = llm_client.chat_request_payload(
-                messages, model=reviewer_model, temperature=0.0, max_tokens=8192)
+                messages, model=reviewer_model, temperature=0.0, max_tokens=8192,
+                tools=[_CLAIM_REVIEW_TOOL],
+                tool_choice={"type": "function", "function": {
+                    "name": "submit_claim_reviews"}})
             try:
                 response_meta = llm_client.chat_result(
                     messages,
                     model=reviewer_model, timeout=request_timeout,
-                    temperature=0.0, max_tokens=8192)
+                    temperature=0.0, max_tokens=8192,
+                    tools=[_CLAIM_REVIEW_TOOL],
+                    tool_choice={"type": "function", "function": {
+                        "name": "submit_claim_reviews"}})
                 response_text = response_meta.get("content") or ""
+                tool_calls = response_meta.get("tool_calls") or []
                 finish_reason = response_meta.get("finish_reason")
-                if finish_reason not in (None, "stop"):
+                if finish_reason not in ("tool_calls", "stop"):
                     raise ValueError(f"incomplete model response (finish_reason={finish_reason})")
-                parsed = _parse_json(str(response_text))
+                if len(tool_calls) != 1 or not isinstance(tool_calls[0], dict):
+                    raise ValueError("review response must contain exactly one structured tool call")
+                function = tool_calls[0].get("function")
+                if (not isinstance(function, dict)
+                        or function.get("name") != "submit_claim_reviews"):
+                    raise ValueError("review response called an unexpected function")
+                arguments = function.get("arguments")
+                if not isinstance(arguments, str) or not arguments.strip():
+                    raise ValueError("structured review call has no JSON arguments")
+                parsed = json.loads(arguments)
+                if not isinstance(parsed, dict):
+                    raise ValueError("structured review arguments are not an object")
                 reviews = parsed.get("reviews")
                 if not isinstance(reviews, list):
                     raise ValueError("review response has no reviews array")
                 by_id = {}
                 for row in reviews:
-                    if (not isinstance(row, list) or len(row) != 3
-                            or not isinstance(row[0], str)
-                            or not isinstance(row[1], str)
-                            or not isinstance(row[2], list)
-                            or any(not isinstance(value, str) for value in row[2])):
+                    if (not isinstance(row, dict)
+                            or set(row) != {"claim_id", "verdict", "locator_ids"}
+                            or not isinstance(row.get("claim_id"), str)
+                            or not isinstance(row.get("verdict"), str)
+                            or not isinstance(row.get("locator_ids"), list)
+                            or any(not isinstance(value, str)
+                                   for value in row["locator_ids"])):
                         raise ValueError(
-                            "review rows must be [claim_id, verdict, locator_id_list]")
-                    claim_id, verdict, locator_ids = row
+                            "review rows must contain claim_id, verdict, and locator_ids")
+                    claim_id = row["claim_id"]
+                    verdict = row["verdict"]
+                    locator_ids = row["locator_ids"]
+                    if verdict not in {"supported", "contradicted", "insufficient"}:
+                        raise ValueError("review row contains an unknown verdict")
                     if len(locator_ids) != len(set(locator_ids)):
                         raise ValueError("review rows must not repeat locator IDs")
                     if claim_id in by_id:
@@ -512,11 +586,18 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
                 expected = {item["id"] for item in batch}
                 if len(by_id) != len(reviews) or set(by_id) != expected:
                     raise ValueError("review response IDs are missing, duplicated, or unexpected")
+                for item in batch:
+                    supplied = {ev["locator"] for ev in item["evidence"]}
+                    selected = by_id[item["id"]]["locators"]
+                    if any(locator not in supplied for locator in selected):
+                        raise ValueError("review selected a locator not supplied for that claim")
             except Exception as exc:
                 elapsed = round(time.monotonic() - started, 3)
                 response_text = response_meta.get("content") or ""
+                tool_calls = response_meta.get("tool_calls") or []
                 usage = response_meta.get("usage")
-                response_sha = hashlib.sha256(str(response_text).encode("utf-8")).hexdigest()
+                response_sha = _claim_review_response_digest(
+                    str(response_text), tool_calls)
                 review_error = f"semantic review failed: {type(exc).__name__}: {exc}"
                 call_artifacts = persist_call(
                     batch_index, prompt, request_payload, response_meta, review_error)
@@ -525,8 +606,10 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
                     "claim_ids": [item["id"] for item in batch],
                     "elapsed_seconds": elapsed,
                     "response_chars": len(str(response_text)),
-                    "response_preview": str(response_text)[:240],
+                    "response_preview": (str(response_text) or json.dumps(
+                        tool_calls, ensure_ascii=False, default=str))[:240],
                     "response_sha256": response_sha,
+                    "response_tool_calls": len(tool_calls),
                     "finish_reason": response_meta.get("finish_reason"),
                     "usage": usage,
                     "model": response_meta.get("model"),
@@ -546,6 +629,7 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
                 break
             elapsed = round(time.monotonic() - started, 3)
             response_text = response_meta.get("content") or ""
+            tool_calls = response_meta.get("tool_calls") or []
             call_artifacts = persist_call(batch_index, prompt, request_payload,
                                           response_meta)
             attempts.append({
@@ -553,8 +637,11 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
                 "claim_ids": [item["id"] for item in batch],
                 "elapsed_seconds": elapsed,
                 "response_chars": len(str(response_text)),
-                "response_preview": str(response_text)[:240],
-                "response_sha256": hashlib.sha256(str(response_text).encode("utf-8")).hexdigest(),
+                "response_preview": (str(response_text) or json.dumps(
+                    tool_calls, ensure_ascii=False, default=str))[:240],
+                "response_sha256": _claim_review_response_digest(
+                    str(response_text), tool_calls),
+                "response_tool_calls": len(tool_calls),
                 "finish_reason": response_meta.get("finish_reason"),
                 "usage": response_meta.get("usage"),
                 "model": response_meta.get("model"),
@@ -618,7 +705,7 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
             checkpoint_rows.sort(key=lambda row: str(row.get("claim_id") or ""))
             counts = Counter(str(row.get("status") or "unknown") for row in checkpoint_rows)
             finish({
-                "schema": "winre-report-claim-review/v3", "ok": False,
+                "schema": "winre-report-claim-review/v4", "ok": False,
                 "status": "in_progress", "sha256": sha, "run_id": run_id,
                 "report_sha256": report_digest, "locators_sha256": _sha256(locator_path),
                 "reviewer_model": reviewer_model, "reviewer_is_independent": False,
@@ -641,7 +728,7 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
     supported = sum(by_status.get(name, 0) for name in ("supported",))
     ok = bool(results) and supported == len(results) and not review_error
     return finish({
-        "schema": "winre-report-claim-review/v3",
+        "schema": "winre-report-claim-review/v4",
         "ok": ok,
         "status": "complete" if ok else ("verification-error" if review_error else "failed"),
         "sha256": sha,

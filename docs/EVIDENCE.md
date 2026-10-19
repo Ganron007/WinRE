@@ -97,6 +97,12 @@ claim cannot be supported. An agentic run with `--dry-llm` records
 `deterministic_fallback`; report review is also marked not requested, so the
 fallback and missing report review remain visible to the operator and audit.
 
+Network packets collected from the shared VMnet are guest-wide observations.
+Unless a packet or flow is tied to the sample process, the report records it as
+an unattributed lead and excludes it from sample IOC and command-and-control
+claims. A successful capture alone does not establish that the sample generated
+the traffic.
+
 Dynamic findings separate process launch from evidence quality. `run_observed`
 records whether the sample PID was observed, while `evidence_complete` and
 `ok` remain false if the guest job or evidence transfer was incomplete. In that
