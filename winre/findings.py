@@ -675,6 +675,7 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "",
     g = (w or {}).get("gate") or {}
     findings["window"] = {
         "effective_s": (w or {}).get("effective_s"),
+        "requested_s": (w or {}).get("requested_s"),
         "stop_reason": (w or {}).get("stop_reason"),
         "gate_fired": bool(g.get("fired")),
         "gate_kind": g.get("kind"),
@@ -727,10 +728,10 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "",
         level, conf = UNKNOWN, "low"
         if not transfer_incomplete:
             limitations.append(
-                "the detonation ran and the sample did nothing the instruments "
-                "could see: no drops, no C2, no injection. That is a real "
-                "observation, not a failure - but it does not support a verdict "
-                "on its own.")
+                "No confirmed drops, C2 candidates, or injection chains were "
+                "recorded in the collected evidence. This describes the current "
+                "run record only and does not establish that those behaviors "
+                "never occurred.")
 
     tools = _host_tools()
     if not tools["tshark"]:

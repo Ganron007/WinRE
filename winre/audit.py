@@ -277,16 +277,32 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                         break
                     row_locators = set(str(value) for value in (row.get("locators") or []))
                     row_sources = row.get("evidence_sources") or []
-                    reviewed_locator = str(row.get("reviewed_locator") or "")
+                    reviewed_locators = row.get("reviewed_locators")
+                    quote_rows = row.get("evidence_quotes")
+                    quotes_by_locator = {
+                        str(item.get("locator")): str(item.get("quote") or "")
+                        for item in quote_rows if isinstance(item, dict)
+                        and item.get("locator")
+                    } if isinstance(quote_rows, list) else {}
                     if not row_locators or row_locators != {
                             str(source.get("locator")) for source in row_sources}:
                         source_rows_valid = False
                         break
-                    if not reviewed_locator or reviewed_locator not in row_locators:
+                    if (not isinstance(reviewed_locators, list)
+                            or not reviewed_locators
+                            or any(not isinstance(value, str)
+                                   for value in reviewed_locators)
+                            or len(reviewed_locators) != len(set(reviewed_locators))
+                            or any(value not in row_locators
+                                   for value in reviewed_locators)
+                            or not isinstance(quote_rows, list)
+                            or len(quote_rows) != len(reviewed_locators)
+                            or any(not isinstance(item, dict) for item in quote_rows)
+                            or set(quotes_by_locator) != set(reviewed_locators)
+                            or not all(item.get("valid") is True for item in quote_rows)):
                         source_rows_valid = False
                         break
-                    quote = str(row.get("evidence_quote") or "")
-                    quote_matches_selected_source = False
+                    quote_matches_selected_sources: set[str] = set()
                     for source in row_sources:
                         locator = locator_rows.get(str(source.get("locator")))
                         if not isinstance(locator, dict):
@@ -310,11 +326,13 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                                 or source.get("artifact_sha256") != resolved.get("sha256")):
                             source_rows_valid = False
                             break
-                        if (str(source.get("locator")) == reviewed_locator
-                                and quote
+                        source_id = str(source.get("locator"))
+                        quote = quotes_by_locator.get(source_id, "")
+                        if (source_id in reviewed_locators and quote
                                 and quote in str(resolved.get("excerpt") or "")):
-                            quote_matches_selected_source = True
-                    if not source_rows_valid or not quote_matches_selected_source:
+                            quote_matches_selected_sources.add(source_id)
+                    if (not source_rows_valid
+                            or quote_matches_selected_sources != set(reviewed_locators)):
                         source_rows_valid = False
                         break
                     if not source_rows_valid:
@@ -429,16 +447,21 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                     batch_decisions: dict[str, dict] = {}
                     for response_row in response_rows:
                         if (not isinstance(response_row, list) or len(response_row) != 3
-                                or not all(isinstance(value, str) for value in response_row)):
+                                or not isinstance(response_row[0], str)
+                                or not isinstance(response_row[1], str)
+                                or not isinstance(response_row[2], list)
+                                or any(not isinstance(value, str)
+                                       for value in response_row[2])
+                                or len(response_row[2]) != len(set(response_row[2]))):
                             call_records_valid = False
                             break
-                        claim_id, verdict, locator_id = response_row
+                        claim_id, verdict, locator_ids = response_row
                         if (claim_id in batch_decisions
                                 or verdict not in {"supported", "contradicted", "insufficient"}):
                             call_records_valid = False
                             break
                         batch_decisions[claim_id] = {
-                            "verdict": verdict, "locator": locator_id}
+                            "verdict": verdict, "locators": locator_ids}
                     if (not call_records_valid
                             or set(batch_decisions) != set(batch_claims)):
                         call_records_valid = False
@@ -476,7 +499,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                         if (prompt_claim.get("claim") != reviewed.get("claim")
                                 or set(evidence_by_locator) != expected_locators
                                 or set(result_sources) != expected_locators
-                                or decision.get("locator") != reviewed.get("reviewed_locator")
+                                or decision.get("locators") != reviewed.get("reviewed_locators")
                                 or decision.get("verdict") != reviewed.get("status")):
                             call_records_valid = False
                             break
@@ -502,7 +525,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                         if not call_records_valid:
                             break
             report_review_ok = bool(
-                report_review.get("schema") == "winre-report-claim-review/v2"
+                report_review.get("schema") == "winre-report-claim-review/v3"
                 and report_review.get("ok") is True
                 and report_review.get("status") == "complete"
                 and report_review.get("sha256") == root_meta.get("sha256")

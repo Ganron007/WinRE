@@ -195,10 +195,15 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     # sections see supplemental deep evidence (crypto/decrypt-gate/IOC).
     deep = _load(pack_root / "deep" / "deep.json") or {}
     deep_ev = {}
-    for h in ((deep.get("agent") or {}).get("history") or []):
+    history_refs_by_tool: dict[str, list[str]] = {}
+    deep_history = (deep.get("agent") or {}).get("history") or []
+    for history_index, h in enumerate(deep_history):
         res = h.get("result")
         if isinstance(res, dict) and h.get("tool"):
-            deep_ev[h["tool"]] = res
+            tool_name = str(h["tool"])
+            deep_ev[tool_name] = res
+            history_refs_by_tool.setdefault(tool_name, []).append(
+                f"deep/deep.json#$.agent.history[{history_index}].result")
     ev = {**ev, **deep_ev}
     agent = (deep.get("agent") or {})
     verdict = agent.get("verdict") or {}
@@ -403,10 +408,9 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
 
     A("## 1. Verdict")
     A("")
-    set_evidence("composite.json#$.level", "composite.json#$.confidence",
-                 "composite.json#$.basis", "deep/deep.json#$.agent.verdict")
-    A(f"- Pipeline-selected verdict: **{str(selected_level or 'unknown').upper()}** "
-      f"(confidence: {selected_confidence or 'n/a'}); recorded source `{selected_source}`.")
+    set_evidence("composite.json#$.level", "composite.json#$.confidence")
+    A(f"- Pipeline-selected composite verdict: **{str(selected_level or 'unknown').upper()}** "
+      f"(confidence: {selected_confidence or 'n/a'}).")
     if composition.get("deciding_mode"):
         A(f"- Deciding mode: `{composition['deciding_mode']}`")
     if composition.get("basis"):
@@ -421,9 +425,16 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
         A(f"- Machine: `{pe.get('machine')}` entrypoint `0x{pe.get('entrypoint', 0):x}` "
           f"timestamp {pe.get('compile_ts')}")
         A(f"- Signed: **{pe.get('signed')}**")
-        A(f"- Sections: " + ", ".join(
-            f"`{s.get('name')}` (entropy {s.get('entropy')})"
-            for s in (pe.get("sections") or [])[:10]))
+        section_rows = (pe.get("sections") or [])[:10]
+        section_refs = [
+            f"quick/quick.json#$.evidence.pe.sections[{index}].{field}"
+            for index, _section in enumerate(section_rows)
+            for field in ("name", "entropy")
+        ]
+        set_evidence(*section_refs)
+        A("- Sections: " + ", ".join(
+            f"`{section.get('name')}` (entropy {section.get('entropy')})"
+            for section in section_rows))
         imp_count = sum(len(e.get("functions") or []) for e in pe.get("imports") or [])
         A(f"- Imports: {len(pe.get('imports') or [])} DLLs, {imp_count} functions")
     gh = ev.get("ghidra") or {}
@@ -439,6 +450,23 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
         set_evidence("quick/quick.json#$.evidence.ida",
                      "deep/deep.json#$.agent.history[*].result")
         A(f"- IDA: {ida.get('func_count')} functions (.i64 created at quick stage)")
+    sink_scan = ev.get("sink_sites") or {}
+    if isinstance(sink_scan, dict):
+        sink_refs = history_refs_by_tool.get("sink_sites") or []
+        if sink_refs:
+            set_evidence(*(f"{sink_refs[-1]}.{field}"
+                           for field in ("functions_scanned", "sites")))
+            A(f"- Sink-site scan: {sink_scan.get('functions_scanned', 0)} functions scanned; "
+              f"{len(sink_scan.get('sites') or [])} dangerous-API call sites recorded.")
+    strings_record = ev.get("strings_tool") or {}
+    if isinstance(strings_record, dict) and strings_record:
+        strings_refs = history_refs_by_tool.get("strings_tool") or []
+        if strings_refs:
+            set_evidence(f"{strings_refs[-1]}.total")
+            A(f"- Deep strings tool returned {strings_record.get('total', 0)} strings.")
+            for index, value in enumerate((strings_record.get("strings") or [])[:10]):
+                set_evidence(f"{strings_refs[-1]}.strings[{index}]")
+                A(f"  - `{str(value)[:120]}`")
     A("")
 
     A("## 3. Static evidence (per tool)")
@@ -491,21 +519,34 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
             A(f"- strings (top): " + ", ".join(
                 f"`{str(s)[:60]}`" for s in st_rows[:10]))
     A("")
-    xs = ev.get("xor_string_search") or {}
-    A("### XOR-encoded strings (brute force)")
-    set_evidence("quick/quick.json#$.evidence.xor_string_search.candidates",
-                 "deep/deep.json#$.agent.history[*].result")
-    for c in (xs.get("candidates") or [])[:10]:
-        A(f"- [{c.get('mode')} key={c.get('key')}] offset {c.get('offset')}: "
-          f"`{str(c.get('string'))[:100]}`")
-    if not xs.get("candidates"):
-        A("- none found")
-    A("")
+    xs = ev.get("xor_string_search")
+    if isinstance(xs, dict) and xs:
+        A("### XOR-encoded strings (brute force)")
+        xor_refs = ["quick/quick.json#$.evidence.xor_string_search"]
+        xor_refs.extend(history_refs_by_tool.get("xor_string_search") or [])
+        set_evidence(*xor_refs)
+        for c in (xs.get("candidates") or [])[:10]:
+            A(f"- [{c.get('mode')} key={c.get('key')}] offset {c.get('offset')}: "
+              f"`{str(c.get('string'))[:100]}`")
+        if xs.get("ok") is True and not xs.get("candidates"):
+            A("- Search completed; candidate count: 0.")
+        elif xs.get("ok") is not True:
+            A(f"- Search did not complete: {xs.get('error') or xs.get('skipped') or 'status unavailable'}.")
+        A("")
     sig = ev.get("signature_match")
     A("### Signature DB match (agent-invoked)")
     set_evidence("deep/deep.json#$.agent.history",
                  "deep/deep.json#$.agent.history[*].result")
-    A(f"- {json.dumps(sig, default=str)[:300]}" if sig else "- not invoked")
+    signature_refs = history_refs_by_tool.get("signature_match") or []
+    if sig:
+        set_evidence(*(signature_refs or ["deep/deep.json#$.agent.history"]))
+        A(f"- {json.dumps(sig, default=str)[:300]}")
+    elif signature_refs:
+        set_evidence(*signature_refs)
+        A("- Signature-match invocation was recorded but returned no result object.")
+    elif isinstance(deep_history, list) and deep_history:
+        set_evidence("deep/deep.json#$.agent.history[*].tool")
+        A("- No signature-match invocation appears in this run's recorded agent history.")
     A("")
     imp_sig = ev.get("pe_import_signals") or {}
     A("### PE import signals")
@@ -530,15 +571,17 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
 
     A("## 4. Agent analysis (source-tagged)")
     A("")
-    set_evidence("deep/deep.json#$.agent.verdict",
-                 "deep/deep.json#$.agent.history[*].result",
-                 "quick/quick.json#$.evidence")
-    A(f"- Agent analysis record: source=`{src}`; declared verdict=`{verdict.get('verdict', 'unknown')}`; "
+    set_evidence("deep/deep.json#$.agent.source")
+    A(f"- Agent analysis source: `{src}`.")
+    set_evidence("deep/deep.json#$.agent.verdict.verdict",
+                 "deep/deep.json#$.agent.verdict.confidence")
+    A(f"- Agent-declared verdict: `{verdict.get('verdict', 'unknown')}`; "
       f"confidence=`{verdict.get('confidence', 'n/a')}`.")
     if verdict.get("summary"):
+        set_evidence("deep/deep.json#$.agent.verdict.summary",
+                     "deep/deep.json#$.agent.history[*].result",
+                     "quick/quick.json#$.evidence")
         A(f"- Assessment: {verdict['summary']}")
-    for evidence_item in (verdict.get("key_evidence") or [])[:20]:
-        A(f"- Key evidence: {evidence_item}")
     A("")
 
     A("## 5. IOC table")
@@ -599,36 +642,39 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     _bc = _behavior_context(ev)
     ks = _bc.get("kill_switch") or []
     if ks:
-        A("- **Kill-switch / sandbox-avoidance candidates:** "
+        A("- **Static anti-VM/anti-sandbox capability candidates:** "
           + "; ".join(f"`{k}`" for k in ks[:6])
-          + " — NOTE: connectivity to these may be a NO-OP signal, not C2 "
-          "(WannaCry-class); treat as its own analytic dimension.")
-    else:
-        A("- No kill-switch/sandbox-avoidance candidates surfaced.")
+          + " — these matches indicate static capability, not proof of runtime checks.")
+    domains = _bc.get("domains") or []
+    if domains:
+        A("- **Domains present in static strings:** "
+          + ", ".join(f"`{domain}`" for domain in domains[:6])
+          + " — this does not establish a runtime connection or C2.")
     cli = _bc.get("cli") or []
     if cli:
         A(f"- **CLI behavior table:** " + "; ".join(f"`{c}`" for c in cli[:8])
           + " (switches from strings + GetCommandLine imports; verify per-branch "
           "in the debugger/dynamic phase).")
     art = _bc.get("artifacts") or {}
-    if art:
-        A("- **Artifact catalog:** mutexes: "
-          + "; ".join(f"`{m}`" for m in (art.get("mutexes") or [])[:5])
-          + " | registry: "
-          + "; ".join(f"`{r}`" for r in (art.get("registry") or [])[:5])
-          + " | services/tasks: "
-          + "; ".join(f"`{t}`" for t in (art.get("services") or [])[:5])
-          + " | file paths: "
-          + "; ".join(f"`{p}`" for p in (art.get("paths") or [])[:5]))
+    artifact_items = [
+        ("mutex", art.get("mutexes") or []),
+        ("registry", art.get("registry") or []),
+        ("service/task", art.get("services") or []),
+        ("file path", art.get("paths") or []),
+    ]
+    present_artifacts = [(label, values) for label, values in artifact_items if values]
+    if present_artifacts:
+        A("- **Static string-derived artifact candidates:** " + "; ".join(
+            f"{label}: " + ", ".join(f"`{value}`" for value in values[:5])
+            for label, values in present_artifacts))
     A("")
 
     A("## 7. YARA")
     A("")
     set_evidence("yara/rule_report.json#$.rule_id",
-                 "yara/rule_report.json#$.curation",
-                 "quick/quick.json#$.evidence")
-    A(f"- Rule: `{yara_rep.get('rule_id')}` — "
-      f"empty_rule={yara_rep.get('empty_rule')} — deterministic, no LLM content")
+                 "yara/rule_report.json#$.empty_rule")
+    A(f"- Rule ID: `{yara_rep.get('rule_id')}`; "
+      f"empty_rule={yara_rep.get('empty_rule')}.")
     cur = (yara_rep.get("curation") or {})
     if cur.get("warnings"):
         A(f"- Curation warnings: {'; '.join(cur['warnings'])}")
@@ -732,7 +778,8 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
             capture_details.append(f"reason=`{capture['reason']}`")
         A("- Off-box network capture: " + "; ".join(capture_details) + ".")
     for name, row in requested_gaps[:8]:
-        set_evidence("artifact-manifest.json#$.coverage")
+        set_evidence(f"artifact-manifest.json#$.coverage.{name}",
+                     "artifact-manifest.json#$.coverage")
         A(f"  - `{name}`: {row.get('status')} — {row.get('reason')}")
 
     if has_dynamic:
@@ -846,11 +893,15 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
             w = fd.get("window") or {}
             if w.get("effective_s") is not None:
                 set_evidence("findings.json#$.findings.window",
-                             "dynamic/META.json#$.job_timeout")
+                             "dynamic/META.json#$.window")
+                requested_window_s = (w.get("requested_s")
+                                      or ((dyn or {}).get("window") or {}).get("requested_s"))
                 gate = (f"gate {w.get('gate_kind')}/{w.get('gate_api')} "
                         f"at {w.get('gate_at_s')}s"
                         if w.get("gate_fired") else "gate did not fire")
-                A(f"  - window: {w.get('effective_s')}s, "
+                requested_text = (f" / {requested_window_s}s requested"
+                                  if requested_window_s is not None else "")
+                A(f"  - window: {w.get('effective_s')}s observed{requested_text}, "
                   f"stop={w.get('stop_reason')}, {gate}")
             mem = fd.get("memory") or {}
             if mem.get("dumps"):
@@ -864,6 +915,18 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                              "artifact-manifest.json#$.coverage")
                 A("  - **limitations:**")
                 for l in lim[:5]:
+                    if l.startswith("No confirmed drops, C2 candidates, or injection chains"):
+                        set_evidence(
+                            "findings.json#$.limitations",
+                            "findings.json#$.findings.drops",
+                            "findings.json#$.findings.network.c2",
+                            "findings.json#$.findings.injection",
+                            "findings.json#$.findings.window",
+                            "findings.json#$.findings.frida_coverage",
+                            "artifact-manifest.json#$.coverage")
+                    else:
+                        set_evidence("findings.json#$.limitations",
+                                     "artifact-manifest.json#$.coverage")
                     A(f"    - {l}")
         ed = _load(pack_root / "dynamic" / "emu_diff.json") or {}
         if ed.get("ok"):
@@ -912,7 +975,8 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                      "dynamic/network_intel.json#$.captures[*]")
         A("### Static/runtime correlation (candidate links)")
         A("")
-        A(f"- Status: `{corr.get('status')}`; this section does not change the verdict.")
+        set_evidence("findings.json#$.correlation.status")
+        A(f"- Status: `{corr.get('status')}`.")
         counts = corr.get("counts") or {}
         A("- Relationships: " + ", ".join(
             f"{name}={counts.get(name, 0)}" for name in
@@ -990,11 +1054,8 @@ def _behavior_context(ev: dict) -> dict:
     caps = {str(c.get("name") or "").lower() for c in
             ((ev.get("capa") or {}).get("capabilities") or [])
             if isinstance(c, dict)}
-    if any("anti-vm" in c or "anti-sandbox" in c or "sleep" in c
-           or "delay" in c for c in caps):
+    if any("anti-vm" in c or "anti-sandbox" in c for c in caps):
         kill_switch.append("anti-sandbox/anti-vm capability (capa)")
-    for d in sorted(domains)[:5]:
-        kill_switch.append(f"domain candidate: {d}")
 
     cli: list[str] = []
     for s in text_pool:
@@ -1016,6 +1077,7 @@ def _behavior_context(ev: dict) -> dict:
                  or "%temp%" in str(s).lower() or "\\windows\\" in str(s).lower())]
     return {
         "kill_switch": kill_switch[:8],
+        "domains": sorted(domains)[:10],
         "cli": cli,
         "artifacts": {
             "mutexes": list(dict.fromkeys(mutexes))[:5],

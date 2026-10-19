@@ -281,7 +281,7 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
         locator_manifest = json.loads(locator_path.read_text(encoding="utf-8"))
         root_meta = json.loads((root / "META.json").read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return finish({"schema": "winre-report-claim-review/v2", "ok": False,
+        return finish({"schema": "winre-report-claim-review/v3", "ok": False,
                        "status": "input-invalid",
                        "reason": f"report/provenance input missing or invalid: {exc}"})
 
@@ -291,7 +291,7 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
     if (locator_manifest.get("sha256") != sha
             or locator_manifest.get("run_id") != run_id
             or locator_manifest.get("report_sha256") != report_digest):
-        return finish({"schema": "winre-report-claim-review/v2", "ok": False,
+        return finish({"schema": "winre-report-claim-review/v3", "ok": False,
                        "status": "provenance-invalid", "sha256": sha,
                        "run_id": run_id, "report_sha256": report_digest,
                        "reason": "report, sample, run ID, and locator manifest do not match"})
@@ -303,13 +303,13 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
                    or not isinstance(item.get("text"), str)
                    or not isinstance(item.get("locators"), list)
                    for item in claims)):
-        return finish({"schema": "winre-report-claim-review/v2", "ok": False,
+        return finish({"schema": "winre-report-claim-review/v3", "ok": False,
                        "status": "provenance-invalid", "sha256": sha,
                        "run_id": run_id,
                        "reason": "claim or locator manifest is malformed"})
 
     if not enabled:
-        return finish({"schema": "winre-report-claim-review/v2", "ok": False,
+        return finish({"schema": "winre-report-claim-review/v3", "ok": False,
                        "status": "not_requested", "sha256": sha,
                        "run_id": run_id, "report_sha256": report_digest,
                        "claims_total": len(claims),
@@ -454,12 +454,16 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
                 "that claim's item. Review the complete claim, including each "
                 "clause and any causal or ATT&CK statement. Return one JSON object "
                 "with `reviews` as an array of three-item arrays, for example "
-                "{\"reviews\":[[\"C0001\",\"supported\",\"E001\"]]}. Use only the exact claim "
+                "{\"reviews\":[[\"C0001\",\"supported\",[\"E001\",\"E002\"]]]}. Use only the exact claim "
                 "IDs and locator IDs supplied. Verdict must be supported, "
                 "contradicted, or insufficient. Never copy evidence text, add "
-                "explanations, or use Markdown. For supported, select the locator "
-                "whose source establishes the complete claim; for other verdicts, "
-                "select the most relevant locator or an empty string. A citation's "
+                "explanations, or use Markdown. For supported or contradicted, "
+                "select every locator needed to establish the verdict for the "
+                "complete claim; several exact fields may jointly support one "
+                "sentence. If a claim contains multiple measured values, cite "
+                "the source field for each value; do not select only one part. "
+                "For insufficient, select relevant locators or an "
+                "empty array. A citation's "
                 "existence alone is not support. Derived summaries are not "
                 "independent primary evidence and cannot establish behavior "
                 "attribution by themselves.\n\n"
@@ -493,12 +497,18 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
                 by_id = {}
                 for row in reviews:
                     if (not isinstance(row, list) or len(row) != 3
-                            or not all(isinstance(value, str) for value in row)):
-                        raise ValueError("review rows must be [claim_id, verdict, locator_id] strings")
-                    claim_id, verdict, locator_id = row
+                            or not isinstance(row[0], str)
+                            or not isinstance(row[1], str)
+                            or not isinstance(row[2], list)
+                            or any(not isinstance(value, str) for value in row[2])):
+                        raise ValueError(
+                            "review rows must be [claim_id, verdict, locator_id_list]")
+                    claim_id, verdict, locator_ids = row
+                    if len(locator_ids) != len(set(locator_ids)):
+                        raise ValueError("review rows must not repeat locator IDs")
                     if claim_id in by_id:
                         raise ValueError("review response has duplicate claim IDs")
-                    by_id[claim_id] = {"verdict": verdict, "locator": locator_id}
+                    by_id[claim_id] = {"verdict": verdict, "locators": locator_ids}
                 expected = {item["id"] for item in batch}
                 if len(by_id) != len(reviews) or set(by_id) != expected:
                     raise ValueError("review response IDs are missing, duplicated, or unexpected")
@@ -554,24 +564,42 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
             for item in batch:
                 row = by_id[item["id"]]
                 verdict = str(row.get("verdict") or "").strip().lower()
-                selected_locator = str(row.get("locator") or "").strip()
-                selected = next((ev for ev in item["evidence"]
-                                 if ev["locator"] == selected_locator), None)
-                # The model selects the source locator but never has to echo
-                # arbitrary evidence bytes through a free-form JSON string.
-                # Persist an exact bounded excerpt from that source instead.
-                quote = str(selected["excerpt"][:512] if selected else "")
-                quote_valid = bool(selected and quote and quote in selected["excerpt"])
-                status = ("supported" if verdict == "supported" and quote_valid else
-                          "contradicted" if verdict == "contradicted" and quote_valid else
+                selected_locators = [str(value).strip()
+                                     for value in row.get("locators") or []]
+                evidence_by_locator = {ev["locator"]: ev for ev in item["evidence"]}
+                selected = [evidence_by_locator[locator]
+                            for locator in selected_locators
+                            if locator in evidence_by_locator]
+                selection_valid = (len(selected) == len(selected_locators)
+                                   and (verdict == "insufficient"
+                                        or bool(selected_locators)))
+                # The model selects source IDs only. Persist excerpts from all
+                # selected fields so joint support can be independently
+                # re-resolved without making the model echo arbitrary evidence.
+                quotes = [{
+                    "locator": ev["locator"],
+                    "quote": str(ev["excerpt"][:512]),
+                    "valid": bool(ev["excerpt"][:512]
+                                  and ev["excerpt"][:512] in ev["excerpt"]),
+                } for ev in selected]
+                quote_valid = bool(quotes) and all(q["valid"] for q in quotes)
+                status = ("supported" if verdict == "supported" and selection_valid
+                          and quote_valid else
+                          "contradicted" if verdict == "contradicted"
+                          and selection_valid and quote_valid else
                           "insufficient" if verdict == "insufficient" else
                           "invalid-review")
+                reason = ("selected evidence locator list does not resolve for this claim"
+                          if not selection_valid and verdict != "insufficient" else
+                          "selected evidence excerpt is empty or invalid"
+                          if verdict in {"supported", "contradicted"} and not quote_valid
+                          else "")
                 results.append({"claim_id": item["id"], "claim": item["claim"],
                                 "status": status,
-                                "reviewed_locator": selected_locator,
-                                "reason": "selected evidence locator does not resolve for this claim"
-                                if not selected else "",
-                                "evidence_quote": quote,
+                                "reviewed_locators": selected_locators,
+                                "reason": reason,
+                                "evidence_quotes": quotes,
+                                "evidence_quote": quotes[0]["quote"] if quotes else "",
                                 "evidence_quote_valid": quote_valid,
                             "evidence_sources": [
                                 {"locator": ev["locator"],
@@ -590,7 +618,7 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
             checkpoint_rows.sort(key=lambda row: str(row.get("claim_id") or ""))
             counts = Counter(str(row.get("status") or "unknown") for row in checkpoint_rows)
             finish({
-                "schema": "winre-report-claim-review/v2", "ok": False,
+                "schema": "winre-report-claim-review/v3", "ok": False,
                 "status": "in_progress", "sha256": sha, "run_id": run_id,
                 "report_sha256": report_digest, "locators_sha256": _sha256(locator_path),
                 "reviewer_model": reviewer_model, "reviewer_is_independent": False,
@@ -613,7 +641,7 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
     supported = sum(by_status.get(name, 0) for name in ("supported",))
     ok = bool(results) and supported == len(results) and not review_error
     return finish({
-        "schema": "winre-report-claim-review/v2",
+        "schema": "winre-report-claim-review/v3",
         "ok": ok,
         "status": "complete" if ok else ("verification-error" if review_error else "failed"),
         "sha256": sha,
