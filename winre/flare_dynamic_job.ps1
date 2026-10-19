@@ -493,6 +493,9 @@ if (Test-Path $frRun) {
         fired       = [bool]$rj.gate_fired
         kind        = [string]$rj.gate_kind
         api         = [string]$rj.gate_api
+        path        = [string]$rj.gate_path
+        arg0        = [string]$rj.gate_arg0
+        invocation_id = [string]$rj.gate_invocation_id
         at_s        = $rj.gate_at_s
         settle_s    = $rj.gate_settle_s
         spec        = [string]$StopOn

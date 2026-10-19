@@ -306,7 +306,18 @@ class FridaLaunchError(RuntimeError):
     """The sample cannot be launched with the information we have."""
 
 
-def gate_for(api, kinds, apis, args=None, path=None):
+def _path_key(path):
+    """Normalize Windows paths independent of the host running this helper."""
+    if not isinstance(path, str) or not path.strip():
+        return ""
+    value = path.strip().strip('"').replace("/", "\\").casefold()
+    for prefix in ("\\\\?\\", "\\??\\"):
+        if value.startswith(prefix):
+            value = value[len(prefix):]
+    return value.rstrip("\\")
+
+
+def gate_for(api, kinds, apis, args=None, path=None, *, sample_path=None):
     """Which gate (if any) this call satisfies. Pure, so it is testable.
 
     `args` is the call's argument list and `path` is the target's path when
@@ -326,6 +337,11 @@ def gate_for(api, kinds, apis, args=None, path=None):
     if "network" in kinds and low in NETWORK_GATES:
         return "network"
     if "file" in kinds and low in FILE_GATES:
+        # The analysis runner stages the input at a .exe path inside
+        # C:\\samples. Self-open/self-rewrite operations on that exact input
+        # are not a dropped payload and must not arm the early-stop gate.
+        if sample_path and _path_key(path) == _path_key(sample_path):
+            return None
         if low in CREATE_APIS:
             acc = _arg_int(args, 1) if args and len(args) > 1 else None
             if acc is None:
@@ -984,7 +1000,8 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
     gate_kinds, gate_apis = parse_stop_on(getattr(args, "stop_on", ""))
     gate_settle = max(0, int(getattr(args, "stop_on_settle", 20) or 0))
     gate = {"fired": False, "at_s": None, "kind": None, "api": None,
-            "stop_at": None, "path": None}
+            "stop_at": None, "path": None, "arg0": None,
+            "invocation_id": None}
 
     def on_message(msg, data):
         if closed["done"]:
@@ -1014,13 +1031,15 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
                         hit = gate_for(payload.get("api"), gate_kinds,
                                        gate_apis, payload.get("args"),
                                        path=(payload.get("decoded") or {}).get("path")
-                                            or (payload.get("decoded") or {}).get("arg0"))
+                                            or (payload.get("decoded") or {}).get("arg0"),
+                                       sample_path=getattr(args, "target", None))
                         if hit:
                             now = time.time()
                             _dec = payload.get("decoded") or {}
                             gate.update({
                                 "fired": True, "kind": hit,
                                 "api": payload.get("api"),
+                                "invocation_id": payload.get("invocation_id"),
                                 # P1-F6: record the TARGET, not the handle.
                                 # For a WriteFile arg0 is a HANDLE and the
                                 # resolved path is what makes the hit
@@ -1165,7 +1184,9 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
     idle_stop = int(getattr(args, "idle_stop", 0) or 0)
     stop_reason = "cap"
     try:
-        while time.time() < deadline:
+        while (time.time() < deadline
+               or (gate["fired"] and gate["stop_at"]
+                   and time.time() < gate["stop_at"])):
             time.sleep(0.5)
             try:
                 if session.is_detached:
@@ -1193,6 +1214,11 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
                       f"{gate_settle}s", file=sys.stderr)
                 break
             if idle_stop and (time.time() - last["t"]) > idle_stop:
+                if gate["fired"] and gate["stop_at"] and time.time() < gate["stop_at"]:
+                    # Idle-stop is a cap for a no-gate run. Once a behaviour
+                    # gate fires, preserve its full settle window so follow-on
+                    # traffic and side effects are not cut off early.
+                    continue
                 stop_reason = "idle"
                 print(f"idle-stop: no events for {idle_stop}s", file=sys.stderr)
                 break
@@ -1262,6 +1288,9 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
                        "gate_fired": gate["fired"],
                        "gate_kind": gate["kind"],
                        "gate_api": gate["api"],
+                       "gate_path": gate["path"],
+                       "gate_arg0": gate["arg0"],
+                       "gate_invocation_id": gate["invocation_id"],
                        "gate_at_s": gate["at_s"],
                        "process_tree": process_tree}, fh)
     except Exception:

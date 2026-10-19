@@ -698,6 +698,9 @@ def dynamic_findings(dyn_dir: Path, *, sha: str = "",
         "gate_fired": bool(g.get("fired")),
         "gate_kind": g.get("kind"),
         "gate_api": g.get("api"),
+        "gate_path": g.get("path"),
+        "gate_arg0": g.get("arg0"),
+        "gate_invocation_id": g.get("invocation_id"),
         "gate_at_s": g.get("at_s"),
     }
     if g.get("fired"):

@@ -454,6 +454,15 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     if composition.get("deciding_mode"):
         A(f"- Deciding mode: `{composition['deciding_mode']}`")
     if composition.get("basis"):
+        basis_refs = ["composite.json#$.basis"]
+        gate = ((finding_record.get("findings") or {}).get("window") or {})
+        if gate.get("gate_invocation_id"):
+            basis_refs.extend([
+                "findings.json#$.findings.window.gate_path",
+                "findings.json#$.findings.window.gate_invocation_id",
+                *raw_frida_refs(event_refs=[gate["gate_invocation_id"]]),
+            ])
+        set_evidence(*basis_refs)
         A("- Composite basis: " + ", ".join(
             f"`{item}`" for item in composition["basis"][:10]))
     A("")
@@ -476,6 +485,7 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
             f"`{section.get('name')}` (entropy {section.get('entropy')})"
             for section in section_rows))
         imp_count = sum(len(e.get("functions") or []) for e in pe.get("imports") or [])
+        set_evidence("quick/quick.json#$.evidence.pe.imports")
         A(f"- Imports: {len(pe.get('imports') or [])} DLLs, {imp_count} functions")
     gh = ev.get("ghidra") or {}
     if gh:
@@ -778,13 +788,18 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     A("### Dynamic detonation")
     A("")
 
-    set_evidence("artifact-manifest.json#$.artifact_count",
-                 "artifact-manifest.json#$.coverage")
     inventory = _load(pack_root / "artifact-manifest.json") or {}
     coverage = inventory.get("coverage") or {}
     requested_gaps = [(name, row) for name, row in coverage.items()
                       if isinstance(row, dict) and row.get("requested")
                       and row.get("status") != "complete"]
+    inventory_refs = ["artifact-manifest.json#$.artifact_count"]
+    for name, _row in requested_gaps:
+        inventory_refs.extend([
+            f"artifact-manifest.json#$.coverage.{name}.requested",
+            f"artifact-manifest.json#$.coverage.{name}.status",
+        ])
+    set_evidence(*inventory_refs)
     A(f"- Artifact inventory: {inventory.get('artifact_count', 0)} files; "
       f"coverage gaps={len(requested_gaps)}.")
     capture = (_load(pack_root / "dynamic" / "off_box" / "capture.json")
@@ -931,8 +946,14 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                   + f" ({inj.get('confidence')})")
             w = fd.get("window") or {}
             if w.get("effective_s") is not None:
-                set_evidence("findings.json#$.findings.window",
-                             "dynamic/META.json#$.window")
+                window_refs = [
+                    "findings.json#$.findings.window",
+                    "dynamic/META.json#$.window",
+                ]
+                if w.get("gate_invocation_id"):
+                    window_refs.extend(raw_frida_refs(
+                        event_refs=[w["gate_invocation_id"]]))
+                set_evidence(*window_refs)
                 requested_window_s = (w.get("requested_s")
                                       or ((dyn or {}).get("window") or {}).get("requested_s"))
                 gate = (f"gate {w.get('gate_kind')}/{w.get('gate_api')} "
@@ -1008,31 +1029,91 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     # current-run dynamic comparison was available.
     corr = finding_record.get("correlation") or {}
     if corr:
-        set_evidence("findings.json#$.correlation",
-                     "quick/quick.json#$.evidence",
-                     "dynamic/frida_summary.json#$.top_apis",
-                     "dynamic/network_intel.json#$.captures[*]")
         A("### Static/runtime correlation (candidate links)")
         A("")
         set_evidence("findings.json#$.correlation.status")
         A(f"- Status: `{corr.get('status')}`.")
         counts = corr.get("counts") or {}
+        set_evidence("findings.json#$.correlation.counts")
         A("- Relationships: " + ", ".join(
             f"{name}={counts.get(name, 0)}" for name in
             ("confirmed", "predicted_not_observed", "observed_not_predicted", "unverifiable")))
-        hyps = {h.get("id"): h for h in corr.get("hypotheses") or []
-                if isinstance(h, dict)}
-        obs = {o.get("id"): o for o in corr.get("observations") or []
-               if isinstance(o, dict)}
-        for rel in (corr.get("relationships") or [])[:8]:
+        hypothesis_rows = [h for h in corr.get("hypotheses") or []
+                           if isinstance(h, dict)]
+        observation_rows = [o for o in corr.get("observations") or []
+                            if isinstance(o, dict)]
+        hyps = {h.get("id"): h for h in hypothesis_rows}
+        obs = {o.get("id"): o for o in observation_rows}
+        hypothesis_indexes = {h.get("id"): index
+                              for index, h in enumerate(hypothesis_rows)}
+        observation_indexes = {o.get("id"): index
+                               for index, o in enumerate(observation_rows)}
+        for rel_index, rel in enumerate((corr.get("relationships") or [])[:8]):
             h = hyps.get(rel.get("hypothesis_id")) or {}
-            matched = [obs[o] for o in (rel.get("observation_ids") or [])
-                       if o in obs]
+            observation_ids = rel.get("observation_ids") or []
+            matched = [obs[o] for o in observation_ids if o in obs]
             label = h.get("value") or (matched[0].get("value") if matched else "unmatched candidate")
-            A(f"  - `{rel.get('status')}` `{label}` — {rel.get('reason')}; "
-              f"static refs={rel.get('hypothesis_refs') or 'none'}, "
-              f"dynamic refs={rel.get('observation_refs') or 'none'}")
-        for limitation in (corr.get("limitations") or [])[:5]:
+            relation_refs = [
+                f"findings.json#$.correlation.relationships[{rel_index}]",
+                "findings.json#$.correlation.coverage",
+                "dynamic/manifest.json#$.coverage.frida",
+                "dynamic/manifest.json#$.coverage.network",
+                "dynamic/manifest.json#$.coverage.external_capture",
+                "dynamic/frida_summary.json#$.hook_coverage.process_coverage_complete",
+                "dynamic/frida_summary.json#$.hook_coverage.coverage_tree.process_coverage_complete",
+                *([f"findings.json#$.correlation.hypotheses[{hypothesis_indexes[rel['hypothesis_id']]}]"]
+                  if rel.get("hypothesis_id") in hypothesis_indexes else []),
+                *[f"findings.json#$.correlation.observations[{observation_indexes[observation_id]}]"
+                  for observation_id in observation_ids
+                  if observation_id in observation_indexes],
+                *(rel.get("hypothesis_refs") or []),
+                *(rel.get("observation_refs") or []),
+            ]
+            set_evidence(*relation_refs)
+            A(f"  - `{rel.get('status')}` `{label}` — {rel.get('reason')}.")
+        for limitation_index, limitation in enumerate((corr.get("limitations") or [])[:5]):
+            limitation_refs = [
+                f"findings.json#$.correlation.limitations[{limitation_index}]",
+                "findings.json#$.correlation.coverage",
+            ]
+            lower_limitation = str(limitation).casefold()
+            if "frida" in lower_limitation or "instrumentation" in lower_limitation:
+                limitation_refs.extend([
+                    "dynamic/frida_summary.json#$.hook_coverage.process_coverage_complete",
+                    "dynamic/frida_summary.json#$.hook_coverage.coverage_tree.limitations",
+                    "dynamic/manifest.json#$.coverage.frida",
+                ])
+            if "network" in lower_limitation or "pcap" in lower_limitation:
+                limitation_refs.extend([
+                    "dynamic/manifest.json#$.coverage.network.status",
+                    "dynamic/manifest.json#$.coverage.external_capture.status",
+                ])
+                capture_refs = [
+                    "dynamic/external_capture.json#$.status",
+                    "dynamic/external_capture.json#$.mode",
+                    "dynamic/external_capture.json#$.promiscuous",
+                    "dynamic/external_capture.json#$.interface",
+                    "dynamic/external_capture.json#$.guest_ip",
+                    "dynamic/external_capture.json#$.capture_filter",
+                    "dynamic/external_capture.json#$.pcap_sha256",
+                    "dynamic/external_capture.json#$.packets_captured",
+                    "dynamic/external_capture.json#$.run_id",
+                ]
+                limitation_refs.extend(ref for ref in capture_refs
+                                       if _reference_exists(ref))
+                vm_wide_indexes = [
+                    index for index, observation in enumerate(observation_rows)
+                    if observation.get("scope") == "vm-wide-pcap"
+                ][:5]
+                limitation_refs.extend(
+                    f"findings.json#$.correlation.observations[{index}]"
+                    for index in vm_wide_indexes)
+            if "no relationship" in lower_limitation or "confirmed" in lower_limitation:
+                limitation_refs.extend([
+                    "findings.json#$.correlation.counts.confirmed",
+                    "findings.json#$.correlation.policy",
+                ])
+            set_evidence(*limitation_refs)
             A(f"  - coverage limitation: {limitation}")
         A("")
     A("")

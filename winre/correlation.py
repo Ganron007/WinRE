@@ -13,6 +13,15 @@ import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
+_FILELIKE_HOST_SUFFIXES = frozenset({
+    "dll", "exe", "sys", "ocx", "cpl", "drv", "efi", "scr",
+    "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta",
+    "bat", "cmd", "msi", "msp", "jar", "lnk", "pif", "reg",
+    "inf", "pdb", "nls", "mui", "pyd", "pyc", "json", "xml",
+    "log", "txt", "tmp", "dat", "bin", "evtx", "map", "ilk",
+    "exp", "lib", "res", "cache", "ini", "cfg",
+})
+
 
 _HOST_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9_-])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}"
@@ -36,6 +45,10 @@ def _canonical(kind: str, value: str) -> str:
         if "://" in value:
             value = urlsplit(value).hostname or ""
         value = value.rstrip(".").lower()
+        # Generic PE/import strings such as KERNEL32.dll and
+        # api-ms-win-crt-runtime-l1-1-0.dll are filenames, not DNS hosts.
+        if value.rsplit(".", 1)[-1] in _FILELIKE_HOST_SUFFIXES:
+            return ""
         return value
     if kind == "ip":
         try:
@@ -78,16 +91,16 @@ def _strings(value, path: str, out: list[dict], *, limit: int = 4000) -> None:
 def _hypotheses(quick: dict, deep: dict) -> list[dict]:
     raw: list[dict] = []
     evidence = quick.get("evidence") if isinstance(quick, dict) else {}
-    _strings(evidence or {}, "quick/quick.json#/evidence", raw)
+    _strings(evidence or {}, "quick/quick.json#$.evidence", raw)
     # Agent history may add strings discovered by deterministic tools. Keep
     # only outputs from string/IOC tools and cite the exact history step.
     agent = deep.get("agent") if isinstance(deep, dict) else {}
-    for h in (agent or {}).get("history") or []:
+    for history_index, h in enumerate((agent or {}).get("history") or []):
         if not isinstance(h, dict) or h.get("tool") not in {
                 "strings_tool", "floss", "ioc_extract", "xor_string_search"}:
             continue
         _strings(h.get("result"),
-                 f"deep/deep.json#/agent/history/{h.get('step')}/result", raw)
+                 f"deep/deep.json#$.agent.history[{history_index}].result", raw)
 
     hypotheses: dict[tuple[str, str], dict] = {}
     for record in raw:
@@ -150,7 +163,7 @@ def _observations(dyn: Path, fr: dict, ni: dict) -> list[dict]:
         if (isinstance(direct_ip, str) and direct_ip
                 and endpoint.get("address_family") == "ipv6"):
             add("ip", direct_ip,
-                f"dynamic/frida_summary.json#/network_endpoints/{i}",
+                f"dynamic/frida_summary.json#$.network_endpoints[{i}]",
                 "sample-process-api-observation", endpoint.get("event_ref"),
                 api=endpoint.get("api"), pid=endpoint.get("pid"),
                 tid=endpoint.get("tid"),
@@ -159,13 +172,13 @@ def _observations(dyn: Path, fr: dict, ni: dict) -> list[dict]:
                 attribution="process API only; flow/caller unresolved")
         for ip_match in _IP_RE.finditer(value):
             add("ip", ip_match.group(0),
-                f"dynamic/frida_summary.json#/network_endpoints/{i}",
+                f"dynamic/frida_summary.json#$.network_endpoints[{i}]",
                 "sample-process-api-observation", endpoint.get("event_ref"),
                 api=endpoint.get("api"), pid=endpoint.get("pid"),
                 tid=endpoint.get("tid"), attribution="process API only; flow/caller unresolved")
         for host_match in _HOST_RE.finditer(value):
             add("host", host_match.group(0),
-                f"dynamic/frida_summary.json#/network_endpoints/{i}",
+                f"dynamic/frida_summary.json#$.network_endpoints[{i}]",
                 "sample-process-api-observation", endpoint.get("event_ref"),
                 api=endpoint.get("api"), pid=endpoint.get("pid"),
                 tid=endpoint.get("tid"), attribution="process API only; flow/caller unresolved")
@@ -177,21 +190,33 @@ def _observations(dyn: Path, fr: dict, ni: dict) -> list[dict]:
         for field in ("dns_queries", "tls_sni"):
             for j, value in enumerate(capture.get(field) or []):
                 add("host", str(value),
-                    f"dynamic/network_intel.json#/captures/{ci}/{field}/{j}",
+                    f"dynamic/network_intel.json#$.captures[{ci}].{field}[{j}]",
                     "vm-wide-pcap", None, capture=pcap,
                     attribution="VM-wide capture; process/flow ownership unresolved")
         for j, line in enumerate(capture.get("http_requests") or []):
             host = str(line).split("\t", 1)[0].strip()
             if host:
                 add("host", host,
-                    f"dynamic/network_intel.json#/captures/{ci}/http_requests/{j}",
+                    f"dynamic/network_intel.json#$.captures[{ci}].http_requests[{j}]",
                     "vm-wide-pcap", None, capture=pcap,
                     attribution="VM-wide capture; process/flow ownership unresolved")
 
-    for i, (path, effect) in enumerate((fr.get("file_effects") or {}).items()):
+    file_events = fr.get("file_events") or []
+    for path, effect in (fr.get("file_effects") or {}).items():
         if not isinstance(effect, dict) or not int(effect.get("successful_writes") or 0):
             continue
-        add("path", str(path), f"dynamic/frida_summary.json#/file_effects/{i}",
+        event_refs = [str(value) for value in effect.get("event_refs") or []
+                      if isinstance(value, (str, int)) and str(value)]
+        if event_refs:
+            source_ref = "dynamic/frida_trace.jsonl#@invocation_id=" + event_refs[0]
+        else:
+            event_index = next((i for i, row in enumerate(file_events)
+                                if isinstance(row, dict)
+                                and str(row.get("path") or "") == str(path)), None)
+            if event_index is None:
+                continue
+            source_ref = f"dynamic/frida_summary.json#$.file_events[{event_index}]"
+        add("path", str(path), source_ref,
             "sample-process-api-observation", (effect.get("event_refs") or [None])[0],
             attribution="sample-process API only; caller/control-flow unresolved",
             successful_writes=effect.get("successful_writes"))
