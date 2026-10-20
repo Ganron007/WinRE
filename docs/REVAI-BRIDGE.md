@@ -14,10 +14,10 @@
 | Machine | Runs | Needs |
 |---|---|---|
 | **Driver box** (e.g. RevAI on Remnux, or the operator host) | `winre.remote_driver` / `winre.pipeline --driver remote` — the pipeline process, the LangGraph agent, **every LLM call** | WinRE code + Python deps, the 4 LLM variables, internet to the LLM endpoint, SSH to the VM |
-| **FlareVM** (Windows, air-gapped) | Tools only: Ghidra/IDA/Malcat/x64dbg SQL+HTTP MCP, detonation job, snapshot gate | WinRE repo at `C:\WinRE`, tools, MCP servers, clean-snapshot marker. **No LLM keys. No internet.** |
+| **FlareVM** (Windows, offline guest on private VMnet2) | Tools only: Ghidra/IDA/Malcat/x64dbg SQL+HTTP MCP, detonation job, snapshot gate | WinRE repo at `C:\WinRE`, tools, MCP servers, clean-snapshot marker. **No LLM keys. No internet dependency during analysis.** |
 
 ```
-Driver box (agent loop + LLM + internet)          FlareVM (air-gapped, tools only)
+Driver box (agent loop + LLM + internet)          FlareVM (offline private-network guest, tools only)
   winre.remote_driver ── SSH-exec ────────────────► C:\Python313 tools
                       ── SCP (sample/packs) ──────► C:\samples, C:\WinRE\logs
                       ── HTTP MCP :9094/:9009/:9097 ► x64dbg / Malcat / WinDbg
@@ -26,8 +26,10 @@ Driver box (agent loop + LLM + internet)          FlareVM (air-gapped, tools onl
 
 **Invariant:** LLM calls execute inside the process that runs the WinRE
 driver. The VM never receives, stores, or needs LLM configuration. This is
-what allows the FlareVM to stay permanently air-gapped, including during
-detonation.
+what allows the FlareVM to stay offline from the internet during analysis. The
+guest still communicates with its configured private VMnet2 peers, including
+the chosen control plane; do not describe that design as per-guest peer
+isolation.
 
 ## 2. What the driver box must have
 
@@ -37,6 +39,11 @@ detonation.
 2. The **4 LLM variables** (§3) in the driver process environment.
 3. **Network** to the LLM endpoint and SSH access to the FlareVM
    (`FLARE_HOST`, `FLARE_USER`, `FLARE_SSH_KEY`, `FLARE_SSH_PORT`).
+
+WinRE can also run standalone from its own local control plane; RevAI is not a
+runtime dependency for WinRE. In that path, host-side capture is optional. The
+integrated RevAI dynamic path requires the configured passive sensor on `.43`;
+it does not require changing Flare's gateway, DNS, or peer-access policy.
 
 The FlareVM side needs none of the LLM variables. If a `C:\WinRE\.env`
 exists there from a previous NAT/testing phase, delete it.
@@ -268,13 +275,16 @@ Three WinRE outputs are part of the contract:
   current defaults are:
 
   - `--max-seconds` is the **cap** and defaults to **150**.
-  - `--stop-on` is the **mechanism** (default `network,file`): the run keeps
-    tracing until the sample does something notable — first outbound
-    connection, first file write, or any `api:<ExportName>` you name — then
-    keeps tracing `--stop-on-settle` seconds (default 20) so the follow-on
-    traffic is captured too, and stops. `stop_reason` is then `gate:network`,
-    `gate:file` or `gate:api:<Name>`, which is how you tell "the sample did
-    nothing interesting" from "we stopped right after it did".
+  - `--stop-on` is the **mechanism** (default `network,file`): the run observes
+    until it records an outbound connection attempt, a write-API attempt, or
+    any `api:<ExportName>` you name, then preserves the
+    `--stop-on-settle` interval (default 20 seconds) for independent collectors
+    such as Procmon and passive network capture. A gate is an observation
+    trigger, not proof that the requested effect succeeded. If the instrumented
+    process exits or its Frida session detaches, the orchestration still honors
+    the settle deadline, but Frida cannot provide events after detachment.
+    `stop_reason` records the trigger that bounded collection; it does not
+    establish that no other behavior occurred.
   - `--idle-stop-seconds` (idle cutoff) is **off by default** and is *not* the
     mechanism: a sleeping sample looks idle, so idle-stop truncates the window
     right before it wakes up and beacons.

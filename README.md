@@ -17,8 +17,10 @@ WinRE can run with a separate **control plane** and **Windows analysis guest**.
 The control plane hosts the driver, UI, reports, evidence packs, and optional
 LLM connection. The FlareVM guest hosts Windows tooling and sample execution.
 The remote driver communicates with the guest over SSH and MCP and brings the
-resulting evidence back to the control plane for analysis. Keep the guest on an
-isolated lab network.
+resulting evidence back to the control plane for analysis. Keep the guest on
+the private host-only VMnet2 network with internet NAT/bridging removed. The
+guest retains intended access to VMnet2 peers and the workstation; this is not
+a per-guest peer-isolation policy.
 
 ## Analysis modes
 

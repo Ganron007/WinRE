@@ -72,6 +72,13 @@ controls the behavior gate and `--stop-on-settle` controls how long collection
 continues after it fires. `--adaptive` enables an idle-based stop; because a
 sleeping sample can appear idle, it is off by default. Requested and effective
 windows and the stop reason are recorded in the run evidence.
+Once a behavior gate fires, the orchestration preserves the configured settle
+deadline even if the instrumented process exits or detaches. A detached Frida
+session cannot provide later Frida events; Procmon and passive network capture
+continue as independent collectors through the remaining interval. A gate event
+records an observed API attempt, not proof that the requested file or registry
+change succeeded. Use the event's success/result fields and correlated process
+evidence before describing an effect.
 
 ## Driver and trust boundary
 

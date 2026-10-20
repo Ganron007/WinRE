@@ -49,7 +49,7 @@ Start from a **Windows 10 VM on an isolated/host-only network**. Windows 10
 is the documented execution target; Windows 11 detonation support has not
 been established.
 
-### Install order matters (the VM is air-gapped in operation)
+### Install order matters (internet is only needed during setup)
 
 1. **While the VM still has internet (NAT):** run the **FlareVM base
    installer** (`install.ps1`) — it brings most required free tools
@@ -60,7 +60,10 @@ been established.
    > verification script. Vanilla FLARE-VM can also be used; apply
    > `flarevm-postfix.ps1` if the required Windows debugging components are
    > missing.
-2. **Air-gap**: switch the VM to host-only networking.
+2. **Remove NAT/bridged internet access**: switch the VM to the private
+   host-only VMnet2 network used by the lab. Keep the guest's normal gateway,
+   DNS, and intended VMnet2 peer access; WinRE does not route through RevAI or
+   block the workstation.
 3. **Run `install/setup-flarevm.ps1`** on the VM: it *ensures* the complete
    required set exists (verifies every tool, builds the x64dbg MCP plugin
    from the vendored Zig source, wires autostart + gate marker) and fails

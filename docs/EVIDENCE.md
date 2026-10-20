@@ -96,6 +96,10 @@ review. That review records field-level evidence keys and fails closed when a
 claim cannot be supported. An agentic run with `--dry-llm` records
 `deterministic_fallback`; report review is also marked not requested, so the
 fallback and missing report review remain visible to the operator and audit.
+The technical report also labels its phase (`static`, `static+debugger`,
+`static+dynamic`, or `static+dynamic-incomplete`) from the mode and run-bound
+execution evidence. A requested or observed but incomplete dynamic run must not
+be presented as a completed static+dynamic phase.
 
 Network packets collected from the shared VMnet are guest-wide observations.
 Unless a packet or flow is tied to the sample process, the report records it as

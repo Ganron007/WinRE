@@ -212,6 +212,16 @@ def test_gate_can_be_disabled_or_narrowed():
     assert fat.gate_for("CreateThread", kinds, apis) is None
 
 
+def test_behavior_gate_settle_survives_target_detach_until_its_deadline():
+    fat = _load_frida()
+    fired_gate = {"fired": True, "stop_at": 130.0}
+    assert fat.gate_settle_pending(fired_gate, 129.5) is True
+    assert fat.gate_settle_pending(fired_gate, 130.0) is False
+    assert fat.gate_settle_pending(fired_gate, 131.0) is False
+    assert fat.gate_settle_pending({"fired": False, "stop_at": 130.0}, 129.5) is False
+    assert fat.gate_settle_pending({"fired": True, "stop_at": None}, 129.5) is False
+
+
 def test_the_window_cap_is_no_longer_the_45s_that_missed_the_dga():
     """2026-09-11: 45s -> 497 events, no DGA. 150s -> 694,692 events, live C2."""
     for rel in ("winre/pipeline.py", "winre/remote_driver.py",

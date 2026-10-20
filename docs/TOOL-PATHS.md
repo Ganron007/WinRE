@@ -11,7 +11,7 @@ listed here — **no code changes needed**.
 Legend: `[base]` = FlareVM installer ships it · `[setup]` = WinRE
 `setup-flarevm.ps1` installs/verifies it · `[ours]` = we install/verify it (missing = FAIL in verify) · `[user]` = you install + activate it (absent = WARN, the SQL/MCP WIRING around it is still ours) ·
 `[stage]` = `ops/provision_tools.ps1` can download it on the host and scp to
-the air-gapped VM.
+the offline FlareVM on private VMnet2.
 
 ## Who owns what (the deployment contract)
 

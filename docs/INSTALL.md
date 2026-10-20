@@ -81,7 +81,7 @@ are removed before it exits.
 | **Malcat** (optional commercial) installed + license activated | malcat_* tools; honest skip when absent |
 | **IDA Pro** (optional commercial) installed + activated; `idasql.exe` next to `idat.exe` | `ida_query` / `.i64` creation; headless needs Pro (Free is GUI-only). Drop the licensed `idasql.exe` at `C:\Tools-staged\idasql.exe` and setup installs it |
 | **SSH key**: your public key in `C:\ProgramData\ssh\administrators_authorized_keys` | FlareVM's admin user authenticates via that file, NOT the profile one - see [`REVAI-BRIDGE.md`](REVAI-BRIDGE.md) 2.1 |
-| NAT/internet **during setup only** | pip downloads (or use staged wheels); production stays air-gapped |
+| NAT/internet **during setup only** | pip downloads (or use staged wheels); remove NAT before operation and keep the guest on private VMnet2 |
 
 **WinRE configures (idempotent: `sync_to_flare.ps1` + `setup-flarevm.ps1`):**
 repo `C:\WinRE` + layout, snapshot marker, `.env.template`; pip deps
@@ -113,7 +113,10 @@ remote dynamic run is active; Flare keeps its existing route/DNS and guest-side
 FakeNet configuration. The WinRE setup does not point the guest at `.43` or
 block other VMnet2 peers. Host-side sync and reapply connect directly to
 `FLARE_HOST`; RevAI connects directly to the Flare guest over VMnet2 as well.
-Keep Flare attached only to the private VMnet2 network. See
+Keep Flare attached only to the private VMnet2 network. The guest retains its
+normal route and DNS and allows the workstation and control plane to reach it;
+these are part of the standalone and remote-driver contract, not peer-isolation
+controls. See
 [`DYNAMIC-ORCHESTRATOR.md`](DYNAMIC-ORCHESTRATOR.md) for the capture smoke test
 and the limitation that promiscuous mode requests all frames delivered by
 VMware but cannot guarantee the virtual network mirrors them.

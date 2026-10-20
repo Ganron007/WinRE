@@ -125,6 +125,44 @@ def test_debug_report_shows_selected_verdict_observation_and_unpack_gap(tmp_path
     assert "No dynamic detonation was observed in this debugger-assisted run" in md
 
 
+@pytest.mark.parametrize(
+    ("stage_ok", "evidence_complete", "expected_phase"),
+    [
+        (True, True, "static+dynamic"),
+        (False, False, "static+dynamic-incomplete"),
+    ],
+)
+def test_dynamic_phase_comes_from_direct_mode_findings(
+        tmp_path, stage_ok, evidence_complete, expected_phase):
+    """The dynamic producer stores its flags directly under findings.json."""
+    pack_root = tmp_path / SHA / "dynamic"
+    for stage in ("deep", "dynamic", "report"):
+        (pack_root / stage).mkdir(parents=True, exist_ok=True)
+    (pack_root / "deep" / "deep.json").write_text(json.dumps({
+        "agent": {"source": "llm_judge", "verdict": {
+            "verdict": "malicious", "confidence": "medium"}}}),
+        encoding="utf-8")
+    (pack_root / "dynamic" / "STAGE.json").write_text(json.dumps({
+        "stage": "dynamic", "ok": stage_ok, "ran": True,
+        "detonation_ran": True}), encoding="utf-8")
+    (pack_root / "dynamic" / "META.json").write_text(json.dumps({
+        "ok": stage_ok, "detonation_ran": True, "sample_pid": 5156}),
+        encoding="utf-8")
+    (pack_root / "findings.json").write_text(json.dumps({
+        "mode": "dynamic",
+        "verdict": {"level": "malicious", "confidence": "medium"},
+        "findings": {"run_observed": True, "ok": stage_ok,
+                     "evidence_complete": evidence_complete},
+    }), encoding="utf-8")
+    (pack_root / "composite.json").write_text(json.dumps({
+        "level": "malicious", "confidence": "medium",
+        "deciding_mode": "dynamic", "basis": ["runtime evidence"]}),
+        encoding="utf-8")
+
+    md = _report(pack_root)
+    assert f"Phase:** {expected_phase}" in md
+
+
 def test_debug_report_distinguishes_entrypoint_observation_from_unpack_dump(
         tmp_path):
     pack_root = tmp_path / SHA / "dbg"

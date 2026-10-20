@@ -65,6 +65,15 @@ def parse_stop_on(spec):
     return kinds, apis
 
 
+def gate_settle_pending(gate, now):
+    """Whether a fired behavior gate still owns its observation window."""
+    try:
+        return bool(gate.get("fired") and gate.get("stop_at") is not None
+                    and float(now) < float(gate["stop_at"]))
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 # A CreateFile is only a DROPPED file if it opens for WRITE. Reading a
 # DLL, a resource or the locale sort table is not a drop: the first live
 # dynamic run (P1 s01, 2026-10-06) tripped the file gate on
@@ -1183,10 +1192,10 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
     deadline = t_start + args.max_seconds
     idle_stop = int(getattr(args, "idle_stop", 0) or 0)
     stop_reason = "cap"
+    detached_gate_waiting = False
     try:
         while (time.time() < deadline
-               or (gate["fired"] and gate["stop_at"]
-                   and time.time() < gate["stop_at"])):
+               or gate_settle_pending(gate, time.time())):
             time.sleep(0.5)
             try:
                 if session.is_detached:
@@ -1200,12 +1209,32 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
                                 pass
                         child_pending = child_state["inflight"] > 0
                     if not active_children and not child_pending:
-                        stop_reason = "detached"
-                        print("instrumented process tree detached", file=sys.stderr)
-                        break
+                        settle_pending = gate_settle_pending(gate, time.time())
+                        if settle_pending:
+                            # Process exit does not cancel the observation
+                            # window opened by a behavior gate. Procmon and
+                            # network capture continue collecting independently
+                            # of the Frida target until the configured settle
+                            # deadline, so preserve that interval here too.
+                            if not detached_gate_waiting:
+                                print(
+                                    "instrumented process tree detached; "
+                                    f"preserving gate settle for {gate_settle}s",
+                                    file=sys.stderr,
+                                )
+                                detached_gate_waiting = True
+                        elif not gate["fired"]:
+                            stop_reason = "detached"
+                            print("instrumented process tree detached", file=sys.stderr)
+                            break
             except Exception:
-                stop_reason = "detached"
-                break
+                # Frida may raise while the target is detaching. A fired gate
+                # still owns its settle interval even when session state can
+                # no longer be queried.
+                settle_pending = gate_settle_pending(gate, time.time())
+                if not settle_pending:
+                    stop_reason = "detached"
+                    break
             # gate + settle wins over the cap being reached: the sample did
             # something notable and then went quiet
             if gate["fired"] and gate["stop_at"] and time.time() >= gate["stop_at"]:
@@ -1214,7 +1243,7 @@ send({{type: 'log', level: 'info', msg: 'hooks installed'}});
                       f"{gate_settle}s", file=sys.stderr)
                 break
             if idle_stop and (time.time() - last["t"]) > idle_stop:
-                if gate["fired"] and gate["stop_at"] and time.time() < gate["stop_at"]:
+                if gate_settle_pending(gate, time.time()):
                     # Idle-stop is a cap for a no-gate run. Once a behaviour
                     # gate fires, preserve its full settle window so follow-on
                     # traffic and side effects are not cut off early.

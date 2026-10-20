@@ -25,6 +25,7 @@ import hashlib
 import re
 import time
 from pathlib import Path
+from typing import Any
 
 from .evidence import sha_of
 
@@ -260,6 +261,29 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
         or (dyn or {}).get("sample_pid"))
     pack_mode = pack_root.name
     finding_record = _load(pack_root / "findings.json") or {}
+    # findings.build writes the mode-specific finding object directly at
+    # findings.json -> findings. The dynamic producer's run/evidence flags are
+    # therefore direct children, not nested beneath a second "dynamic" key.
+    dynamic_findings = ((finding_record.get("findings") or {})
+                        if pack_mode == "dynamic" else {})
+    dynamic_requested = bool(
+        pack_mode == "dynamic"
+        or (dyn_stage and dyn_stage.get("skipped") != "not requested")
+    )
+    dynamic_observed = bool(
+        has_dynamic or dynamic_findings.get("run_observed") is True
+    )
+    dynamic_complete = bool(
+        dynamic_observed
+        and dynamic_findings.get("ok") is True
+        and dynamic_findings.get("evidence_complete") is True
+    )
+    phase = (
+        "static+dynamic" if dynamic_complete else
+        "static+dynamic-incomplete" if dynamic_requested or dynamic_observed else
+        "static+debugger" if pack_mode == "dbg" else
+        "static"
+    )
     composition = _load(pack_root / "composite.json") or {}
     selected_level = composition.get("level") or verdict.get("verdict")
     selected_confidence = (composition.get("confidence")
@@ -441,6 +465,18 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
       f"format {intake.get('format', '?')}")
     set_evidence("META.json#$.mode", "META.json#$.pack_mode")
     A(f"- **Mode:** `{pack_mode}`")
+    if phase == "static+dynamic":
+        set_evidence("findings.json#$.findings.dynamic",
+                     "dynamic/STAGE.json#$.detonation_ran")
+    elif phase == "static+dynamic-incomplete":
+        set_evidence("dynamic/STAGE.json#$.detonation_ran",
+                     "dynamic/STAGE.json#$.skipped",
+                     "findings.json#$.findings.dynamic")
+    elif phase == "static+debugger":
+        set_evidence("findings.json#$.findings.debug_observation")
+    else:
+        set_evidence("META.json#$.mode", "META.json#$.pack_mode")
+    A(f"- **Phase:** {phase}")
     set_evidence("deep/deep.json#$.agent.source",
                  "deep/deep.json#$.agent.verdict")
     A(f"- **Analysis source:** `{src}`")
@@ -450,7 +486,7 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     A("")
     set_evidence("composite.json#$.level", "composite.json#$.confidence")
     A(f"- Pipeline-selected composite verdict: **{str(selected_level or 'unknown').upper()}** "
-      f"(confidence: {selected_confidence or 'n/a'}).")
+      f"(confidence: {selected_confidence or 'n/a'}) — source `{selected_source}`.")
     if composition.get("deciding_mode"):
         A(f"- Deciding mode: `{composition['deciding_mode']}`")
     if composition.get("basis"):
@@ -625,13 +661,13 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     A(f"- Agent analysis source: `{src}`.")
     set_evidence("deep/deep.json#$.agent.verdict.verdict",
                  "deep/deep.json#$.agent.verdict.confidence")
-    A(f"- Agent-declared verdict: `{verdict.get('verdict', 'unknown')}`; "
-      f"confidence=`{verdict.get('confidence', 'n/a')}`.")
+    A(f"- Deep-stage assessment ({str(verdict.get('verdict', 'unknown')).upper()}; "
+      f"confidence={verdict.get('confidence', 'n/a')}).")
     if verdict.get("summary"):
         set_evidence("deep/deep.json#$.agent.verdict.summary",
                      "deep/deep.json#$.agent.history[*].result",
                      "quick/quick.json#$.evidence")
-        A(f"- Assessment: {verdict['summary']}")
+        A(f"  - Summary: {verdict['summary']}")
     A("")
 
     A("## 5. IOC table")
