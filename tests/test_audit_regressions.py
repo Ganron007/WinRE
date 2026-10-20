@@ -357,6 +357,15 @@ def test_sync_excludes_run_scoped_pytest_scratch_trees():
         "nested pytest scratch directories must also be stripped recursively")
 
 
+def test_sync_excludes_codex_generated_root_artifacts():
+    src = _src("ops/sync_to_flare.ps1")
+    assert src.count('$_.Name -notlike ".codex-*"') == 2, (
+        "Codex-generated manifests and source archives must be excluded from "
+        "both staging and dotfile transfer")
+    ex = re.search(r"\$Excludes\s*=\s*@\(([^)]*)\)", src).group(1)
+    assert '".codex"' in ex, "the Codex app cache directory is workstation-only"
+
+
 def test_shipped_env_template_cannot_weaken_the_gate():
     tpl = _src(".env.template")
     active = [ln.strip() for ln in tpl.splitlines()

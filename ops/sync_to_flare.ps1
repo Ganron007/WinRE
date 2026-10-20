@@ -79,14 +79,17 @@ if (Test-Path $Staging) { Remove-Item -LiteralPath $Staging -Recurse -Force -Err
 # Excluded for the reason above: an untracked host fixture was reinstalled on
 # the VM by every sync - a fake session file (sha256 = 64 a's) reappeared three
 # times while being "deleted" from the VM, because scp copies and never prunes.
-$Excludes = @(".git","__pycache__","logs","cache","local-runs","dist",".env","internal",".pytest_cache",".mypy_cache","sessions",".ruff_cache")
+$Excludes = @(".git",".codex","__pycache__","logs","cache","local-runs","dist",".env","internal",".pytest_cache",".mypy_cache","sessions",".ruff_cache")
 
 Step "staging repo -> $Staging"
 New-Item -ItemType Directory -Force -Path $Staging | Out-Null
-# Pytest's --basetemp folders are commonly named `.pytest-*`. They contain
-# generated sample fixtures and must not be copied into the guest deployment.
+# Pytest's --basetemp folders are commonly named `.pytest-*`; Codex's local
+# deployment manifests/archives are named `.codex-*`. These are host-only and
+# must not be copied into the guest deployment.
 Get-ChildItem -LiteralPath $Repo -Force | Where-Object {
-    $_.Name -notin $Excludes -and $_.Name -notlike ".pytest-*"
+    $_.Name -notin $Excludes -and
+    $_.Name -notlike ".pytest-*" -and
+    $_.Name -notlike ".codex-*"
 } | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $Staging $_.Name) -Recurse -Force
 }
@@ -121,7 +124,11 @@ if ($LASTEXITCODE -ne 0) { Die "scp failed rc=$LASTEXITCODE" }
 # "present, nothing to do"). Copy them explicitly by name. `.env` is never
 # shipped - the VM must hold no secrets.
 $dotStaged = Get-ChildItem -LiteralPath $Staging -Force -File |
-    Where-Object { $_.Name.StartsWith(".") -and $_.Name -ne ".env" }
+    Where-Object {
+        $_.Name.StartsWith(".") -and
+        $_.Name -ne ".env" -and
+        $_.Name -notlike ".codex-*"
+    }
 if ($dotStaged) {
     Step ("scp dotfiles -> " + (($dotStaged.Name) -join ", "))
     foreach ($f in $dotStaged) {
