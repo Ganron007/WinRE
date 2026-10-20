@@ -8,6 +8,18 @@ WinRE uses deterministic tools to produce evidence. The agentic engine can
 interpret that evidence through an OpenAI-compatible LLM. It does not ask the
 LLM to execute samples or replace deterministic collection.
 
+## Current validation boundary — 2026-10-20
+
+Revision `348edfc` passes the full local suite (**805 passed, 3 skipped**). The
+maintainer's reference FlareVM was re-synced from that source and its official
+environment verifier returned **0 failures** with **43/43 required tools**;
+the single warning is the expected on-demand x64dbg MCP listener. These checks
+validate source regressions and environment wiring. No fresh sample has yet
+passed end-to-end acceptance on this revision, so a supported mode in the
+tables below describes an implemented workflow, not a claim that every sample
+or mode has been accepted. Maintainers track per-mode release acceptance
+separately from this operator guide.
+
 ## Engines and evidence sections
 
 The analysis engine and the requested execution capability are separate
