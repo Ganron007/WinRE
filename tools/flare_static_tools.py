@@ -67,6 +67,117 @@ def _upx_exe():
     return None
 
 
+# --- Malcat native capa engine (MCP) ---------------------------------------
+# RevAI reaches the same engine through its own CADRE_CAPA_ENGINE dispatcher
+# (auto|malcat|capa-rs|capa; default auto -> capa-rs, and "malcat" -> the
+# Malcat engine). WinRE had no such dispatcher: it hardcoded the standalone
+# capa.exe, which measured 774 s (cold) on a 2 MB Delphi PE on the FlareVM
+# (2026-10-22) while Malcat's native engine returns the same capability set
+# in ~2 s. The static pipeline calls capa TWICE (quick batch + deep-stage
+# checklist), so that one tool dominated the run. Malcat first, standalone
+# as the fallback: the free path still works with no Malcat licence.
+MALCAT_MCP_BASE = os.environ.get("WINRE_MALCAT_MCP",
+                                  "http://127.0.0.1:9009/mcp")
+
+
+def _malcat_mcp_call(name: str, arguments: dict, timeout: int = 300):
+    """One Malcat MCP tool call over stdlib HTTP. None on any transport error.
+
+    This file stays dependency-free on purpose (it runs as a bare script on
+    the guest), so it talks to the MCP endpoint directly instead of importing
+    winre.mcp.
+    """
+    import urllib.error
+    import urllib.request
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments or {}}}
+    req = urllib.request.Request(
+        MALCAT_MCP_BASE, data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = json.loads(r.read())
+    except Exception:
+        return None
+    if not isinstance(raw, dict) or raw.get("error"):
+        return None
+    res = raw.get("result")
+    if isinstance(res, dict) and res.get("isError"):
+        return None
+    return res
+
+
+def _malcat_payload(res):
+    """Malcat MCP returns structuredContent, or a JSON text content blob."""
+    if not isinstance(res, dict):
+        return res
+    sc = res.get("structuredContent")
+    if isinstance(sc, dict) and sc:
+        return sc
+    for part in (res.get("content") or []):
+        if isinstance(part, dict) and part.get("type") == "text":
+            try:
+                return json.loads(part.get("text", ""))
+            except Exception:
+                continue
+    return res
+
+
+def _malcat_attack(attack) -> list:
+    """Malcat 'Tactic::Technique [T1234]' -> the capa contract's 'Tactic:Technique'."""
+    out = []
+    for a in attack or []:
+        s = str(a)
+        if "::" in s:
+            tactic, _, technique = s.partition("::")
+        else:
+            tactic, technique = "", s
+        technique = re.sub(r"\s*\[[A-Za-z]*\d+\]\s*$", "", technique).strip()
+        out.append(f"{tactic.strip()}:{technique}" if tactic.strip() else technique)
+    return out
+
+
+def _malcat_capa(sample: str, timeout: int = 300):
+    """capa via Malcat's NATIVE capa engine (MCP). None when unavailable.
+
+    Returns the same shape as the standalone engine so every consumer
+    (capabilities census, findings, compose, audit, report) is unchanged.
+    """
+    res = _malcat_mcp_call("analyse_file", {"path": sample}, timeout=timeout)
+    if not res:
+        return None
+    payload = _malcat_payload(res)
+    if not isinstance(payload, dict):
+        return None
+    aid = payload.get("analysis_id")
+    if aid is None:
+        return None
+    res2 = _malcat_mcp_call("capa_list", {"analysis_id": aid}, timeout=timeout)
+    if not res2:
+        return None
+    matches = _malcat_payload(res2)
+    # Malcat returns the match list as structuredContent["result"] (and the
+    # same list as a JSON text blob); a bare list is accepted too.
+    if isinstance(matches, dict) and isinstance(matches.get("result"), list):
+        matches = matches["result"]
+    if not isinstance(matches, list):
+        return None
+    caps = []
+    for m in matches:
+        if not isinstance(m, dict):
+            continue
+        caps.append({
+            "name": m.get("id") or m.get("name") or "",
+            "mastrust": None,
+            "attack": _malcat_attack(m.get("attack")),
+            "count": int(m.get("num_matches") or 0),
+            "namespace": m.get("namespace"),
+            "mbc": m.get("mbc") or [],
+        })
+    return {"ok": True, "tool": "capa", "capabilities": caps,
+            "total": len(caps), "engine": "malcat-capa"}
+
+
 # Tool locations drift between FlareVM releases (2026 moved yara-x/upx/ilspycmd
 # and ships Ghidra under ProgramData) - resolve with fallbacks + PATH shims.
 CAPA_EXE = _first(os.environ.get("WINRE_CAPA"), r"C:\Tools\capa\capa.exe") or _which("capa.exe")
@@ -101,8 +212,16 @@ def _skipped(tool: str, detail: str = "") -> dict:
 
 
 def capa(sample: str, timeout: int = 900) -> dict:
-    """capa — standalone exe preferred (embeds function-ID sigs); pip capa
-    needs a site-packages\\sigs dir that doesn't ship separately."""
+    """capa - Malcat's native engine FIRST (fast), standalone exe as fallback.
+
+    The standalone engine is the free path and stays authoritative when
+    Malcat is absent; it is simply far slower (774 s cold on a 2 MB PE vs
+    ~2 s for Malcat's engine on the FlareVM, 2026-10-22). RevAI selects the
+    same engine family via CADRE_CAPA_ENGINE.
+    """
+    fast = _malcat_capa(sample)
+    if fast is not None:
+        return fast
     exe = CAPA_EXE
     rules = Path(CAPA_RULES)
     if not any(rules.rglob("*.yml")):
@@ -136,7 +255,8 @@ def capa(sample: str, timeout: int = 900) -> dict:
                            "attack": attacks,
                            "count": len(rule.get("matches") or {})})
     return {"ok": True, "tool": "capa",
-            "capabilities": rules_hits, "total": len(rules_hits)}
+            "capabilities": rules_hits, "total": len(rules_hits),
+            "engine": "capa"}
 
 
 def floss(sample: str, timeout: int = 900) -> dict:

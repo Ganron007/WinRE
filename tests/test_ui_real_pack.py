@@ -104,9 +104,20 @@ def test_the_pack_page_renders_for_every_real_pack(client):
 @requires_pack
 def test_the_pack_page_shows_the_evidence_not_an_empty_shell(client):
     """A page that renders 200 while showing nothing is the UI version of a
-    green run with no evidence."""
+    green run with no evidence.
+
+    The probes follow the pack's own modes: a pack with a dynamic run must
+    show the detonation artifacts, a static-only pack has none by definition
+    and must show ITS evidence instead (the technical report, the capa
+    capability set, the verdict).  Probing a static pack for Procmon/Frida
+    asserted the presence of evidence the run never produced.
+    """
     body = client.get(f"/packs/{NEWEST['sha']}").get_data(as_text=True)
-    for probe in ("Procmon", "Frida", "procmon.csv"):
+    if "dynamic" in NEWEST["modes"]:
+        probes = ("Procmon", "Frida", "procmon.csv")
+    else:
+        probes = ("REPORT-TECHNICAL", "capa", "verdict")
+    for probe in probes:
         assert probe in body, f"the pack page does not show {probe!r}"
 
 
