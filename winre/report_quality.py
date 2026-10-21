@@ -303,7 +303,12 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
         for path, contents in ((request_path, request_text),
                                (response_path, response_text)):
             temporary_path = path.with_name(path.name + ".tmp")
-            temporary_path.write_text(contents, encoding="utf-8")
+            # newline="" keeps the bytes EXACTLY as hashed below. Without it
+            # write_text translates "\n" to "\r\n" on Windows, the file on
+            # disk no longer matches request_sha256/response_sha256, and the
+            # audit's call-record check refuses the run - so the claim review
+            # could never be green on the FlareVM.
+            temporary_path.write_text(contents, encoding="utf-8", newline="")
             temporary_path.replace(path)
         return {
             "request_path": str(request_path.relative_to(root)).replace("\\", "/"),

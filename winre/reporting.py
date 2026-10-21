@@ -43,6 +43,12 @@ EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 DOMAIN_RE = re.compile(r"\b(?:[A-Za-z0-9-]{1,63}\.){1,}(?:com|net|org|io|ru|cn|xyz|top|info|biz|su|cc|pw|me|tk|online|site|club|link)\b",
                        re.IGNORECASE)
 
+# The claim review shows the reviewer one evidence excerpt per locator and
+# REJECTS a truncated one (report_quality caps an excerpt at 6,000 chars).
+# A locator that points at a whole array is therefore never verifiable, so
+# the builder refuses to publish one.
+REVIEW_EXCERPT_LIMIT = 6000
+
 
 def _load(path: Path):
     try:
@@ -288,13 +294,26 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     selected_level = composition.get("level") or verdict.get("verdict")
     selected_confidence = (composition.get("confidence")
                            or verdict.get("confidence"))
-    selected_source = ("mode-composite" if composition.get("level")
-                       else src)
+    # The selected verdict comes from ONE mode's composite, and composite.json
+    # names that mode in $.selection. The report must name the same mode: a
+    # source label that appears in no evidence makes the claim unverifiable
+    # (or contradicted) by the claim reviewer.
+    selection = composition.get("selection") or {}
+    selected_modes = [name for name, rec in selection.items()
+                      if isinstance(rec, dict) and rec.get("selected")]
+    selected_source = (selected_modes[0] if selected_modes
+                       else ("mode-composite" if composition.get("level")
+                             else src))
     raw = pack_root / "deep" / "01-tools-raw.json"
 
     L: list[str] = []
     locator_ids: dict[str, str] = {}
     claim_rows: list[dict] = []
+    # A locator whose evidence excerpt exceeds the review limit is rejected by
+    # the claim reviewer, so the claim can never be supported. The builder
+    # records every over-broad locator it refused so the report states it
+    # instead of shipping a claim the reviewer cannot verify.
+    over_broad_refs: list[str] = []
     active_refs: tuple[str, ...] = ()
     reference_cache: dict[str, bool] = {}
     evidence_json_cache: dict[Path, Any] = {}
@@ -324,6 +343,41 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
             return bool(resolve_value(decoded, pointer))
         except ValueError:
             return False
+
+    def _excerpt_too_large(reference: str) -> bool:
+        """True when the evidence a locator points at cannot be shown whole.
+
+        report_quality caps an evidence excerpt at 6,000 characters and
+        REJECTS a truncated excerpt ("partial excerpt support a claim"), so
+        a locator that points at a whole array makes its claim
+        unverifiable whatever the reviewer answers. Builders must narrow
+        broad locators; this measures the excerpt so a broad one is never
+        published. Unmeasurable refs (JSONL selectors) are not over-broad.
+        """
+        rel, sep, pointer = reference.partition("#")
+        if not sep or not rel or not pointer:
+            return False
+        path = (pack_root / rel).resolve()
+        if not path.is_file():
+            return False
+        if path not in evidence_json_cache:
+            try:
+                evidence_json_cache[path] = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                evidence_json_cache[path] = None
+        decoded = evidence_json_cache.get(path)
+        if decoded is None:
+            return False
+        try:
+            from .report_quality import resolve_value
+            values = resolve_value(decoded, pointer)
+        except (ValueError, TypeError):
+            return False
+        if not values:
+            return False
+        size = len(json.dumps(values if len(values) > 1 else values[0],
+                              ensure_ascii=False, sort_keys=True, default=str))
+        return size > REVIEW_EXCERPT_LIMIT
 
     def _narrow_reference(reference: str, claim: str) -> list[str]:
         """Replace broad source objects with exact fields containing claim literals."""
@@ -407,6 +461,28 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
             pass
         return [reference]
 
+    def _coverage_refs(*, gaps_only: bool = False) -> list[str]:
+        """Per-name coverage locators.
+
+        The coverage map is ~6.3 KB - one claim short of the review limit -
+        and the reviewer rejects a truncated excerpt, so the map is cited
+        name by name (each entry is ~220 chars).
+        """
+        inventory = _load(pack_root / "artifact-manifest.json") or {}
+        coverage = inventory.get("coverage") or {}
+        refs: list[str] = []
+        for name, row in coverage.items():
+            if not isinstance(row, dict):
+                continue
+            if gaps_only and not (row.get("requested")
+                                  and row.get("status") != "complete"):
+                continue
+            refs.extend([
+                f"artifact-manifest.json#$.coverage.{name}.requested",
+                f"artifact-manifest.json#$.coverage.{name}.status",
+            ])
+        return refs
+
     def set_evidence(*refs: str) -> None:
         nonlocal active_refs
         accepted = []
@@ -414,10 +490,23 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                                  if str(ref).strip()):
             if ref not in reference_cache:
                 reference_cache[ref] = _reference_exists(ref)
-            if reference_cache[ref]:
-                accepted.append(ref)
-            elif ref not in unresolved_requested_refs:
-                unresolved_requested_refs.append(ref)
+            if not reference_cache[ref]:
+                if ref not in unresolved_requested_refs:
+                    unresolved_requested_refs.append(ref)
+                continue
+            # A locator the reviewer cannot see is worse than no locator: the
+            # claim review REJECTS a truncated excerpt, so an over-broad
+            # reference makes the claim unverifiable no matter what the
+            # reviewer answers, and the audit gate then refuses the run.
+            # (First live static acceptance run, s02 2026-10-21: 16 of 79
+            # claims unverifiable for exactly this reason.) Keep only refs
+            # whose evidence excerpt fits the review limit; refs this builder
+            # cannot measure (JSONL selectors) are kept as they are.
+            if _excerpt_too_large(ref):
+                if ref not in over_broad_refs:
+                    over_broad_refs.append(ref)
+                continue
+            accepted.append(ref)
         active_refs = tuple(accepted)
 
     def raw_frida_refs(*, event_refs: list | tuple | None = None,
@@ -484,10 +573,12 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
 
     A("## 1. Verdict")
     A("")
-    set_evidence("composite.json#$.level", "composite.json#$.confidence")
+    set_evidence("composite.json#$.level", "composite.json#$.confidence",
+                 "composite.json#$.sources", "composite.json#$.selection")
     A(f"- Pipeline-selected composite verdict: **{str(selected_level or 'unknown').upper()}** "
       f"(confidence: {selected_confidence or 'n/a'}) — source `{selected_source}`.")
     if composition.get("deciding_mode"):
+        set_evidence("composite.json#$.deciding_mode")
         A(f"- Deciding mode: `{composition['deciding_mode']}`")
     if composition.get("basis"):
         basis_refs = ["composite.json#$.basis"]
@@ -526,7 +617,7 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     gh = ev.get("ghidra") or {}
     if gh:
         set_evidence("quick/quick.json#$.evidence.ghidra",
-                     "deep/deep.json#$.agent.history[*].result")
+                     *(history_refs_by_tool.get("ghidra_query") or []))
         A(f"- Ghidra: {gh.get('func_rows', 0)} functions")
     else:
         set_evidence("quick/quick.json#$.tool_failures")
@@ -534,7 +625,7 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     ida = ev.get("ida") or {}
     if ida.get("func_count") is not None:
         set_evidence("quick/quick.json#$.evidence.ida",
-                     "deep/deep.json#$.agent.history[*].result")
+                     *(history_refs_by_tool.get("ida_query") or []))
         A(f"- IDA: {ida.get('func_count')} functions (.i64 created at quick stage)")
     sink_scan = ev.get("sink_sites") or {}
     if isinstance(sink_scan, dict):
@@ -559,19 +650,26 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     A("")
     capa = ev.get("capa") or {}
     A("### capa (Mandiant rules)")
-    set_evidence("quick/quick.json#$.evidence.capa.capabilities",
-                 "deep/deep.json#$.agent.history[*].result")
+    # The capability list is ~8.7 KB: a locator for the whole list can never
+    # be shown to the reviewer, so cite each capability on its own.
+    capa_history_refs = history_refs_by_tool.get("capa") or []
+    capa_base = (capa_history_refs[-1] if capa_history_refs
+                 else "quick/quick.json#$.evidence.capa")
     if capa.get("ok"):
-        for c in (capa.get("capabilities") or [])[:15]:
+        for index, c in enumerate((capa.get("capabilities") or [])[:15]):
             atk = ", ".join(c.get("attack") or [])
+            set_evidence(f"{capa_base}.capabilities[{index}].name",
+                         f"{capa_base}.capabilities[{index}].attack",
+                         f"{capa_base}.capabilities[{index}].count")
             A(f"- {c.get('name')}" + (f" [{atk}]" if atk else ""))
     else:
+        set_evidence(f"{capa_base}.skipped", f"{capa_base}.error")
         A(f"- skipped/error: {capa.get('skipped') or capa.get('error')}")
     A("")
     floss = ev.get("floss") or {}
     A("### floss (deobfuscated strings)")
     set_evidence("quick/quick.json#$.evidence.floss.decoded_strings",
-                 "deep/deep.json#$.agent.history[*].result")
+                 *(history_refs_by_tool.get("floss") or []))
     ds = floss.get("decoded_strings") or []
     if ds:
         for s in ds[:15]:
@@ -581,8 +679,12 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     A("")
     mal = ev.get("malcat") or {}
     A("### Malcat")
-    set_evidence("quick/quick.json#$.evidence.malcat",
-                 "deep/deep.json#$.agent.history[*].result")
+    # The malcat blob is ~5.8 KB - one claim short of the review limit.
+    # Cite its parts instead of the whole object.
+    set_evidence("quick/quick.json#$.evidence.malcat.file",
+                 "quick/quick.json#$.evidence.malcat.anomalies",
+                 "quick/quick.json#$.evidence.malcat.yara_hits",
+                 "quick/quick.json#$.evidence.malcat.strings")
     if mal.get("error") or mal.get("skipped"):
         A(f"- skipped/error: {mal.get('error') or mal.get('skipped')}")
     else:
@@ -664,9 +766,15 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     A(f"- Deep-stage assessment ({str(verdict.get('verdict', 'unknown')).upper()}; "
       f"confidence={verdict.get('confidence', 'n/a')}).")
     if verdict.get("summary"):
+        # The whole quick evidence object is ~25 KB and the whole deep tool
+        # history ~41 KB: neither can be shown to the reviewer. Cite the
+        # summary's own field plus the bounded tool evidence it rests on.
         set_evidence("deep/deep.json#$.agent.verdict.summary",
-                     "deep/deep.json#$.agent.history[*].result",
-                     "quick/quick.json#$.evidence")
+                     "quick/quick.json#$.evidence.capa.total",
+                     "quick/quick.json#$.evidence.pe.imports",
+                     "quick/quick.json#$.evidence.threat_intel",
+                     "quick/quick.json#$.evidence.yarascan",
+                     "quick/quick.json#$.evidence.vt")
         A(f"  - Summary: {verdict['summary']}")
     A("")
 
@@ -695,10 +803,10 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     crypto_ids = crypto.get("crypto_identified") or []
     if crypto_ids:
         set_evidence("quick/quick.json#$.evidence.crypto_constants",
-                     "deep/deep.json#$.agent.history[*].result")
+                     *(history_refs_by_tool.get("crypto_constants") or []))
         A(f"- **Crypto identified (constants/shape):** "
           + ", ".join(f"`{c}`" for c in crypto_ids[:8])
-          + " — config/key recovery leads (signature_match may resolve keys).")
+          + " - found in executable sections; config/keys may be recoverable.")
         A("")
     dg = ev.get("decrypt_gate") or {}
     if dg.get("status") == "gate":
@@ -726,6 +834,10 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
           + " — these matches indicate static capability, not proof of runtime checks.")
     domains = _bc.get("domains") or []
     if domains:
+        # The domains are in the IOC extractor's result; the string excerpts
+        # do not necessarily contain the domain that is quoted.
+        set_evidence(*(history_refs_by_tool.get("ioc_extract") or []),
+                     "quick/quick.json#$.evidence.strings")
         A("- **Domains present in static strings:** "
           + ", ".join(f"`{domain}`" for domain in domains[:6])
           + " — this does not establish a runtime connection or C2.")
@@ -756,14 +868,16 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
       f"empty_rule={yara_rep.get('empty_rule')}.")
     cur = (yara_rep.get("curation") or {})
     if cur.get("warnings"):
+        set_evidence("yara/rule_report.json#$.curation.warnings",
+                     "yara/rule_report.json#$.curation.short_strings",
+                     "yara/rule_report.json#$.curation.string_count")
         A(f"- Curation warnings: {'; '.join(cur['warnings'])}")
     A("")
 
     A("## 8. Execution evidence")
     A("")
 
-    set_evidence("artifact-manifest.json#$.artifact_count",
-                 "artifact-manifest.json#$.coverage")
+    set_evidence("artifact-manifest.json#$.artifact_count")
     if pack_mode == "dbg":
         A("### Debugger-assisted observation")
         A("")
@@ -817,7 +931,7 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                   "does not invalidate a completed debugger observation.")
         for limitation in (finding_record.get("limitations") or [])[:5]:
             set_evidence("findings.json#$.limitations",
-                         "artifact-manifest.json#$.coverage")
+                         *_coverage_refs(gaps_only=True))
             A(f"- Limitation: {limitation}")
         A("")
 
@@ -830,11 +944,10 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                       if isinstance(row, dict) and row.get("requested")
                       and row.get("status") != "complete"]
     inventory_refs = ["artifact-manifest.json#$.artifact_count"]
-    for name, _row in requested_gaps:
-        inventory_refs.extend([
-            f"artifact-manifest.json#$.coverage.{name}.requested",
-            f"artifact-manifest.json#$.coverage.{name}.status",
-        ])
+    # The manifest records the gap count, so the statement is backed by one
+    # decisive locator instead of a pile of per-source entries the reviewer
+    # cannot take in.
+    inventory_refs.append("artifact-manifest.json#$.coverage_gaps")
     set_evidence(*inventory_refs)
     A(f"- Artifact inventory: {inventory.get('artifact_count', 0)} files; "
       f"coverage gaps={len(requested_gaps)}.")
@@ -862,9 +975,9 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
             capture_details.append(f"reason=`{capture['reason']}`")
         A("- Off-box network capture: " + "; ".join(capture_details) + ".")
     for name, row in requested_gaps[:8]:
-        set_evidence(f"artifact-manifest.json#$.coverage.{name}",
-                     "artifact-manifest.json#$.coverage")
-        A(f"  - `{name}`: {row.get('status')} — {row.get('reason')}")
+        set_evidence(f"artifact-manifest.json#$.coverage.{name}.requested",
+                     f"artifact-manifest.json#$.coverage.{name}.status")
+        A(f"  - `{name}`: {row.get('status')} - {row.get('reason')}")
 
     if has_dynamic:
         # W3 (RevAI review 2026-10-08): read the MODE ROOT.
@@ -1008,7 +1121,7 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
             lim = dvi.get("limitations") or []
             if lim:
                 set_evidence("findings.json#$.limitations",
-                             "artifact-manifest.json#$.coverage")
+                             *_coverage_refs(gaps_only=True))
                 A("  - **limitations:**")
                 for l in lim[:5]:
                     if l.startswith("No confirmed drops, C2 candidates, or injection chains"):
@@ -1019,10 +1132,10 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                             "findings.json#$.findings.injection",
                             "findings.json#$.findings.window",
                             "findings.json#$.findings.frida_coverage",
-                            "artifact-manifest.json#$.coverage")
+                            *_coverage_refs(gaps_only=True))
                     else:
                         set_evidence("findings.json#$.limitations",
-                                     "artifact-manifest.json#$.coverage")
+                                     *_coverage_refs(gaps_only=True))
                     A(f"    - {l}")
         ed = _load(pack_root / "dynamic" / "emu_diff.json") or {}
         if ed.get("ok"):
@@ -1050,13 +1163,21 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                   "(emulation coverage gap).")
     else:
         set_evidence("dynamic/STAGE.json#$.skipped",
-                     "execution_plan.json#$.execution_sites")
+                     "dynamic/STAGE.json#$.summary",
+                     "execution_plan.json#$.execution_sites",
+                     "execution_plan.json#$.gate_mode",
+                     "execution_plan.json#$.auto_restore",
+                     "execution_plan.json#$.budget_rationale")
         if pack_mode == "dbg":
-            A("- No dynamic detonation was observed in this debugger-assisted run. "
-              "Detonation is a separate, opt-in producer and its findings land here.")
+            A("- No dynamic detonation was observed in this debugger-assisted run: "
+              "the dynamic stage was skipped. The gate is `enforce` - one "
+              "execution per clean restore, and restoring the snapshot is an "
+              "operator action (WinRE never reverts the VM).")
         else:
-            A("- No dynamic detonation was observed in this run. Detonation is "
-              "opt-in, segregated, snapshot-gated, and runs as a separate producer.")
+            A("- No dynamic detonation was observed in this run: the dynamic "
+              "stage was skipped. The gate is `enforce` - one execution per "
+              "clean restore, and restoring the snapshot is an operator action "
+              "(WinRE never reverts the VM).")
         if dyn_stage.get("summary"):
             set_evidence("dynamic/STAGE.json#$.summary")
             A(f"- Dynamic stage: {dyn_stage['summary']}")
@@ -1070,10 +1191,19 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
         set_evidence("findings.json#$.correlation.status")
         A(f"- Status: `{corr.get('status')}`.")
         counts = corr.get("counts") or {}
-        set_evidence("findings.json#$.correlation.counts")
-        A("- Relationships: " + ", ".join(
-            f"{name}={counts.get(name, 0)}" for name in
-            ("confirmed", "predicted_not_observed", "observed_not_predicted", "unverifiable")))
+        if counts:
+            set_evidence("findings.json#$.correlation.counts",
+                         "findings.json#$.correlation.status")
+            A("- Relationships: " + ", ".join(
+                f"{name}={counts.get(name, 0)}" for name in
+                ("confirmed", "predicted_not_observed", "observed_not_predicted", "unverifiable")))
+        else:
+            # No counts recorded: the correlation itself did not run, and the
+            # status says so. A count no evidence states (and a status that
+            # means "not measured", not "measured zero") must not be printed.
+            set_evidence("findings.json#$.correlation.status")
+            A(f"- Relationships: not correlated - correlation status "
+              f"`{corr.get('status')}`.")
         hypothesis_rows = [h for h in corr.get("hypotheses") or []
                            if isinstance(h, dict)]
         observation_rows = [o for o in corr.get("observations") or []
@@ -1178,6 +1308,7 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
         "claims": [{"text": row["text"], "locators": row["locators"]}
                    for row in claim_rows],
         "unresolved_requested_refs": unresolved_requested_refs,
+        "over_broad_refs": over_broad_refs,
     }
     (pack_root / "report" / "evidence-locators.json").write_text(
         json.dumps(locator_manifest, indent=2, ensure_ascii=False) + "\n",
@@ -1186,7 +1317,8 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     claim_review = review_report(pack_root, report_path=out,
                                  enabled=review_claims)
     return {"ok": True, "path": str(out), "sections": 9,
-            "length": len(md), "claim_review": claim_review}
+            "length": len(md), "claim_review": claim_review,
+            "over_broad_refs": list(over_broad_refs)}
 
 
 def _behavior_context(ev: dict) -> dict:

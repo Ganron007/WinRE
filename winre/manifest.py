@@ -317,6 +317,13 @@ def build_manifest(stage_dir: Path, *, run_id: str, sha256: str = "",
     coverage = _coverage_v2(seen, requested, meta, stage_dir=stage_dir,
                             job_meta=job_meta, validations=validations,
                             run_id=run_id)
+    # The report states how many requested sources did not complete. Record
+    # that count so the statement is backed by evidence instead of asserted
+    # (a claim the reviewer cannot verify is refused by the audit gate).
+    coverage_gaps = sum(1 for rec in coverage.values()
+                        if isinstance(rec, dict)
+                        and rec.get("requested")
+                        and rec.get("status") != "complete")
     return {
         "schema": SCHEMA,
         "run_id": run_id,
@@ -327,6 +334,7 @@ def build_manifest(stage_dir: Path, *, run_id: str, sha256: str = "",
         "artifact_count": len(artifacts),
         "sources": sorted({a["source"] for a in artifacts}),
         "coverage": coverage,
+        "coverage_gaps": coverage_gaps,
         "collector_status": {s: {k: v for k, v in rec.items()
                                  if k not in ("present", "validation")}
                              for s, rec in coverage.items()},
