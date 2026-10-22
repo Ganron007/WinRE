@@ -787,16 +787,13 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
             for index, cap in enumerate(capa_ev.get("capabilities") or [])
             if cap.get("name")
             and str(cap["name"]).casefold() in summary_text.casefold()]
-        # The agent records the facts its summary rests on. Cite the tool
-        # results those facts name, so the reviewer can check the prose
-        # against the same fields the agent used. Over-broad results are
-        # pruned by set_evidence (the review limit), so passing them is safe.
-        key_text = " ".join(str(item) for item in (verdict.get("key_evidence") or []))
-        key_refs: list[str] = []
-        for tool_name, tool_refs in history_refs_by_tool.items():
-            if (tool_name.casefold() in key_text.casefold()
-                    or tool_name.replace("_", " ").casefold() in key_text.casefold()):
-                key_refs.extend(tool_refs)
+        # The agent's summary is an inference over ITS OWN tool results. The
+        # reviewer can only judge it against the evidence it can see, so
+        # cite every tool result the agent produced (set_evidence prunes the
+        # ones too large to show) plus the quick-stage evidence it leans on.
+        agent_refs: list[str] = []
+        for tool_refs in history_refs_by_tool.values():
+            agent_refs.extend(tool_refs)
         set_evidence("deep/deep.json#$.agent.verdict.summary",
                      "quick/quick.json#$.evidence.capa.total",
                      "quick/quick.json#$.evidence.pe.imports",
@@ -804,7 +801,7 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                      "quick/quick.json#$.evidence.yarascan",
                      "quick/quick.json#$.evidence.vt",
                      *named_caps[:20],
-                     *key_refs[:24])
+                     *agent_refs[:30])
         A(f"  - Summary: {verdict['summary']}")
     A("")
 
