@@ -854,6 +854,14 @@ def write_pack_manifests(pack_root: Path, *, run_id: str, sha256: str,
     plan = _load_json(pack_root / "execution_plan.json")
     root_requests = {**static_sources, **dynamic_sources,
                      "debug_monitor": debug_monitor_source}
+    # The audit is the run's OWN quality gate, written AFTER the report and
+    # this manifest. At manifest time the file on disk is either absent or a
+    # previous run's, so its run-identity check can never pass. It is not a
+    # collector input: without this it defaulted to "requested" merely because
+    # a stale audit.json was present, which manufactured a false coverage gap
+    # ("audit.json belongs to another run") that the report then stated as a
+    # claim the reviewer could not support.
+    root_requests["audit"] = {"requested": False, "required": False}
     root_manifest = build_manifest(
         pack_root, run_id=run_id, sha256=sha256, mode=mode,
         requested=root_requests,
