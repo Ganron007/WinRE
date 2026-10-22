@@ -1431,6 +1431,29 @@ def run_langgraph_deep_dive(sample_name: str, sha: str, *,
     state["seen"].add(json.dumps(("capa", {}), sort_keys=True,
                                  default=str))
 
+    # Ghidra is in the required capability set (see the census), so it must
+    # be ATTEMPTED before the planner as well: an agentic run whose plan
+    # happened not to include the Ghidra query produced a verdict without
+    # the function census and failed the quality gate afterwards. The
+    # planner may still use Ghidra for more; this guarantees the required
+    # capability is exercised and its outcome recorded either way.
+    ghidra_preflight_args = {
+        "sql": "SELECT name, addr AS address, size FROM funcs ORDER BY size DESC LIMIT 20",
+        "max_rows": 20,
+    }
+    try:
+        ghidra_preflight = registry.call("ghidra_query", ghidra_preflight_args)
+    except Exception as e:
+        ghidra_preflight = {"status": "failed", "reason_code": "tool_exception",
+                            "error": f"ghidra_query failed: {str(e)[:180]}"}
+    history.append({"step": len(history) + 1, "tool": "ghidra_query",
+                    "args": ghidra_preflight_args, "result": ghidra_preflight,
+                    "reason": "mandatory deterministic Ghidra census preflight"})
+    findings["ghidra_query_preflight"] = ghidra_preflight
+    state["calls"] += 1
+    state["seen"].add(json.dumps(("ghidra_query", ghidra_preflight_args),
+                                 sort_keys=True, default=str))
+
     def _debug_run_record() -> dict:
         calls = [h for h in history if h.get("tool") in {
             "x64dbg_oep", "x64dbg_wpm_dump", "x64dbg_crypt_dump",

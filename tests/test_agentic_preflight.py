@@ -20,11 +20,16 @@ def test_langgraph_mode_runs_required_static_preflights_before_planning(monkeypa
     result = agentic.run_langgraph_deep_dive(
         "sample.exe", "a" * 64, dry=True, mode="remote")
 
-    assert calls == [("decrypt_gate", {}), ("pe_parse", {}), ("capa", {})]
+    assert calls == [("decrypt_gate", {}), ("pe_parse", {}), ("capa", {}),
+                     ("ghidra_query", {
+                         "sql": "SELECT name, addr AS address, size FROM funcs "
+                                "ORDER BY size DESC LIMIT 20",
+                         "max_rows": 20})]
     failures = result["capability_census"]["required_failures"]
     assert not any(failure.startswith("decrypt_gate:") for failure in failures)
     assert not any(failure.startswith("pe_parse:") for failure in failures)
     assert not any(failure.startswith("capa:") for failure in failures)
+    assert not any(failure.startswith("ghidra_query:") for failure in failures)
     gate = next(row for row in result["capability_census"]["summary"]
                 if row["tool"] == "decrypt_gate")
     assert gate["status"] == "completed"
@@ -49,6 +54,16 @@ def test_langgraph_mode_runs_required_static_preflights_before_planning(monkeypa
     assert len(capa_preflight) == 1
     assert capa_preflight[0]["reason"] == (
         "mandatory deterministic capa evidence preflight")
+    # Ghidra is a required capability too: it must be attempted whatever the
+    # planner decides, or the run fails the quality gate after the fact.
+    ghidra = next(row for row in result["capability_census"]["summary"]
+                  if row["tool"] == "ghidra_query")
+    assert ghidra["status"] == "completed"
+    ghidra_preflight = [event for event in result["history"]
+                        if event.get("tool") == "ghidra_query"]
+    assert len(ghidra_preflight) == 1
+    assert ghidra_preflight[0]["reason"] == (
+        "mandatory deterministic Ghidra census preflight")
 
 
 def test_agentic_dbg_runs_a_deterministic_oep_probe_when_no_packer_signal(monkeypatch):
@@ -73,6 +88,8 @@ def test_agentic_dbg_runs_a_deterministic_oep_probe_when_no_packer_signal(monkey
                 return {"ok": True, "format": "pe"}
             if name == "capa":
                 return {"ok": True, "capabilities": []}
+            if name == "ghidra_query":
+                return {"ok": True, "rows": []}
             if name == "x64dbg_oep":
                 return {"ok": True, "oep": "0x401000"}
             if name == "x64dbg_run_window":
@@ -88,7 +105,7 @@ def test_agentic_dbg_runs_a_deterministic_oep_probe_when_no_packer_signal(monkey
         "sample.exe", "a" * 64, dry=True, mode="remote", dynamic=True)
 
     assert [name for name, _ in calls] == [
-        "decrypt_gate", "pe_parse", "capa", "x64dbg_oep",
+        "decrypt_gate", "pe_parse", "capa", "ghidra_query", "x64dbg_oep",
         "x64dbg_run_window",
         "windbg_analyze_dump"]
     probe = next(row for row in result["history"]
