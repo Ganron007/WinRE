@@ -774,12 +774,37 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
         # The whole quick evidence object is ~25 KB and the whole deep tool
         # history ~41 KB: neither can be shown to the reviewer. Cite the
         # summary's own field plus the bounded tool evidence it rests on.
+        summary_text = str(verdict["summary"])
+        # The summary usually NAMES capabilities ("the crypto capability hits
+        # (RC4/SHA/Salsa20)"). A count cannot show that the named ones are
+        # there, so cite each capability the summary actually names.
+        capa_ev = ev.get("capa") or {}
+        capa_history = history_refs_by_tool.get("capa") or []
+        capa_source = (capa_history[-1] if capa_history
+                       else "quick/quick.json#$.evidence.capa")
+        named_caps = [
+            f"{capa_source}.capabilities[{index}].name"
+            for index, cap in enumerate(capa_ev.get("capabilities") or [])
+            if cap.get("name")
+            and str(cap["name"]).casefold() in summary_text.casefold()]
+        # The agent records the facts its summary rests on. Cite the tool
+        # results those facts name, so the reviewer can check the prose
+        # against the same fields the agent used. Over-broad results are
+        # pruned by set_evidence (the review limit), so passing them is safe.
+        key_text = " ".join(str(item) for item in (verdict.get("key_evidence") or []))
+        key_refs: list[str] = []
+        for tool_name, tool_refs in history_refs_by_tool.items():
+            if (tool_name.casefold() in key_text.casefold()
+                    or tool_name.replace("_", " ").casefold() in key_text.casefold()):
+                key_refs.extend(tool_refs)
         set_evidence("deep/deep.json#$.agent.verdict.summary",
                      "quick/quick.json#$.evidence.capa.total",
                      "quick/quick.json#$.evidence.pe.imports",
                      "quick/quick.json#$.evidence.threat_intel",
                      "quick/quick.json#$.evidence.yarascan",
-                     "quick/quick.json#$.evidence.vt")
+                     "quick/quick.json#$.evidence.vt",
+                     *named_caps[:20],
+                     *key_refs[:24])
         A(f"  - Summary: {verdict['summary']}")
     A("")
 

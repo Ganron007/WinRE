@@ -591,11 +591,12 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
                 expected = {item["id"] for item in batch}
                 if len(by_id) != len(reviews) or set(by_id) != expected:
                     raise ValueError("review response IDs are missing, duplicated, or unexpected")
-                for item in batch:
-                    supplied = {ev["locator"] for ev in item["evidence"]}
-                    selected = by_id[item["id"]]["locators"]
-                    if any(locator not in supplied for locator in selected):
-                        raise ValueError("review selected a locator not supplied for that claim")
+                # A claim that cites a locator it was NOT offered is that
+                # claim's problem, not the batch's: the per-claim path below
+                # already records it as invalid-review (which still fails the
+                # audit gate for that claim). Discarding the whole batch - and
+                # with it 11 sound verdicts and every later batch - turned one
+                # stray locator id into a lost review.
             except Exception as exc:
                 elapsed = round(time.monotonic() - started, 3)
                 response_text = response_meta.get("content") or ""
