@@ -117,7 +117,11 @@ def test_debug_report_shows_selected_verdict_observation_and_unpack_gap(tmp_path
 
     md = _report(pack_root)
     assert "Phase:** static+debugger" in md
-    assert "**SUSPICIOUS** (confidence: medium) — source `mode-composite`" in md
+    # the source label must name the mode that DECIDED the composite
+    # (composite.json$.deciding_mode) - a label that appears in no evidence
+    # makes the claim unverifiable, and one that names a different mode
+    # contradicts it.
+    assert "**SUSPICIOUS** (confidence: medium) — source `static`" in md
     assert "Deep-stage assessment (MALICIOUS" in md
     assert "ETW process monitor" in md and "starts=382; stops=384" in md
     assert "process starts and stops only" in md

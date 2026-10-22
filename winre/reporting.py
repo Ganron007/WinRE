@@ -288,22 +288,27 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
         "static+dynamic" if dynamic_complete else
         "static+dynamic-incomplete" if dynamic_requested or dynamic_observed else
         "static+debugger" if pack_mode == "dbg" else
-        "static"
+        # otherwise the phase IS the pack's mode - the evidence (META.json
+        # $.mode) states it verbatim. A composed label ("static+agentic")
+        # is a derivation the reviewer cannot confirm from the excerpts.
+        pack_mode
     )
     composition = _load(pack_root / "composite.json") or {}
     selected_level = composition.get("level") or verdict.get("verdict")
     selected_confidence = (composition.get("confidence")
                            or verdict.get("confidence"))
-    # The selected verdict comes from ONE mode's composite, and composite.json
-    # names that mode in $.selection. The report must name the same mode: a
-    # source label that appears in no evidence makes the claim unverifiable
-    # (or contradicted) by the claim reviewer.
+    # The selected verdict comes from ONE mode's composite. Several modes can
+    # be present in one pack (a static run corroborates an agentic one), so
+    # the source label must be the mode that DECIDED the composite, not the
+    # first mode in the selection map: a label naming a different mode
+    # contradicts the evidence and the reviewer rejects the claim.
     selection = composition.get("selection") or {}
     selected_modes = [name for name, rec in selection.items()
                       if isinstance(rec, dict) and rec.get("selected")]
-    selected_source = (selected_modes[0] if selected_modes
-                       else ("mode-composite" if composition.get("level")
-                             else src))
+    selected_source = (composition.get("deciding_mode")
+                       or (selected_modes[0] if selected_modes else None)
+                       or ("mode-composite" if composition.get("level")
+                           else src))
     raw = pack_root / "deep" / "01-tools-raw.json"
 
     L: list[str] = []
