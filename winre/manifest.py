@@ -44,7 +44,10 @@ DERIVED = "derived"        # produced by the control plane from the above
 # terminal record and is classified as an in-guest run-metadata artifact.
 _WRAPPERS = ("STAGE.json", "SKIP.json", "manifest.json",
              "artifact-manifest.json", "META.json",
-             "SCHEMA.md", "findings.json")
+             "SCHEMA.md", "findings.json",
+             # helper script the in-guest dynamic job writes beside its output
+             # (flare_dynamic_job.ps1): bookkeeping, not evidence
+             "_delayed_procdump.ps1")
 
 # rel-path (posix, lower) -> (source, domain, kind)
 # Derived from an inventory of every path that actually appears in the packs on

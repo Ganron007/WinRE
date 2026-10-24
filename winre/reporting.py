@@ -232,6 +232,29 @@ def _cite(raw_path: str, note: str) -> str:
     return f"{note} — raw: `{raw_path}`"
 
 
+def _raw_frida_refs(*, event_refs: list | tuple | None = None,
+                    apis: list | tuple | None = None) -> list[str]:
+    """Locators into the raw Frida trace for observed events / APIs.
+
+    An @api selector only resolves for an actual API name. The dynamic verdict
+    basis mixes API names with non-API labels ("gate:drop:CreateFileW",
+    "unpack:oep:0x8b2003", "packed-section:overlay"); building
+    "@api=gate:drop:CreateFileW" produced a locator that resolves to no rows,
+    which the audit refuses (2026-10-24 dynamic run, claim C0053).
+    """
+    refs = []
+    for event_ref in event_refs or []:
+        value = str(event_ref).strip()
+        if value and len(value) <= 256 and "#" not in value:
+            refs.append(f"dynamic/frida_trace.jsonl#@invocation_id={value}")
+    for api in apis or []:
+        value = str(api).strip()
+        if (value and len(value) <= 128 and "#" not in value
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value)):
+            refs.append(f"dynamic/frida_trace.jsonl#@api={value}")
+    return list(dict.fromkeys(refs))
+
+
 def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     """Build and claim-review REPORT-TECHNICAL-v3.md from this pack's evidence."""
     sha = sha_of(pack_root)
@@ -514,18 +537,7 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
             accepted.append(ref)
         active_refs = tuple(accepted)
 
-    def raw_frida_refs(*, event_refs: list | tuple | None = None,
-                       apis: list | tuple | None = None) -> list[str]:
-        refs = []
-        for event_ref in event_refs or []:
-            value = str(event_ref).strip()
-            if value and len(value) <= 256 and "#" not in value:
-                refs.append(f"dynamic/frida_trace.jsonl#@invocation_id={value}")
-        for api in apis or []:
-            value = str(api).strip()
-            if value and len(value) <= 256 and "#" not in value:
-                refs.append(f"dynamic/frida_trace.jsonl#@api={value}")
-        return list(dict.fromkeys(refs))
+    raw_frida_refs = _raw_frida_refs
 
     def A(line: str) -> None:
         """Append report prose with stable locators for its source fields."""
@@ -733,8 +745,6 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
         A("")
     sig = ev.get("signature_match")
     A("### Signature DB match (agent-invoked)")
-    set_evidence("deep/deep.json#$.agent.history",
-                 "deep/deep.json#$.agent.history[*].result")
     signature_refs = history_refs_by_tool.get("signature_match") or []
     if sig:
         set_evidence(*(signature_refs or ["deep/deep.json#$.agent.history"]))
@@ -744,7 +754,10 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
         A("- Signature-match invocation was recorded but returned no result object.")
     elif isinstance(deep_history, list) and deep_history:
         set_evidence("deep/deep.json#$.agent.history[*].tool")
-        A("- No signature-match invocation appears in this run's recorded agent history.")
+        # Name the TOOL, not the concept: "signature-match" reads like YARA
+        # scanning, which this run does contain, and the reviewer contradicted
+        # the claim for that reason (2026-10-24 dynamic run).
+        A("- The agent did not invoke the `signature_match` tool in this run.")
     A("")
     imp_sig = ev.get("pe_import_signals") or {}
     A("### PE import signals")
@@ -1130,8 +1143,15 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                   f"truncated={net.get('frida_endpoints_truncated')})")
             fc = fd.get("frida_coverage") or {}
             if fc:
-                set_evidence("findings.json#$.findings.frida_coverage",
-                             "dynamic/frida_summary.json#$.hook_coverage")
+                # The whole record is >6 KB (installed_exports alone is 5.6 KB),
+                # so citing it yields no usable excerpt and the claim comes back
+                # unverifiable. Cite the fields the sentence actually reports.
+                set_evidence(
+                    "findings.json#$.findings.frida_coverage.status",
+                    "findings.json#$.findings.frida_coverage.requested",
+                    "findings.json#$.findings.frida_coverage.installed",
+                    "findings.json#$.findings.frida_coverage.apis_fired",
+                )
                 A(f"  - Frida hook coverage: {len(fc.get('installed') or [])}/"
                   f"{len(fc.get('requested') or [])} requested exports installed; "
                   f"{len(fc.get('apis_fired') or [])} APIs observed; "

@@ -221,3 +221,24 @@ def test_the_module_imports_no_vm_only_tool():
     for bad in ("import procmon_post", "import windbg_post",
                 "from winre import orchestrator", "device.spawn"):
         assert bad not in src, f"{bad} would run on the VM, not the host"
+
+
+def test_a_findings_rebuild_inherits_the_pack_run_id(tmp_path):
+    """findings.json must never be rewritten with run_id=None.
+
+    run_id is the composite's mode-identity record and part of the report's
+    source digests. A rebuild that omits it silently deselects the mode and
+    makes the report review unverifiable against the evidence (2026-10-24: the
+    dbg pack's findings were re-derived without a run_id).
+    """
+    from winre import findings
+
+    pack_root = tmp_path / ("a" * 64) / "dbg"
+    pack_root.mkdir(parents=True)
+    (pack_root / "META.json").write_text(json.dumps({
+        "run_id": "d" * 32, "mode": "dbg", "pack_mode": "dbg",
+        "sha256": "a" * 64}), encoding="utf-8")
+    out = findings.build("dbg", pack_root, sha="a" * 64)   # no run_id passed
+    assert out.get("run_id") == "d" * 32, out.get("run_id")
+    written = json.loads((pack_root / "findings.json").read_text(encoding="utf-8"))
+    assert written.get("run_id") == "d" * 32

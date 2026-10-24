@@ -205,3 +205,143 @@ def test_the_model_summary_is_attributed_not_presented_as_a_finding(tmp_path):
            "not an independent finding):**" in markdown
     assert "\n  - Summary:" not in markdown, (
         "a bare 'Summary:' line presents a model judgment as a report finding")
+
+
+def _dynamic_pack(tmp_path):
+    """A minimal dynamic pack whose frida_coverage record is far larger than
+    the review limit if cited whole (installed_exports alone is ~5.6 KB)."""
+    pack_root = tmp_path / SHA / "dynamic"
+    for stage in ("deep", "dynamic", "report"):
+        (pack_root / stage).mkdir(parents=True, exist_ok=True)
+    (pack_root / "META.json").write_text(json.dumps({
+        "sha256": SHA, "mode": "dynamic", "pack_mode": "dynamic",
+        "run_id": "c" * 32, "status": "in_progress",
+    }), encoding="utf-8")
+    exports = [{"pid": 100 + i, "api": f"Api{i}", "module": "KERNEL32.DLL",
+                "address": f"0x{0x75000000 + i * 16:x}"} for i in range(120)]
+    (pack_root / "findings.json").write_text(json.dumps({
+        "schema": "winre-findings/v1", "mode": "dynamic", "sha256": SHA,
+        "ok": True, "run_id": "c" * 32,
+        "verdict": {"level": "unknown", "confidence": "low", "basis": ["gate:x"]},
+        "findings": {
+            "frida_coverage": {
+                "status": "reported",
+                "requested": ["CreateFileW", "WriteFile", "ReadFile"],
+                "installed": ["CreateFileW", "WriteFile"],
+                "apis_fired": ["CreateFileW", "WriteFile"],
+                "installed_exports": exports,
+            },
+        },
+    }), encoding="utf-8")
+    (pack_root / "dynamic" / "STAGE.json").write_text(json.dumps({
+        "stage": "dynamic", "ok": True, "ran": True,
+        "detonation_ran": True}), encoding="utf-8")
+    (pack_root / "dynamic" / "META.json").write_text(json.dumps({
+        "ok": True, "detonation_ran": True, "sample_pid": 1376}),
+        encoding="utf-8")
+    (pack_root / "deep" / "deep.json").write_text(json.dumps({
+        "agent": {"source": "llm_judge",
+                  "verdict": {"verdict": "benign", "confidence": "medium",
+                              "summary": "s"},
+                  "history": [{"tool": "capa", "result": {"ok": True}},
+                              {"tool": "yarascan", "result": {"ok": True}}]},
+    }), encoding="utf-8")
+    (pack_root / "composite.json").write_text(json.dumps({
+        "level": "unknown", "confidence": "low", "deciding_mode": "dynamic",
+        "basis": ["gate:x"],
+        "selection": {"dynamic": {"selected": True, "run_id": "c" * 32}}}),
+        encoding="utf-8")
+    return pack_root
+
+
+def test_dynamic_claims_cite_the_fields_they_report(tmp_path):
+    """Two dynamic claims were refused on the 2026-10-24 run:
+
+    * "No signature-match invocation appears..." was contradicted because
+      "signature-match" reads like YARA scanning (which DID run). The claim
+      must name the `signature_match` tool.
+    * the Frida coverage line cited the whole frida_coverage record (>6 KB,
+      installed_exports alone 5.6 KB), so it had no usable excerpt at all and
+      came back unverifiable. It must cite the fields it reports.
+    """
+    pack_root = _dynamic_pack(tmp_path)
+    reporting.build_report_v3(pack_root, review_claims=False)
+    markdown = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(
+        encoding="utf-8")
+    assert "did not invoke the `signature_match` tool" in markdown
+
+    manifest = json.loads(
+        (pack_root / "report" / "evidence-locators.json").read_text(encoding="utf-8"))
+    refs = {(meta or {}).get("reference")
+            for meta in (manifest.get("locators") or {}).values()}
+    for field in ("status", "requested", "installed", "apis_fired"):
+        assert f"findings.json#$.findings.frida_coverage.{field}" in refs, field
+    assert "findings.json#$.findings.frida_coverage" not in refs, (
+        "the whole coverage record cannot be shown to the reviewer")
+
+
+def test_a_truncated_review_response_is_retried_as_smaller_batches(
+        tmp_path, monkeypatch):
+    """One oversized model response must not discard the rest of the review.
+
+    On the 2026-10-24 dynamic run a single batch came back
+    finish_reason=length with empty content; the reviewer marked that batch
+    verification-error and every LATER batch "not-reviewed", costing 19 of 79
+    claims. The review now retries the failed batch as two smaller ones.
+    """
+    from winre import llm_client
+
+    def fake_chat_result(messages, **kwargs):
+        prompt = next((m.get("content") for m in messages
+                       if m.get("role") == "user"), "")
+        claims = json.loads(prompt.split("CLAIMS: ", 1)[-1])
+        if len(claims) > 6:
+            raise RuntimeError("LLM response missing content: finish_reason=length")
+        reviews = [{"claim_id": item["id"], "verdict": "supported",
+                    "locator_ids": [str(entry.get("locator"))
+                                    for entry in (item.get("evidence") or [])]}
+                   for item in claims]
+        return {"content": "", "finish_reason": "tool_calls",
+                "tool_calls": [{"function": {
+                    "name": "submit_claim_reviews",
+                    "arguments": json.dumps({"reviews": reviews})}}],
+                "usage": {}, "model": "stub", "response_id": "stub",
+                "error": None}
+
+    monkeypatch.setattr(llm_client, "chat_result", fake_chat_result)
+    monkeypatch.setattr(llm_client, "model_for", lambda role: "stub-model")
+    monkeypatch.setattr(llm_client, "API_KEY", "stub-key")
+    monkeypatch.setattr(llm_client, "BASE_URL", "http://127.0.0.1:9/v1")
+
+    pack_root = _pack(tmp_path)
+    res = reporting.build_report_v3(pack_root, review_claims=True)
+    review = res.get("claim_review") or {}
+    statuses = review.get("by_status") or {}
+    assert "not-reviewed" not in statuses, review
+    assert "verification-error" not in statuses, review
+    reviewable = [claim for claim in (review.get("claims") or [])
+                  if claim.get("status") != "unverifiable"]
+    assert reviewable, "the fixture produced no reviewable claim"
+    assert all(claim.get("status") == "supported" for claim in reviewable), review
+    assert review.get("review_failures"), (
+        "the truncated call must be recorded, not hidden")
+
+
+def test_frida_selectors_are_only_built_for_api_names():
+    """A basis label that is not an API must not become an @api selector.
+
+    The dynamic verdict basis mixes API names with gate/unpack labels
+    ("gate:drop:CreateFileW", "unpack:oep:0x8b2003", "packed-section:overlay").
+    Building "@api=gate:drop:CreateFileW" produced a locator that resolves to no
+    rows, and the audit refuses any claim with an unresolved locator
+    (2026-10-24 dynamic run, claim C0053).
+    """
+    from winre.reporting import _raw_frida_refs
+
+    refs = _raw_frida_refs(apis=["CreateFileW", "gate:drop:CreateFileW",
+                                 "unpack:oep:0x8b2003", "packed-section:overlay",
+                                 "VirtualAlloc"])
+    assert refs == ["dynamic/frida_trace.jsonl#@api=CreateFileW",
+                    "dynamic/frida_trace.jsonl#@api=VirtualAlloc"]
+    assert _raw_frida_refs(event_refs=["a1b2c3"]) == [
+        "dynamic/frida_trace.jsonl#@invocation_id=a1b2c3"]

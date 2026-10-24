@@ -165,7 +165,12 @@ def pack_sections(sha_dir: Path) -> list[dict]:
     for m in EvidencePack.MODES:
         if (sha_dir / m).is_dir():
             out.append({"mode": m, "root": sha_dir / m})
-    if any((sha_dir / s).is_dir() for s in EvidencePack.STAGES):
+    # A legacy flat pack has the stage dirs AND its own root META.json. The
+    # directory name alone is ambiguous: "dynamic" is both a stage and a mode
+    # section, so a sectioned case with a dynamic run looked like it also had
+    # a flat pack (bogus None section, 2026-10-24).
+    if ((sha_dir / "META.json").is_file()
+            and any((sha_dir / s).is_dir() for s in EvidencePack.STAGES)):
         out.append({"mode": None, "root": sha_dir})
     return out
 

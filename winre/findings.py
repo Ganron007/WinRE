@@ -1537,6 +1537,19 @@ def build(mode: str, pack_root: Path, *, sha: str = "",
     """
     pack_root = Path(pack_root)
     evidence = Path(evidence_dir) if evidence_dir else pack_root / "dynamic"
+    if not run_id:
+        # A findings rebuild that omits run_id must not erase the pack's
+        # identity: findings.json is the composite's mode-identity record, and
+        # run_id=None silently deselects the mode AND invalidates the report's
+        # source digests (2026-10-24: the dbg pack's findings were re-derived
+        # without a run_id, and the report review could no longer be verified
+        # against them). Fall back to the pack's own terminal record.
+        try:
+            _meta = json.loads((pack_root / "META.json")
+                               .read_text(encoding="utf-8-sig"))
+            run_id = _meta.get("run_id")
+        except (OSError, json.JSONDecodeError):
+            run_id = None
     if mode not in _DISPATCH:
         return _frame(mode, sha, ok=False,
                       verdict=_verdict(UNKNOWN, "low", []),

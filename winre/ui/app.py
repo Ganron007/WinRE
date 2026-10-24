@@ -65,7 +65,12 @@ def _section_root(sha: str, mode: str | None) -> Path:
     flat = LOGS_DIR / sha
     if mode is None and flat.is_dir():
         stages = ("intake", "quick", "deep", "dynamic", "yara", "report")
-        if not any((flat / s).is_dir() for s in stages):
+        # "dynamic" is both a stage and a mode section, so the directory name
+        # alone cannot classify the layout. A legacy flat pack carries its own
+        # root META.json; a sectioned case does not.
+        legacy = ((flat / "META.json").is_file()
+                  and any((flat / s).is_dir() for s in stages))
+        if not legacy:
             for sec in MODES:
                 if (flat / sec).is_dir():
                     return flat / sec
@@ -218,10 +223,28 @@ def _packs() -> list[dict]:
 def _pack_detail(sha: str, mode: str | None = None) -> dict | None:
     if not _valid_sha(sha):
         return None
+    sha_dir = LOGS_DIR / sha
+    sections = pack_sections(sha_dir)
+    # A case with several mode sections must not silently show "the first
+    # mode in MODES order" - that is how a dynamic run's page rendered the
+    # agentic section and looked empty of Procmon/Frida evidence
+    # (2026-10-24). Default to the section that ran most recently; the page
+    # offers an explicit switcher for the rest.
+    if mode not in MODES:
+        if sections:
+            mode = max(sections, key=lambda sec: (
+                sec["root"] / "META.json").stat().st_mtime
+                if (sec["root"] / "META.json").is_file()
+                else sec["root"].stat().st_mtime)["mode"]
+        else:
+            mode = None
     d = _section_root(sha, mode)
     if not d.is_dir():
         return None
-    detail = {"sha": sha, "short": sha[:16], "mode": None, "stages": {}}
+    detail = {"sha": sha, "short": sha[:16], "mode": mode,
+              "sections": [{"mode": sec["mode"],
+                            "root": sec["root"]} for sec in sections],
+              "stages": {}}
     for stage in ("intake", "quick", "dynamic", "deep", "yara", "report"):
         sd = d / stage
         files = {}

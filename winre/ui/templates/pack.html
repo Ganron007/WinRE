@@ -20,6 +20,20 @@
        href="/packs/{{ pack.sha }}/export{% if pack.mode %}?mode={{ pack.mode }}{% endif %}" title="zip the whole evidence pack">⬇ export pack</a>
   </div>
 
+  {% if pack.sections|length > 1 %}
+  <div style="display:flex; align-items:center; gap:8px; margin:6px 0 10px">
+    <span class="muted" style="font-size:var(--tx-xs)">sections:</span>
+    {% for sec in pack.sections %}
+      {% if sec.mode == pack.mode %}
+        <span class="badge up">{{ sec.mode }}</span>
+      {% else %}
+        <a class="badge flat" style="text-decoration:none"
+           href="/packs/{{ pack.sha }}?mode={{ sec.mode }}">{{ sec.mode }}</a>
+      {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
+
   {% set v = pack.views %}
   {# audit banner first — honest gate is the headline #}
   <div class="board">
