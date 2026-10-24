@@ -202,11 +202,19 @@ def _launch_on_vm(cfg: dict, arch: int = DEFAULT_ARCH) -> bool:
     RunLevel=Highest: the Task Scheduler service grants the elevated token
     with NO UAC prompt (x64dbg requires admin; a manual launch would pop
     UAC unless UAC is disabled).
+
+    Stop the task first: a task instance whose debugger was killed externally
+    stays in the Running state, and Start-ScheduledTask on a running task is a
+    silent no-op - so the next flavour would never launch (observed live
+    2026-10-23: x64dbg never started because the x32 test instance was still
+    marked Running).
     """
     exe = XDBG_BIN.get(arch, XDBG_BIN[DEFAULT_ARCH])
     task = "WinRE-X64dbg-Once"
     ps = (
-        f'powershell -NoProfile -Command "$a = New-ScheduledTaskAction -Execute '
+        f'powershell -NoProfile -Command "Stop-ScheduledTask -TaskName '
+        f'\'{task}\' -ErrorAction SilentlyContinue; '
+        f'$a = New-ScheduledTaskAction -Execute '
         f'\'{exe}\'; '
         f'$p = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive '
         f'-RunLevel Highest; $s = New-ScheduledTaskSettingsSet; '
@@ -225,6 +233,8 @@ def _launch_local(arch: int = DEFAULT_ARCH) -> bool:
     exe = XDBG_BIN.get(arch, XDBG_BIN[DEFAULT_ARCH])
     task = "WinRE-X64dbg-Once"
     ps = (
+        "Stop-ScheduledTask -TaskName "
+        f"'{task}' -ErrorAction SilentlyContinue; "
         "$a = New-ScheduledTaskAction -Execute "
         f"'{exe}'; "
         "$p = New-ScheduledTaskPrincipal -UserId $env:USERNAME "
@@ -240,6 +250,57 @@ def _launch_local(arch: int = DEFAULT_ARCH) -> bool:
         return r.returncode == 0
     except Exception:
         return False
+
+
+# Windows creates a per-program inbound BLOCK rule (display name "x64dbg")
+# the first time each debugger binds a listening socket on a Public-profile
+# adapter. The firewall gives Block precedence over Allow regardless of rule
+# order, so the WinRE allow rules for :9094/:9095 are inert while one exists -
+# and Windows re-creates it on the next cold launch. Measured 2026-10-23 on
+# the new GOLD: the plugin bound 0.0.0.0:9095 and the driver could not reach
+# it; the two enabled Block rules were the whole cause. Heal before every
+# debug session instead of relying on a one-time setup fix.
+_DBG_BLOCK_HEAL_PS = (
+    "$d=@(); "
+    "Get-NetFirewallRule -ErrorAction SilentlyContinue | "
+    "Where-Object { $_.Direction -eq 'Inbound' -and $_.Action -eq 'Block' "
+    "-and $_.Enabled -eq 'True' } | ForEach-Object { "
+    "$r=$_; $a=$r | Get-NetFirewallApplicationFilter "
+    "-ErrorAction SilentlyContinue; "
+    "if ($a -and $a.Program -match '(?i)\\\\(x64dbg|x32dbg)\\.exe$') { "
+    "Disable-NetFirewallRule -Name $r.Name -ErrorAction SilentlyContinue; "
+    "$d += $r.Name } }; "
+    '"WINRE_DBG_BLOCKS_DISABLED=" + $d.Count; '
+    '$d | ForEach-Object { "WINRE_DBG_BLOCK=" + $_ }'
+)
+
+_BLOCK_MARK = "WINRE_DBG_BLOCK="
+
+
+def _parse_heal(stdout: str) -> list[str]:
+    return [line.split(_BLOCK_MARK, 1)[1].strip()
+            for line in (stdout or "").splitlines()
+            if _BLOCK_MARK in line and line.split(_BLOCK_MARK, 1)[1].strip()]
+
+
+def _heal_firewall_vm(cfg: dict) -> dict:
+    """Disable Windows' auto-created inbound Block rules for the debuggers."""
+    try:
+        r = remote_driver.ssh_ps(cfg, _DBG_BLOCK_HEAL_PS, timeout=60)
+        return {"disabled": _parse_heal(r.stdout)}
+    except Exception as e:
+        return {"disabled": [], "error": f"{type(e).__name__}: {str(e)[:150]}"}
+
+
+def _heal_firewall_local() -> dict:
+    import subprocess
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy",
+                            "Bypass", "-Command", _DBG_BLOCK_HEAL_PS],
+                           capture_output=True, text=True, timeout=60)
+        return {"disabled": _parse_heal(r.stdout)}
+    except Exception as e:
+        return {"disabled": [], "error": f"{type(e).__name__}: {str(e)[:150]}"}
 
 
 def _port_of(xc: X64DbgClient) -> int | None:
@@ -258,7 +319,7 @@ def _not_up(wait_s: int, arch: int) -> str:
     """
     ports = "/".join(str(p) for p in X64DbgClient.MCP_PORTS)
     return (f"x64dbg MCP not answering on :{ports} after {wait_s}s "
-            f"(launched {XDBG_PROCS.get(arch, 'x64dbg.exe')})")
+            f"(requested launch of {XDBG_PROCS.get(arch, 'x64dbg.exe')})")
 
 
 def _running_arch_vm(cfg: dict) -> int | None:
@@ -314,12 +375,15 @@ def ensure_mcp_local(base: str | None = None, wait_s: int = 90,
     """
     arch = xdbg_arch(sample)
     with _lock:
+        heal = _heal_firewall_local()
         # port is discovered, not assumed: dp32 serves :9095, dp64 :9094
         X64DbgClient.forget_port()
         xc = X64DbgClient(base=base, default_timeout=10)
         info: dict = {"local": True, "already_up": False, "launched": False,
                       "arch": arch, "debugger": XDBG_PROCS[arch],
                       "exe": XDBG_BIN[arch], "port": _port_of(xc)}
+        if heal.get("disabled"):
+            info["firewall_healed"] = heal["disabled"]
         if xc.is_up():
             info["already_up"] = True
             return True, info
@@ -351,11 +415,16 @@ def ensure_mcp(base: str | None = None, wait_s: int = 90,
         cfg = cfg or remote_driver.flare_cfg()
         host = cfg["host"]
         arch = xdbg_arch(sample, cfg)
+        heal = _heal_firewall_vm(cfg)
         X64DbgClient.forget_port()
         xc = X64DbgClient(base=base, host=host, default_timeout=10)
         info: dict = {"host": host, "already_up": False, "launched": False,
                       "arch": arch, "debugger": XDBG_PROCS[arch],
                       "exe": XDBG_BIN[arch], "port": _port_of(xc)}
+        if heal.get("disabled"):
+            info["firewall_healed"] = heal["disabled"]
+        if heal.get("error"):
+            info["firewall_error"] = heal["error"]
 
         if xc.is_up():
             running = _running_arch_vm(cfg)

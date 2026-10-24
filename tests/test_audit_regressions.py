@@ -219,9 +219,16 @@ def test_setup_and_verify_agree_on_required_python_modules():
         assert "angr" not in re.findall(r'"([a-z0-9_]+)"', cm.group(1))
 
 
-def test_guest_setup_preserves_firewall_profile_and_allows_vmnet2_management():
+def test_guest_setup_disables_the_firewall_and_allows_vmnet2_management():
     setup, verify = _src("install/setup-flarevm.ps1"), _src("install/verify-flarevm.ps1")
-    assert "Set-NetFirewallProfile" not in setup
+    # FLARE-VM default: firewall OFF on every profile. An enabled
+    # Public-profile firewall prompts for x64dbg and then silently creates an
+    # inbound Block rule that overrides the MCP allow rules (2026-10-23).
+    assert "Set-NetFirewallProfile" in setup
+    assert "-Profile Domain,Private,Public -Enabled False" in setup
+    assert 'New-ItemProperty -LiteralPath $profilePath -Name "EnableFirewall" -Value 0' in setup
+    assert "DisableNotifications" in setup
+    assert "Windows Firewall is disabled on every profile" in verify
     assert "gpupdate.exe /target:computer /force" not in setup
     assert "elseif ($removedLegacyDefault -and $ifIndex)" in setup
     assert 'NextHop $originalHostOnlyGateway' in setup

@@ -654,22 +654,27 @@ if ($CheckMode) {
         )) {
             Remove-NetFirewallRule -DisplayName $legacyRuleName -ErrorAction SilentlyContinue
         }
+        # FLARE-VM ships with Windows Firewall OFF, and this lab needs it off:
+        # a Public-profile adapter makes Windows prompt "allow x64dbg access?"
+        # and, when nobody answers, silently create a per-program inbound
+        # BLOCK rule that overrides our allow rules (measured 2026-10-23: the
+        # debugger MCP bound 0.0.0.0:9095 and the driver could not reach it).
+        # The guest is air-gapped on VMnet2 by design, so the firewall adds no
+        # security here - it only breaks the lab plane. Disable it on every
+        # profile AND pin the policy so a refresh cannot re-enable it, and
+        # turn the notifications off so no prompt can ever appear.
         $policyRoot = "HKLM:\SOFTWARE\Policies\Microsoft\WindowsFirewall"
         foreach ($profileName in @("DomainProfile", "PrivateProfile", "PublicProfile", "StandardProfile")) {
             $profilePath = Join-Path $policyRoot $profileName
-            foreach ($policyValue in @("EnableFirewall", "AllowLocalPolicyMerge", "DefaultInboundAction", "DefaultOutboundAction")) {
-                $value = (Get-ItemProperty -LiteralPath $profilePath -Name $policyValue -ErrorAction SilentlyContinue).$policyValue
-                $ownedValue = switch ($policyValue) {
-                    "EnableFirewall" { 1 }
-                    "AllowLocalPolicyMerge" { 1 }
-                    "DefaultInboundAction" { 1 }
-                    "DefaultOutboundAction" { 0 }
-                }
-                if ($null -ne $value -and [int]$value -eq $ownedValue) {
-                    Remove-ItemProperty -LiteralPath $profilePath -Name $policyValue -ErrorAction SilentlyContinue
-                }
+            if (-not (Test-Path $profilePath)) {
+                New-Item -Path $profilePath -Force | Out-Null
             }
+            New-ItemProperty -LiteralPath $profilePath -Name "EnableFirewall" -Value 0 -PropertyType DWord -Force | Out-Null
+            New-ItemProperty -LiteralPath $profilePath -Name "DisableNotifications" -Value 1 -PropertyType DWord -Force | Out-Null
         }
+        Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled False `
+            -NotifyOnListen False -ErrorAction Stop
+        Ok "Windows Firewall disabled on every profile and pinned by policy (FLARE-VM default); no allow/block prompt can shadow the lab rules"
 
         $sshRuleName = "WinRE SSH (VMnet2 LocalSubnet)"
         Get-NetFirewallRule -DisplayName "WinRE SSH *" -ErrorAction SilentlyContinue |
@@ -710,6 +715,30 @@ foreach ($item in $x64dbgRules) {
         New-NetFirewallRule @rule | Out-Null
         Ok "TCP $($item.Port) allowed from VMnet2 LocalSubnet"
     } catch { Warn "firewall allow rule for TCP $($item.Port) not created: $($_.Exception.Message)" }
+}
+
+# Windows creates a per-program inbound BLOCK rule (display name "x64dbg") the
+# first time each debugger binds a listening socket on a Public-profile
+# adapter. Block wins over Allow regardless of rule order, so the allow rules
+# above become inert - measured 2026-10-23: the plugin bound 0.0.0.0:9095 and
+# the control-plane driver could not reach it, which is why the agentic-dbg
+# run had no debugger at all. Windows re-creates the rule on the next cold
+# launch, so the debug-session preflight (winre/mcp/x64dbg_manager.py) heals
+# it again before every session; this keeps a fresh deploy clean as well.
+if ($CheckMode) {
+    Act "no enabled inbound block rule shadows the debugger MCP allow rules"
+} else {
+    $dbgBlocks = @(Get-NetFirewallRule -ErrorAction SilentlyContinue |
+        Where-Object { $_.Direction -eq "Inbound" -and $_.Action -eq "Block" -and $_.Enabled -eq "True" } |
+        Where-Object {
+            $af = $_ | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue
+            $af.Program -match "(?i)\\(x64dbg|x32dbg)\.exe$"
+        })
+    foreach ($r in $dbgBlocks) {
+        Disable-NetFirewallRule -Name $r.Name -ErrorAction SilentlyContinue
+        Ok "disabled Windows auto-block rule for the debugger: $($r.DisplayName) [$($r.Profile)]"
+    }
+    if (-not $dbgBlocks) { Ok "no debugger auto-block rule present" }
 }
 
 foreach ($t in @(@("FakeNet-NG (REQUIRED free)", @("C:\Tools\fakenet\fakenet3.5\fakenet.exe"), @("fakenet.exe")),

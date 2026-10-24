@@ -17,13 +17,19 @@ def test_setup_removes_legacy_peer_blocks_and_allows_vmnet2_local_subnet():
     assert '"WinRE SSH (VMnet2 LocalSubnet)"' in source
     assert '"WinRE x64dbg MCP (VMnet2 x64)"' in source
     assert '"WinRE x64dbg MCP (VMnet2 x86)"' in source
-    assert "Set-NetFirewallProfile" not in source
+    # The firewall itself is off (FLARE-VM default): an enabled Public-profile
+    # firewall prompts for x64dbg and silently creates an inbound Block rule
+    # that overrides these allow rules (2026-10-23), so the allow rules are
+    # defense-in-depth and the disabled profile is the primary contract.
+    assert "Set-NetFirewallProfile" in source
+    assert "-Profile Domain,Private,Public -Enabled False" in source
+    assert "-NotifyOnListen False" in source
     assert "block IPv6" not in source
 
 
 @pytest.mark.parametrize("defect", [
     "none", "legacy_peer", "missing_ssh", "disabled", "block",
-    "direction", "remote", "port",
+    "direction", "remote", "port", "firewall_on",
 ])
 def test_verifier_rejects_peer_blocks_or_ineffective_local_subnet_allows(
         tmp_path, defect):
@@ -41,8 +47,21 @@ $ErrorActionPreference = 'Stop'
 $script:Failed = $false
 function Ok($message) { Write-Output "OK: $message" }
 function Fail($message) { $script:Failed = $true; Write-Output "FAIL: $message" }
+function Get-NetFirewallProfile {
+    [CmdletBinding()] param($PolicyStore)
+    [pscustomobject]@{ Name = 'Public'
+        Enabled = $(if ($Defect -eq 'firewall_on') { 'True' } else { 'False' }) }
+}
 function Get-NetFirewallRule {
     [CmdletBinding()] param($PolicyStore, $DisplayName)
+    if (-not $DisplayName) {
+        # the block-rule sweep: only a firewall_on defect has one
+        if ($Defect -eq 'firewall_on') {
+            return [pscustomobject]@{ DisplayName = 'x64dbg'; Profile = 'Public';
+                Direction = 'Inbound'; Action = 'Block'; Enabled = 'True' }
+        }
+        return @()
+    }
     if ($DisplayName -eq 'WinRE isolated analysis network -*') {
         if ($Defect -eq 'legacy_peer') { return [pscustomobject]@{ DisplayName = 'old peer block' } }
         return @()
@@ -58,6 +77,10 @@ function Get-NetFirewallRule {
         Direction = $(if ($Defect -eq 'direction' -and $port -eq '22') { 'Outbound' } else { 'Inbound' })
         Port = $port
     }
+}
+function Get-NetFirewallApplicationFilter {
+    [CmdletBinding()] param($AssociatedNetFirewallRule)
+    [pscustomobject]@{ Program = 'C:\tools\x64dbg\release\x64\x64dbg.exe' }
 }
 function Get-NetFirewallAddressFilter {
     [CmdletBinding()] param($AssociatedNetFirewallRule)
@@ -79,6 +102,7 @@ function Get-NetFirewallPortFilter {
     expected_ok = defect == "none"
     assert result.returncode == (0 if expected_ok else 1), result.stdout + result.stderr
     if expected_ok:
-        assert "OK: TCP 22 is allowed from VMnet2 LocalSubnet" in result.stdout
+        assert "OK: TCP 22 allow rule present for the VMnet2 LocalSubnet" in result.stdout
+        assert "OK: Windows Firewall is disabled on every profile" in result.stdout
     else:
         assert "FAIL:" in result.stdout

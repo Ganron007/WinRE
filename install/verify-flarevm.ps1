@@ -401,6 +401,17 @@ $legacyNetworkRules = @(
 if (-not $legacyNetworkRules) { Ok "legacy gateway, IPv6, and VMnet2 peer-block rules are absent" }
 else { Fail "legacy gateway/isolation firewall rules remain; rerun setup-flarevm.ps1" }
 
+$fwEnabled = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
+    Where-Object { $_.Enabled -eq "True" } |
+    ForEach-Object { $_.Name })
+if ($fwEnabled) {
+    Fail ("Windows Firewall is ENABLED on: " + ($fwEnabled -join ", ") +
+          "; this lab runs with it disabled (FLARE-VM default) - an enabled " +
+          "Public-profile firewall prompts for x64dbg and then silently " +
+          "creates an inbound Block rule that overrides the MCP allow rules. " +
+          "Rerun setup-flarevm.ps1")
+} else { Ok "Windows Firewall is disabled on every profile (FLARE-VM default)" }
+
 foreach ($port in @(22, 9094, 9095)) {
     $ruleName = if ($port -eq 22) { "WinRE SSH (VMnet2 LocalSubnet)" } `
         elseif ($port -eq 9094) { "WinRE x64dbg MCP (VMnet2 x64)" } `
@@ -411,9 +422,27 @@ foreach ($port in @(22, 9094, 9095)) {
     if ($rule -and $rule.Enabled -eq "True" -and $rule.Action -eq "Allow" -and
         $rule.Direction -eq "Inbound" -and $remote -contains "LocalSubnet" -and
         $portFilter.LocalPort -contains [string]$port) {
-        Ok "TCP $port is allowed from VMnet2 LocalSubnet"
+        Ok "TCP $port allow rule present for the VMnet2 LocalSubnet (defense in depth; firewall is off)"
     } else { Fail "TCP $port is not allowed from the VMnet2 LocalSubnet; rerun setup-flarevm.ps1" }
 }
+
+# Block beats Allow in Windows Firewall, so an auto-created per-program Block
+# rule makes the allow checks above meaningless even though they pass. Only
+# relevant while the firewall is enabled - setup disables it on every profile,
+# and this branch is what catches a host where something re-enabled it.
+if ($fwEnabled) {
+    $dbgBlocks = @(Get-NetFirewallRule -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
+        Where-Object { $_.Direction -eq "Inbound" -and $_.Action -eq "Block" -and $_.Enabled -eq "True" } |
+        Where-Object {
+            $af = $_ | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue
+            $af.Program -match "(?i)\\(x64dbg|x32dbg)\.exe$"
+        })
+    if ($dbgBlocks) {
+        Fail ("Windows auto-block rule(s) for the debugger are enabled and override the MCP allow rules: " +
+              (($dbgBlocks | ForEach-Object { "$($_.DisplayName) [$($_.Profile)]" }) -join ", ") +
+              "; rerun setup-flarevm.ps1")
+    } else { Ok "no inbound block rule shadows the debugger MCP allow rules" }
+} else { Ok "firewall is disabled - no rule can shadow the debugger MCP" }
 
 Write-Host ""
 Write-Host "--- Dynamic prerequisites ---"
