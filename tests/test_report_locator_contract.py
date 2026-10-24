@@ -185,3 +185,23 @@ def test_a_claim_must_cite_evidence_that_states_it(tmp_path):
     assert "source `static`" in markdown, (
         "the report must name the selected mode, not an internal label")
     assert "mode-composite" not in markdown
+
+
+def test_the_model_summary_is_attributed_not_presented_as_a_finding(tmp_path):
+    """The deep agent's free-text summary is a model judgment over the
+    evidence, not a finding in its own right.
+
+    Presented as a bare fact ("Summary: ...") the reviewer contradicted it
+    when it disagreed with the cited evidence (2026-10-24 dbg run: the
+    summary said "not malware" beside a cited 16/71 VT ratio). The report now
+    attributes it, so the claim is what the evidence actually states - that
+    the agent recorded this judgment - while the evidence sections state what
+    is known.
+    """
+    pack_root = _pack(tmp_path)
+    reporting.build_report_v3(pack_root, review_claims=False)
+    markdown = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(encoding="utf-8")
+    assert "Agent's recorded summary (model judgment over the cited evidence; " \
+           "not an independent finding):**" in markdown
+    assert "\n  - Summary:" not in markdown, (
+        "a bare 'Summary:' line presents a model judgment as a report finding")

@@ -807,7 +807,14 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                      "quick/quick.json#$.evidence.vt",
                      *named_caps[:20],
                      *agent_refs[:30])
-        A(f"  - Summary: {verdict['summary']}")
+        # The summary is the MODEL's judgment over the evidence, not a
+        # finding in its own right. Presented as a bare fact ("Summary: ...")
+        # the reviewer correctly contradicted it when it disagreed with the
+        # cited VT ratio (2026-10-24 dbg run: "not malware" beside 16/71
+        # detections). Attribution is the honest framing: the report states
+        # who concluded it, and the evidence sections state what is known.
+        A(f"  - **Agent's recorded summary (model judgment over the cited "
+          f"evidence; not an independent finding):** {verdict['summary']}")
     A("")
 
     A("## 5. IOC table")
