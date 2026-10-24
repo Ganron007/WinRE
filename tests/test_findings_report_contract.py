@@ -116,7 +116,7 @@ def test_debug_report_shows_selected_verdict_observation_and_unpack_gap(tmp_path
         encoding="utf-8")
 
     md = _report(pack_root)
-    assert "Phase:** static+debugger" in md
+    assert "Phase:** dbg" in md
     # the source label must name the mode that DECIDED the composite
     # (composite.json$.deciding_mode) - a label that appears in no evidence
     # makes the claim unverifiable, and one that names a different mode
@@ -130,15 +130,21 @@ def test_debug_report_shows_selected_verdict_observation_and_unpack_gap(tmp_path
 
 
 @pytest.mark.parametrize(
-    ("stage_ok", "evidence_complete", "expected_phase"),
+    ("stage_ok", "evidence_complete"),
     [
-        (True, True, "static+dynamic"),
-        (False, False, "static+dynamic-incomplete"),
+        (True, True),
+        (False, False),
     ],
 )
 def test_dynamic_phase_comes_from_direct_mode_findings(
-        tmp_path, stage_ok, evidence_complete, expected_phase):
-    """The dynamic producer stores its flags directly under findings.json."""
+        tmp_path, stage_ok, evidence_complete):
+    """The dynamic producer stores its flags directly under findings.json.
+
+    The phase LABEL is the pack mode (what META.json states), because a
+    composed label the reviewer cannot see in an excerpt is refused; the
+    dynamic stage record is still the cited evidence behind it, in both the
+    complete and the incomplete case.
+    """
     pack_root = tmp_path / SHA / "dynamic"
     for stage in ("deep", "dynamic", "report"):
         (pack_root / stage).mkdir(parents=True, exist_ok=True)
@@ -164,7 +170,12 @@ def test_dynamic_phase_comes_from_direct_mode_findings(
         encoding="utf-8")
 
     md = _report(pack_root)
-    assert f"Phase:** {expected_phase}" in md
+    assert "Phase:** dynamic" in md
+    manifest = json.loads(
+        (pack_root / "report" / "evidence-locators.json").read_text(encoding="utf-8"))
+    refs = {(meta or {}).get("reference")
+            for meta in (manifest.get("locators") or {}).values()}
+    assert "dynamic/STAGE.json#$.detonation_ran" in refs
 
 
 def test_debug_report_distinguishes_entrypoint_observation_from_unpack_dump(

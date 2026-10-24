@@ -570,7 +570,12 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
         set_evidence("findings.json#$.findings.debug_observation")
     else:
         set_evidence("META.json#$.mode", "META.json#$.pack_mode")
-    A(f"- **Phase:** {phase}")
+    # The phase line must name what the EVIDENCE says, not a composed label:
+    # the claim reviewer can only confirm a label it sees in an excerpt, and
+    # it refused "static+debugger" (the pack's own META.json says "dbg") and
+    # "static+agentic" ("agentic") for exactly that reason. The stages that
+    # actually ran are described - and cited - in the sections below.
+    A(f"- **Phase:** {pack_mode}")
     set_evidence("deep/deep.json#$.agent.source",
                  "deep/deep.json#$.agent.verdict")
     A(f"- **Analysis source:** `{src}`")
@@ -939,23 +944,38 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
               f"dump parses={unpack.get('parses')}; imports={unpack.get('imports')}.")
         else:
             debugger_probe = unpack.get("debugger_probe") or {}
-            set_evidence("findings.json#$.findings.unpack",
-                         "dynamic/windbg_analysis.json#$.oep")
+            observation_completed = observation.get("window_completed") is True
+            unpack_refs = ["findings.json#$.findings.unpack",
+                           "dynamic/windbg_analysis.json#$.oep"]
+            if observation:
+                unpack_refs += [
+                    "findings.json#$.findings.debug_observation.window_completed",
+                    "findings.json#$.findings.debug_observation.completion_reason",
+                ]
+            set_evidence(*unpack_refs)
+            if observation_completed:
+                tail = (" This does not invalidate a completed debugger "
+                        "observation.")
+            else:
+                # Never claim a completed observation the evidence does not
+                # show: a failed debug session has no observation to
+                # invalidate, and the reviewer correctly refused that claim
+                # on the 2026-10-23 dbg pack.
+                tail = (" The debugger observation did not complete in this "
+                        "run, so this is a failed unpack attempt rather than "
+                        "a completed observation without a dump.")
             if (debugger_probe.get("method") == "entrypoint_observation"
                     and debugger_probe.get("address")):
                 A("- Unpack result: the debugger observed the original image "
                   f"entry point `{debugger_probe['address']}`; no unpacked dump "
-                  "was produced. This does not invalidate a completed "
-                  "debugger observation.")
+                  "was produced." + tail)
             elif (debugger_probe.get("method") == "memory_execute_oep"
                   and debugger_probe.get("address")):
                 A("- Unpack result: the debugger observed a candidate unpacked "
                   f"OEP at `{debugger_probe['address']}`, but no unpacked dump "
-                  "was produced. This does not invalidate a completed "
-                  "debugger observation.")
+                  "was produced." + tail)
             else:
-                A("- Unpack result: no unpacked OEP dump was recovered; this "
-                  "does not invalidate a completed debugger observation.")
+                A("- Unpack result: no unpacked OEP dump was recovered." + tail)
         for limitation in (finding_record.get("limitations") or [])[:5]:
             set_evidence("findings.json#$.limitations",
                          *_coverage_refs(gaps_only=True))
