@@ -1,8 +1,40 @@
 {% set dy = pack.views.dynamic %}
+{% set dbg = pack.views.debug %}
+{% if dbg %}
+<div class="page-section-title">Debugger-assisted observation</div>
+<div class="board" style="max-width:840px; margin-bottom:12px">
+  <div class="board-head">
+    {% if dbg.observation.get('window_completed') %}<span class="badge up">debugger window completed</span>
+    {% else %}<span class="badge down">debugger window incomplete</span>{% endif %}
+    {% if dbg.debugger %}<span class="badge flat" style="margin-left:6px">{{ dbg.debugger }}</span>{% endif %}
+  </div>
+  <div class="board-body" style="font-size:var(--tx-xs)">
+    <div>Bounded debugger window: completed <b>{{ dbg.observation.get('window_completed') }}</b>;
+      observed <b>{{ dbg.observation.get('observed_seconds') }}s</b> /
+      requested <b>{{ dbg.observation.get('requested_seconds') }}s</b>;
+      target exit observed <b>{{ dbg.observation.get('exit_observed') }}</b>.</div>
+    <div>ETW process monitor: status <b>{{ dbg.observation.get('monitor_status') }}</b>;
+      target observed <b>{{ dbg.observation.get('target_observed') }}</b>;
+      starts <b>{{ dbg.observation.get('process_starts') }}</b>;
+      stops <b>{{ dbg.observation.get('process_stops') }}</b>.</div>
+    {% if dbg.observation.get('scope') %}<div class="muted">scope: {{ dbg.observation.get('scope') }}</div>{% endif %}
+    {% if dbg.observation.get('completion_reason') %}<div class="muted">completion: {{ dbg.observation.get('completion_reason') }}</div>{% endif %}
+    {% if dbg.unpack.get('ok') %}
+      <div>Unpack: OEP <span class="mono">{{ dbg.unpack.get('oep') }}</span>;
+        dump parses <b>{{ dbg.unpack.get('parses') }}</b>;
+        imports <b>{{ dbg.unpack.get('imports') }}</b>.</div>
+    {% else %}
+      <div class="muted">Unpack: no unpacked dump was recovered.</div>
+    {% endif %}
+    {% if dbg.observation.get('unique_images') %}
+      <div class="mono" style="margin-top:4px">{{ dbg.observation.get('unique_images')[:12]|join(' - ') }}</div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
 <div class="page-section-title">Dynamic detonation</div>
 {% if not dy.ran %}
-  <p class="muted">Not run for this pack (static-only). Dynamic is an opt-in,
-     segregated phase — enable it on the Run page (requires a clean-snapshot VM).</p>
+  <p class="muted">{% if dbg %}Detonation was not requested in this debugger-assisted run.{% else %}Not run for this pack (static-only). Dynamic is an opt-in, segregated phase - enable it on the Run page (requires a clean-snapshot VM).{% endif %}</p>
 {% else %}
 <div class="notice warn" style="max-width:840px">
   <b>Contaminated environment.</b> This sample was detonated on the FlareVM.

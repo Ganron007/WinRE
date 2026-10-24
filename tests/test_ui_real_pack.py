@@ -259,3 +259,43 @@ def test_the_file_route_refuses_traversal(client):
 def test_a_bad_sha_is_refused_not_silently_handled(client):
     r = client.get("/packs/not-a-sha/export")
     assert r.status_code == 400
+
+
+def test_each_mode_section_renders_its_own_evidence(client):
+    """A case with several modes must be inspectable mode by mode.
+
+    Before 2026-10-24 /packs/<sha> always rendered the first section in MODES
+    order, so a dynamic run's page showed the agentic section and looked empty
+    of detonation evidence. Every section must render its own artifacts, and
+    the page must offer a switcher.
+    """
+    if not NEWEST:
+        pytest.skip("no real pack on disk")
+    sha = NEWEST["sha"]
+    modes = NEWEST["modes"]
+    if len(modes) < 2:
+        pytest.skip("need a multi-mode case")
+
+    body = client.get(f"/packs/{sha}").get_data(as_text=True)
+    assert "sections:" in body, "a multi-mode case must offer a section switcher"
+    for mode in modes:
+        assert f"mode={mode}" in body or mode == _newest_mode_or_none(sha, body), mode
+
+    probes = {
+        "static": ("REPORT-TECHNICAL", "capa"),
+        "agentic": ("Deep dive", "verdict"),
+        "dbg": ("Bounded debugger window",),
+        "dynamic": ("Procmon", "Frida"),
+    }
+    for mode in modes:
+        if mode not in probes:
+            continue
+        page = client.get(f"/packs/{sha}?mode={mode}").get_data(as_text=True)
+        for probe in probes[mode]:
+            assert probe in page, f"section {mode} does not show {probe!r}"
+
+
+def _newest_mode_or_none(sha: str, body: str) -> str:
+    """The mode the default page rendered (its switcher marks it as current)."""
+    from winre.ui.app import _newest_section_mode
+    return _newest_section_mode(sha) or ""

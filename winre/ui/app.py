@@ -220,6 +220,24 @@ def _packs() -> list[dict]:
     return out
 
 
+def _newest_section_mode(sha: str) -> str | None:
+    """The mode section that ran most recently for a case (or None).
+
+    A case has one section per mode; "the newest run" is what an operator
+    means by "this case" unless they pick a section explicitly.
+    """
+    sections = pack_sections(LOGS_DIR / sha)
+    if not sections:
+        return None
+
+    def _stamp(sec: dict) -> float:
+        meta = sec["root"] / "META.json"
+        return (meta.stat().st_mtime if meta.is_file()
+                else sec["root"].stat().st_mtime)
+
+    return max(sections, key=_stamp)["mode"]
+
+
 def _pack_detail(sha: str, mode: str | None = None) -> dict | None:
     if not _valid_sha(sha):
         return None
@@ -231,13 +249,7 @@ def _pack_detail(sha: str, mode: str | None = None) -> dict | None:
     # (2026-10-24). Default to the section that ran most recently; the page
     # offers an explicit switcher for the rest.
     if mode not in MODES:
-        if sections:
-            mode = max(sections, key=lambda sec: (
-                sec["root"] / "META.json").stat().st_mtime
-                if (sec["root"] / "META.json").is_file()
-                else sec["root"].stat().st_mtime)["mode"]
-        else:
-            mode = None
+        mode = _newest_section_mode(sha)
     d = _section_root(sha, mode)
     if not d.is_dir():
         return None
@@ -467,6 +479,27 @@ def _pack_views(root: Path, files: dict) -> dict:
                     continue
     v["yara"] = {"report": rr if isinstance(rr, dict) else None,
                  "rules": yar_files, "sha": root.name}
+
+    # debugger-assisted observation (dbg section): the observation and unpack
+    # record live in findings.json, not in dynamic/META.json, so the dynamic
+    # panel used to render an empty box for a dbg run.
+    findings_doc = _read_json(root / "findings.json") or {}
+    dbf = findings_doc.get("findings") or {}
+    obs = dbf.get("debug_observation") or {}
+    unp = dbf.get("unpack") or {}
+    if obs or unp:
+        v["debug"] = {
+            "observation": {k: obs.get(k) for k in (
+                "requested", "attempted", "window_completed", "observed_seconds",
+                "requested_seconds", "exit_observed", "monitor_status",
+                "target_observed", "process_starts", "process_stops", "scope",
+                "completion_reason", "unique_images")},
+            "unpack": {k: unp.get(k) for k in (
+                "ok", "oep", "parses", "imports", "method", "debugger_probe")},
+            "debugger": dbf.get("debugger"),
+        }
+    else:
+        v["debug"] = None
 
     # report — analyst-next markdown + summary
     rep = get("report", "report.json") or {}
@@ -729,9 +762,21 @@ def _run_pipeline_in_thread(sample_path: str, max_seconds: int,
                     adaptive=adaptive,
                     idle_stop_seconds=idle_stop_seconds)
                 _run_state["sha"] = res["sha"]
-                _run_state["last"] = {"ok": True, "sha": res["sha"],
-                                      "started": started,
-                                      "audit": res["results"].get("audit")}
+                if res.get("aborted"):
+                    # The driver refused BEFORE any stage ran (snapshot gate /
+                    # execution budget). The board must say so: it used to set
+                    # ok=True with a red audit, so the operator saw "success"
+                    # for a run that executed nothing.
+                    _run_state["last"] = {
+                        "ok": False,
+                        "error": res.get("error") or "aborted before any stage",
+                        "sha": res.get("sha"), "started": started,
+                        "aborted": True,
+                        "audit": res["results"].get("audit")}
+                else:
+                    _run_state["last"] = {"ok": True, "sha": res["sha"],
+                                          "started": started,
+                                          "audit": res["results"].get("audit")}
             except Exception as e:
                 print("[winre-ui] run failed:", traceback.format_exc(), flush=True)
                 _run_state["last"] = {"ok": False, "error": str(e)}
@@ -958,7 +1003,8 @@ def create_app() -> "Flask":
         if not root.is_dir():
             return jsonify({"ok": False, "error": "pack not found"}), 404
         body = request.get_json(force=True, silent=True) or {}
-        mode = body.get("mode") or request.args.get("mode") or "agentic"
+        mode = (body.get("mode") or request.args.get("mode")
+                or _newest_section_mode(sha) or "agentic")
         if mode not in MODES:
             mode = "agentic"
         if stage == "dynamic" and not body.get("confirm_snapshot"):
