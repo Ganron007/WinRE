@@ -345,3 +345,57 @@ def test_frida_selectors_are_only_built_for_api_names():
                     "dynamic/frida_trace.jsonl#@api=VirtualAlloc"]
     assert _raw_frida_refs(event_refs=["a1b2c3"]) == [
         "dynamic/frida_trace.jsonl#@invocation_id=a1b2c3"]
+
+
+def _pack_with_cli_strings(pack_root: Path, imports: list | None = None):
+    """The s07 shape: switch-like strings in the quick strings evidence and
+    a strings_tool result, with the packed stub's import table (or an
+    import table the caller supplies)."""
+    quick = json.loads(
+        (pack_root / "quick" / "quick.json").read_text(encoding="utf-8"))
+    quick["evidence"]["strings"] = {"strings": ["/Qmlv%uwjbwdh%fdkkjq%g`%wpk%"]}
+    quick["evidence"]["strings_tool"] = {
+        "strings": ["/Qmlv%uwjbwdh%fdkkjq%g`%wpk%"]}
+    if imports is not None:
+        quick["evidence"]["pe"]["imports"] = imports
+    (pack_root / "quick" / "quick.json").write_text(
+        json.dumps(quick), encoding="utf-8")
+    return pack_root
+
+
+def test_the_cli_switch_line_does_not_attribute_an_import_the_pack_lacks(tmp_path):
+    """THE 2026-10-27 s07 control. The template asserted "switches from
+    strings + GetCommandLine imports" for switch-like strings while the
+    pack's imports were the UPX stub's LoadLibraryA/GetProcAddress only -
+    GetCommandLine appeared nowhere in the evidence, the claim review
+    correctly refused the claim, and the run went red on one insufficient
+    claim of 58. The attribution must follow the import evidence."""
+    pack_root = _pack_with_cli_strings(_pack(tmp_path))
+    reporting.build_report_v3(pack_root, review_claims=False)
+    markdown = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(
+        encoding="utf-8")
+    assert "CLI-switch string candidates" in markdown, (
+        "switch-like strings must still be reported, without the import claim")
+    assert "GetCommandLine" not in markdown, (
+        "the report attributed an import the evidence never showed "
+        "(2026-10-27 s07 red run)")
+
+
+def test_the_cli_switch_line_attributes_the_import_when_the_evidence_shows_it(tmp_path):
+    """The other direction: when the imports evidence does show
+    GetCommandLine and the reviewer can see that evidence, the attribution
+    stays and cites the imports the reviewer can read."""
+    pack_root = _pack_with_cli_strings(
+        _pack(tmp_path),
+        imports=[{"dll": "kernel32.dll",
+                  "functions": ["GetCommandLineA", "lstrcatA"]}])
+    reporting.build_report_v3(pack_root, review_claims=False)
+    markdown = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(
+        encoding="utf-8")
+    assert "switches from strings + GetCommandLine imports" in markdown
+    locators = json.loads(
+        (pack_root / "report" / "evidence-locators.json").read_text(
+            encoding="utf-8")).get("locators") or {}
+    assert any((meta or {}).get("reference") == "quick/quick.json#$.evidence.pe.imports"
+               for meta in locators.values()), (
+        "the import attribution must cite a locator the reviewer can resolve")

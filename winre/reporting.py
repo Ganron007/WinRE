@@ -895,9 +895,34 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
           + " — this does not establish a runtime connection or C2.")
     cli = _bc.get("cli") or []
     if cli:
-        A(f"- **CLI behavior table:** " + "; ".join(f"`{c}`" for c in cli[:8])
-          + " (switches from strings + GetCommandLine imports; verify per-branch "
-          "in the debugger/dynamic phase).")
+        # Attribute the import only when import evidence shows it AND the
+        # reviewer can see that evidence: the 2026-10-27 s07 static run (UPX
+        # stub imports LoadLibraryA/GetProcAddress only) had this line assert
+        # "GetCommandLine imports" the pack never contained, and the claim
+        # review correctly refused the claim as unsupported. set_evidence
+        # drops an over-broad import locator, so an attribution citing it
+        # would assert the import on invisible evidence - fall back to the
+        # honest wording instead.
+        _import_refs = ("quick/quick.json#$.evidence.pe.imports",
+                        "quick/quick.json#$.evidence.pe_import_signals")
+        set_evidence(*_import_refs, *_behavior_refs)
+        _visible_import_refs = [ref for ref in _import_refs
+                                if ref in active_refs]
+        _imports_blob = json.dumps(
+            [(ev.get("pe") or {}).get("imports"),
+             ev.get("pe_import_signals")], default=str).lower()
+        if "getcommandline" in _imports_blob and _visible_import_refs:
+            A(f"- **CLI behavior table:** "
+              + "; ".join(f"`{c}`" for c in cli[:8])
+              + " (switches from strings + GetCommandLine imports; verify "
+              "per-branch in the debugger/dynamic phase).")
+        else:
+            A(f"- **CLI-switch string candidates:** "
+              + "; ".join(f"`{c}`" for c in cli[:8])
+              + " (strings that look like command-line switches; this static "
+              "evidence does not attribute them to command-line parsing; "
+              "verify actual argument handling in the debugger/dynamic "
+              "phase).")
     art = _bc.get("artifacts") or {}
     artifact_items = [
         ("mutex", art.get("mutexes") or []),
