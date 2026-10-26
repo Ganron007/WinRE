@@ -704,12 +704,22 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
                 selected_locators = [str(value).strip()
                                      for value in row.get("locators") or []]
                 evidence_by_locator = {ev["locator"]: ev for ev in item["evidence"]}
+                # A locator id outside this claim's evidence list carries no
+                # information about this claim: the model sees the whole
+                # batch's excerpts and occasionally grabs a neighbour's id.
+                # Discard it and judge the decision on the ids that resolve;
+                # a supported/contradicted verdict still needs at least one
+                # resolvable locator of its own plus valid quotes, so the
+                # fail-closed floor stays. (2026-10-27 s09 dbg C0006: a
+                # "supported" decision with 4/5 ids this claim's own and one
+                # neighbour id was invalidated whole.)
+                unknown_locators = [locator for locator in selected_locators
+                                    if locator not in evidence_by_locator]
                 selected = [evidence_by_locator[locator]
                             for locator in selected_locators
                             if locator in evidence_by_locator]
-                selection_valid = (len(selected) == len(selected_locators)
-                                   and (verdict == "insufficient"
-                                        or bool(selected_locators)))
+                selection_valid = (verdict == "insufficient"
+                                   or bool(selected))
                 # The model selects source IDs only. Persist excerpts from all
                 # selected fields so joint support can be independently
                 # re-resolved without making the model echo arbitrary evidence.
@@ -734,6 +744,7 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
                 results.append({"claim_id": item["id"], "claim": item["claim"],
                                 "status": status,
                                 "reviewed_locators": selected_locators,
+                                "unknown_locators": unknown_locators,
                                 "reason": reason,
                                 "evidence_quotes": quotes,
                                 "evidence_quote": quotes[0]["quote"] if quotes else "",

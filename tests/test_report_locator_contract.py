@@ -432,3 +432,52 @@ def test_the_decrypt_gate_line_cites_the_tool_result_it_reports(tmp_path):
             encoding="utf-8")).get("locators") or {}
     refs = [(locators.get(f"E{eid}") or {}).get("reference") for eid in ids]
     assert "deep/deep.json#$.agent.history[0].result" in refs, refs
+
+
+def test_a_foreign_locator_id_is_discarded_not_invalidating(tmp_path, monkeypatch):
+    """2026-10-27 s09 dbg C0006: the reviewer answered "supported" with the
+    claim's own four locator ids plus one id belonging to the NEIGHBOUR
+    claim, and the pipeline invalidated the whole decision. A foreign id
+    carries no information about this claim: discard it and judge the
+    decision on the ids that resolve - a supported verdict still needs at
+    least one resolvable own locator plus valid quotes."""
+    pack_root = _pack(tmp_path)
+    from winre import llm_client
+
+    def fake_chat_result(messages, **kwargs):
+        prompt = next((m.get("content") for m in messages
+                       if m.get("role") == "user"), "")
+        claims = json.loads(prompt.split("CLAIMS: ", 1)[-1])
+        reviews = []
+        for index, item in enumerate(claims):
+            own = [str(entry.get("locator"))
+                   for entry in (item.get("evidence") or [])]
+            if index == 0 and len(claims) > 1:
+                neighbour = [str(entry.get("locator"))
+                             for entry in (claims[1].get("evidence") or [])]
+                foreign = next((x for x in neighbour if x not in own), None)
+                if foreign:
+                    own = own + [foreign]
+            reviews.append({"claim_id": item["id"], "verdict": "supported",
+                            "locator_ids": own})
+        return {"content": "", "finish_reason": "tool_calls",
+                "tool_calls": [{"function": {
+                    "name": "submit_claim_reviews",
+                    "arguments": json.dumps({"reviews": reviews})}}],
+                "usage": {}, "model": "stub", "response_id": "stub",
+                "error": None}
+
+    monkeypatch.setattr(llm_client, "chat_result", fake_chat_result)
+    monkeypatch.setattr(llm_client, "model_for", lambda role: "stub-model")
+    monkeypatch.setattr(llm_client, "API_KEY", "stub-key")
+    monkeypatch.setattr(llm_client, "BASE_URL", "http://127.0.0.1:9/v1")
+
+    res = reporting.build_report_v3(pack_root, review_claims=True)
+    review = res.get("claim_review") or {}
+    statuses = review.get("by_status") or {}
+    assert "invalid-review" not in statuses, review
+    flagged = [c for c in (review.get("claims") or [])
+               if c.get("unknown_locators")]
+    assert flagged, "no claim recorded a discarded foreign locator id"
+    for claim in flagged:
+        assert claim.get("status") == "supported", claim
