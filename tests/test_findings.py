@@ -242,3 +242,32 @@ def test_a_findings_rebuild_inherits_the_pack_run_id(tmp_path):
     assert out.get("run_id") == "d" * 32, out.get("run_id")
     written = json.loads((pack_root / "findings.json").read_text(encoding="utf-8"))
     assert written.get("run_id") == "d" * 32
+
+
+def test_static_basis_clips_long_evidence_at_a_word_boundary(tmp_path):
+    """2026-10-27 s09 static control: key_evidence strings were chopped at 60
+    chars MID-WORD into the composite basis ("...strings sparse — ca"), the
+    report echoed the garbled strings, and the claim reviewer refused the
+    composite-basis claim as contradicted. The clip must respect word
+    boundaries and mark the cut."""
+    d = tmp_path / "static"
+    (d / "quick").mkdir(parents=True)
+    (d / "deep").mkdir(parents=True)
+    (d / "quick" / "quick.json").write_text(
+        json.dumps({"evidence": {}}), encoding="utf-8")
+    long_evidence = ("decrypt-gate: none packing — imports=222 strings sparse "
+                     "— capa/string evidence unreliable")
+    (d / "deep" / "deep.json").write_text(json.dumps({
+        "verdict": "unknown", "confidence": "low",
+        "source": "static_deterministic", "engine": "static_deterministic",
+        "key_evidence": [long_evidence],
+        "agent": {"source": "static_deterministic",
+                  "verdict": {"verdict": "unknown", "confidence": "low"}},
+        "history": [],
+    }), encoding="utf-8")
+    out = findings.build("static", d, sha="s" * 64)
+    basis = (out.get("verdict") or {}).get("basis") or []
+    entry = [b for b in basis if b.startswith("evidence:decrypt-gate")]
+    assert entry, f"the long key_evidence never reached the basis: {basis}"
+    assert entry[0] == ("evidence:decrypt-gate: none packing "
+                        "— imports=222 strings sparse…"), entry[0]

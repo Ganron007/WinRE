@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -399,3 +400,35 @@ def test_the_cli_switch_line_attributes_the_import_when_the_evidence_shows_it(tm
     assert any((meta or {}).get("reference") == "quick/quick.json#$.evidence.pe.imports"
                for meta in locators.values()), (
         "the import attribution must cite a locator the reviewer can resolve")
+
+
+def test_the_decrypt_gate_line_cites_the_tool_result_it_reports(tmp_path):
+    """2026-10-27 s09 static control: the "Decrypt gate: GATED" line cited
+    quick/quick.json#$.evidence.decrypt_gate (never present - the result
+    lives only in the deep history) and the whole-history wildcard (dropped
+    as over-broad), so the line published with no locator and the claim
+    review refused it as unverifiable. The line must cite the decrypt_gate
+    tool's own history result."""
+    pack_root = _pack(tmp_path)
+    deep = json.loads(
+        (pack_root / "deep" / "deep.json").read_text(encoding="utf-8"))
+    deep["agent"]["history"].insert(0, {
+        "tool": "decrypt_gate",
+        "result": {"ok": True, "tool": "decrypt_gate", "status": "gate",
+                   "taxonomy": "none", "import_count": 222,
+                   "import_dlls": ["WS2_32.dll", "USER32.dll"]}})
+    (pack_root / "deep" / "deep.json").write_text(
+        json.dumps(deep), encoding="utf-8")
+    reporting.build_report_v3(pack_root, review_claims=False)
+    markdown = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(
+        encoding="utf-8")
+    line = [ln for ln in markdown.splitlines()
+            if "Decrypt gate: GATED" in ln]
+    assert line, "the gated decrypt-gate line must still be reported"
+    ids = re.findall(r"\[E(\d+)\]", line[0])
+    assert ids, f"the decrypt-gate line published with no locator: {line[0]}"
+    locators = json.loads(
+        (pack_root / "report" / "evidence-locators.json").read_text(
+            encoding="utf-8")).get("locators") or {}
+    refs = [(locators.get(f"E{eid}") or {}).get("reference") for eid in ids]
+    assert "deep/deep.json#$.agent.history[0].result" in refs, refs

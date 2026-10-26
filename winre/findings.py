@@ -1467,7 +1467,14 @@ def static_findings(mode_root: Path, *, sha: str = "") -> dict:
                                     "engine": deep.get("engine")}
         used.append("deep.json verdict")
     for e in (deep.get("key_evidence") or [])[:6]:
-        basis.append("evidence:" + (e if isinstance(e, str) else json.dumps(e))[:60])
+        text = e if isinstance(e, str) else json.dumps(e)
+        if len(text) > 60:
+            # Cut at a word boundary: a mid-word chop published garbled basis
+            # strings ("...strings sparse — ca") that the report echoed
+            # verbatim and the claim reviewer refused (2026-10-27 s09 static,
+            # claim C0008 contradicted).
+            text = text[:60].rsplit(" ", 1)[0].rstrip(" ,;—-") + "…"
+        basis.append("evidence:" + text)
 
     # Capa capabilities mapped to ATT&CK are independent evidence: a sample
     # that encodes with XOR/DES and walks the PEB has done something worth

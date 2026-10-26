@@ -862,13 +862,20 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
         A("")
     dg = ev.get("decrypt_gate") or {}
     if dg.get("status") == "gate":
+        # The result lives in the deep history on every current pack (the
+        # quick evidence never carries it), and the whole-history wildcard is
+        # over-broad, so both refs dropped and the line published with no
+        # locator at all - claim C0074 "no resolvable evidence locator"
+        # (2026-10-27 s09 static). Cite the tool's own history result; if
+        # nothing resolves, emit nothing rather than an uncited claim.
         set_evidence("quick/quick.json#$.evidence.decrypt_gate",
-                     "deep/deep.json#$.agent.history[*].result")
-        A(f"- **Decrypt gate: GATED** ({dg.get('taxonomy') or 'unknown'} — "
-          f"imports={dg.get('import_count')} sparse strings). Static "
-          "capability evidence is unreliable; unpack + dynamic validation "
-          "required before trusting capa/strings clusters.")
-        A("")
+                     *(history_refs_by_tool.get("decrypt_gate") or []))
+        if active_refs:
+            A(f"- **Decrypt gate: GATED** ({dg.get('taxonomy') or 'unknown'} — "
+              f"imports={dg.get('import_count')} sparse strings). Static "
+              "capability evidence is unreliable; unpack + dynamic validation "
+              "required before trusting capa/strings clusters.")
+            A("")
 
     A("## 6. Behavior-context notes (kill-switch / CLI / artifacts)")
     A("")
