@@ -532,5 +532,6 @@ def test_the_review_prompt_carries_the_attributed_summary_contract(
     reporting.build_report_v3(pack_root, review_claims=True)
     prompt = captured.get("prompt") or ""
     assert "not an independent finding" in prompt
-    assert "Do not refuse such a claim" in prompt
-    assert "asserts facts the cited evidence does not cover" in prompt
+    assert "Refuse such a claim ONLY when the quoted judgment does not match" in prompt
+    assert "directly contradicts the recorded judgment" in prompt
+    assert "because some factual clause is not separately covered" in prompt
