@@ -426,3 +426,53 @@ def test_llm_role_guard_covers_every_role_variable():
         assert var in src, (
             f"the one-resolver guard must cover {var} too - the UI read "
             "WINRE_LLM_MODEL directly and the guard never noticed")
+
+
+def test_vt_detection_floor_clamps_a_benign_verdict():
+    """2026-10-27 contract decision (operator-delegated): an agent verdict of
+    `benign` cannot stand beside heavy detection evidence in its own pack.
+    On s09 the same binary was judged malicious/high (agentic run) and
+    benign/medium (dbg run); the dbg run's benign summary then failed the
+    claim review twice beside a cited 51/70 trojan.bandra/knotweed VT block.
+    The floor clamps benign to the enum's non-committal `unknown`, keeps the
+    original judgment recorded, and states the floor in the summary."""
+    from winre.agentic import _apply_vt_detection_floor, _vt_heavy_detection
+    quick = {"evidence": {"vt": {"found": True, "malicious": 51,
+                                 "suspicious": 0, "harmless": 0,
+                                 "undetected": 19,
+                                 "detection_ratio": "51/70",
+                                 "family": "trojan.bandra/knotweed"}}}
+    hit = _vt_heavy_detection(quick)
+    assert hit == {"detected": 51, "total": 70,
+                   "family": "trojan.bandra/knotweed"}
+    out = _apply_vt_detection_floor(
+        {"verdict": "benign", "confidence": "medium", "summary": "dual-use tool"},
+        hit)
+    assert out["verdict"] == "unknown"
+    assert out["confidence"] == "low"
+    assert out["original_verdict"] == "benign"
+    assert out["floor_source"] == "vt-detection"
+    assert out["verdict_floored"] is True
+    assert out["rules_fired"] == ["verdict-floor:vt-detection"]
+    assert out["summary"].startswith(
+        "Floored to unknown by heavy AV detection (51/70")
+    assert "dual-use tool" in out["summary"]
+    # the other directions: only a benign verdict is clamped
+    assert _apply_vt_detection_floor(
+        {"verdict": "malicious", "confidence": "high", "summary": "s"},
+        hit)["verdict"] == "malicious"
+    assert _apply_vt_detection_floor(
+        {"verdict": "unknown", "confidence": "low", "summary": "s"},
+        hit)["verdict"] == "unknown"
+    # below the heavy bar, or a family-less block: no hit, no clamp
+    low = {"evidence": {"vt": {"found": True, "malicious": 16, "harmless": 0,
+                               "suspicious": 0, "undetected": 55,
+                               "detection_ratio": "16/71", "family": "x"}}}
+    assert _vt_heavy_detection(low) is None
+    nofam = {"evidence": {"vt": {"found": True, "malicious": 60, "harmless": 0,
+                                 "suspicious": 0, "undetected": 10,
+                                 "detection_ratio": "60/70", "family": None}}}
+    assert _vt_heavy_detection(nofam) is None
+    assert _apply_vt_detection_floor(
+        {"verdict": "benign", "confidence": "medium", "summary": "s"},
+        _vt_heavy_detection(low))["verdict"] == "benign"

@@ -481,3 +481,56 @@ def test_a_foreign_locator_id_is_discarded_not_invalidating(tmp_path, monkeypatc
     assert flagged, "no claim recorded a discarded foreign locator id"
     for claim in flagged:
         assert claim.get("status") == "supported", claim
+
+
+def test_the_summary_cites_the_dbg_fields_it_asserts(tmp_path):
+    """2026-10-27 s09 dbg run 2: the attributed summary asserted prepass/OEP
+    results with no citable locator behind them and the review judged the
+    claim insufficient. The summary line must cite the agent fields that can
+    back such assertions (set_evidence drops those a pack does not carry)."""
+    pack_root = _pack(tmp_path)
+    deep = json.loads(
+        (pack_root / "deep" / "deep.json").read_text(encoding="utf-8"))
+    deep["agent"]["unpack_prepass"] = {"ok": True,
+                                       "method": "deterministic_prepass",
+                                       "oep": "0x1400", "unpacked": True}
+    deep["agent"]["packed_signal"] = {"sections": [".data"],
+                                      "high_entropy": True}
+    (pack_root / "deep" / "deep.json").write_text(
+        json.dumps(deep), encoding="utf-8")
+    reporting.build_report_v3(pack_root, review_claims=False)
+    locators = json.loads(
+        (pack_root / "report" / "evidence-locators.json").read_text(
+            encoding="utf-8")).get("locators") or {}
+    refs = {(m or {}).get("reference") for m in locators.values()}
+    assert "deep/deep.json#$.agent.unpack_prepass" in refs, sorted(refs)[:8]
+    assert "deep/deep.json#$.agent.packed_signal" in refs
+
+
+def test_the_review_prompt_carries_the_attributed_summary_contract(
+        tmp_path, monkeypatch):
+    """2026-10-27 contract decision: a recorded-model-judgment claim is
+    judged on (a) the judgment being genuinely recorded and (b) its factual
+    assertions being covered by the cited evidence - not on whether the
+    reviewer agrees with the recorded conclusion. Both s09 dbg refusals
+    turned on exactly this distinction."""
+    pack_root = _pack(tmp_path)
+    captured = {}
+    from winre import llm_client
+
+    def fake_chat_result(messages, **kwargs):
+        captured["prompt"] = next((m.get("content") for m in messages
+                                   if m.get("role") == "user"), "")
+        return {"content": "", "finish_reason": "stop", "tool_calls": [],
+                "usage": {}, "model": "stub", "response_id": "stub",
+                "error": None}
+
+    monkeypatch.setattr(llm_client, "chat_result", fake_chat_result)
+    monkeypatch.setattr(llm_client, "model_for", lambda role: "stub-model")
+    monkeypatch.setattr(llm_client, "API_KEY", "stub-key")
+    monkeypatch.setattr(llm_client, "BASE_URL", "http://127.0.0.1:9/v1")
+    reporting.build_report_v3(pack_root, review_claims=True)
+    prompt = captured.get("prompt") or ""
+    assert "not an independent finding" in prompt
+    assert "Do not refuse such a claim" in prompt
+    assert "asserts facts the cited evidence does not cover" in prompt

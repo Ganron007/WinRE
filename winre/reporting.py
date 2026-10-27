@@ -812,12 +812,24 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
         agent_refs: list[str] = []
         for tool_refs in history_refs_by_tool.values():
             agent_refs.extend(tool_refs)
+        # The summary may name dbg-side results (the deterministic unpack
+        # prepass, packed-section signal) and, when the verdict floor fired,
+        # the floor record itself; the 2026-10-27 s09 dbg run failed its
+        # review because the summary asserted prepass/OEP results with no
+        # citable locator behind them (claim judged insufficient). Cite the
+        # agent fields that back those assertions; set_evidence drops any
+        # that do not exist.
         set_evidence("deep/deep.json#$.agent.verdict.summary",
                      "quick/quick.json#$.evidence.capa.total",
                      "quick/quick.json#$.evidence.pe.imports",
                      "quick/quick.json#$.evidence.threat_intel",
                      "quick/quick.json#$.evidence.yarascan",
                      "quick/quick.json#$.evidence.vt",
+                     "deep/deep.json#$.agent.unpack_prepass",
+                     "deep/deep.json#$.agent.packed_signal",
+                     "deep/deep.json#$.agent.verdict.verdict_floored",
+                     "deep/deep.json#$.agent.verdict.floor_source",
+                     "deep/deep.json#$.agent.verdict.original_verdict",
                      *named_caps[:20],
                      *agent_refs[:30])
         # The summary is the MODEL's judgment over the evidence, not a

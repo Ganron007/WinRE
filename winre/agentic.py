@@ -1232,6 +1232,70 @@ def _curated_yara_hits(quick: dict | None, findings: dict) -> list[str]:
     return out
 
 
+def _vt_heavy_detection(quick: dict | None) -> dict | None:
+    """The pack's VT block when it shows heavy detection, else None.
+
+    'Heavy' is deliberately mechanical (2026-10-27 contract decision):
+    detections >= 50% of the engines that voted AND a malware family label
+    present. A ratio alone or a family alone does not fire."""
+    ev = (quick or {}).get("evidence") or {}
+    vt = ev.get("vt") or {}
+    if not isinstance(vt, dict) or not vt.get("found"):
+        return None
+    detected = total = None
+    ratio = str(vt.get("detection_ratio") or "")
+    if "/" in ratio:
+        a, _, b = ratio.partition("/")
+        if a.strip().isdigit() and b.strip().isdigit():
+            detected, total = int(a), int(b)
+    if detected is None and isinstance(vt.get("malicious"), int):
+        detected = vt["malicious"]
+        total = (vt.get("malicious", 0) + vt.get("harmless", 0)
+                 + vt.get("suspicious", 0) + vt.get("undetected", 0))
+    if not total or detected is None:
+        return None
+    family = str(vt.get("family") or "").strip()
+    if not family or detected * 2 < total:
+        return None
+    return {"detected": detected, "total": total, "family": family}
+
+
+def _apply_vt_detection_floor(verdict: dict | None, vt_hit: dict | None) -> dict | None:
+    """VT-detection floor (2026-10-27 contract decision, operator-delegated):
+    an agent verdict of `benign` cannot stand beside heavy detection evidence
+    in its own pack. On s09 the same binary was judged malicious/high by the
+    agentic run and benign/medium by the dbg run; a flat benign ruling beside
+    a 51/70 malware-family detection block is overconfidence, and the report
+    claim review correctly refused it twice. Benign floors to `unknown` (the
+    enum's non-committal level; the composite derives `suspicious` from its
+    own basis), the original judgment stays recorded, and the summary states
+    the floor. Malicious and unknown verdicts are untouched - VT alone never
+    proves behavioral malice (calibration contract)."""
+    if not isinstance(verdict, dict) or not vt_hit:
+        return verdict
+    label = str(verdict.get("verdict") or "").strip().lower()
+    if label != "benign":
+        return verdict
+    out = dict(verdict)
+    out["verdict"] = "unknown"
+    out["confidence"] = "low"
+    out["verdict_floored"] = True
+    out["floor_source"] = "vt-detection"
+    out["original_verdict"] = verdict.get("verdict")
+    out["original_confidence"] = verdict.get("confidence")
+    out["floor_vt"] = dict(vt_hit)
+    summary = str(verdict.get("summary") or "").strip()
+    prefix = (f"Floored to unknown by heavy AV detection "
+              f"({vt_hit['detected']}/{vt_hit['total']}, family "
+              f"{vt_hit['family']}): a benign ruling cannot stand beside this "
+              "evidence; the dual-use/known-tool reading is retained as "
+              "context.")
+    out["summary"] = (prefix + (" " + summary if summary else ""))
+    out["rules_fired"] = list(verdict.get("rules_fired") or []) + \
+        ["verdict-floor:vt-detection"]
+    return out
+
+
 def _apply_verdict_floor(verdict: dict | None, rules: list[str]) -> dict | None:
     """Curated-YARA verdict floor: a below-malicious verdict cannot contradict
     a family-distinctive rule match (fixes malicious<->legit flapping across
@@ -2068,6 +2132,7 @@ to your final answer immediately.
     # curated-YARA verdict floor (W2): never let a below-malicious verdict
     # contradict a family-distinctive rule match
     verdict = _apply_verdict_floor(verdict, _curated_yara_hits(quick, findings))
+    verdict = _apply_vt_detection_floor(verdict, _vt_heavy_detection(quick))
     if verdict is None:
         return {"verdict": None, "source": "deterministic_fallback",
                 "history": history, "llm_analysis": llm_text[:200_000],
