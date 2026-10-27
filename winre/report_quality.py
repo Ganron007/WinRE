@@ -759,7 +759,17 @@ def review_report(pack_root: Path, *, report_path: Path | None = None,
                           else "")
                 results.append({"claim_id": item["id"], "claim": item["claim"],
                                 "status": status,
-                                "reviewed_locators": selected_locators,
+                                # The decision binds to the RESOLVED selection
+                                # only: the audit re-checks
+                                # reviewed_locators against the claim's own
+                                # locator set, so a discarded foreign id must
+                                # not appear here (it stays visible in
+                                # unknown_locators). 2026-10-27 s09 dbg run 4:
+                                # the review was 77/77 supported but the
+                                # audit refused the pack because a foreign id
+                                # was still listed here.
+                                "reviewed_locators": [ev["locator"]
+                                                      for ev in selected],
                                 "unknown_locators": unknown_locators,
                                 "reason": reason,
                                 "evidence_quotes": quotes,

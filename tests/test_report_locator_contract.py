@@ -481,6 +481,14 @@ def test_a_foreign_locator_id_is_discarded_not_invalidating(tmp_path, monkeypatc
     assert flagged, "no claim recorded a discarded foreign locator id"
     for claim in flagged:
         assert claim.get("status") == "supported", claim
+        # The decision binds to the RESOLVED selection only: the audit
+        # re-checks reviewed_locators against the claim's own locator set,
+        # so a discarded foreign id must not appear there (2026-10-27 s09
+        # dbg run 4: 77/77 supported yet the audit refused the pack).
+        assert set(claim["unknown_locators"]).isdisjoint(
+            claim["reviewed_locators"]), claim
+        assert set(claim["reviewed_locators"]).issubset(
+            set(claim["locators"])), claim
 
 
 def test_the_summary_cites_the_dbg_fields_it_asserts(tmp_path):
