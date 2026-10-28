@@ -543,3 +543,35 @@ def test_the_review_prompt_carries_the_attributed_summary_contract(
     assert "Refuse such a claim ONLY when the quoted judgment does not match" in prompt
     assert "directly contradicts the recorded judgment" in prompt
     assert "because some factual clause is not separately covered" in prompt
+
+
+def test_the_strings_bullets_skip_fragments_and_duplicates(tmp_path):
+    """2026-10-27 s08 static C0024: the report's deep-strings bullets took
+    the first 10 strings raw - code-byte fragments with no analytic value,
+    duplicates included - and each bullet became a claim; a reviewer
+    noise-refused one fragment ('contradicted' with no reason on a claim
+    that is its own quote). The bullets now emit DISTINCT strings that
+    contain a 4-character alphanumeric run, with original-row locators."""
+    pack_root = _pack(tmp_path)
+    deep = json.loads(
+        (pack_root / "deep" / "deep.json").read_text(encoding="utf-8"))
+    deep["agent"]["history"].append({
+        "tool": "strings_tool",
+        "result": {"ok": True, "tool": "strings_tool", "total": 9,
+                   "strings": ["D$\;D$pt", "D$\;D$pt", "L$> L$?t",
+                               "!This program cannot be run in DOS mode.",
+                               "<GtC<Tt?1", "GetCommandLineA",
+                               "GetCommandLineA", "Software\Classes\ms-settings",
+                               "u3<.t/<Rt"]}})
+    (pack_root / "deep" / "deep.json").write_text(
+        json.dumps(deep), encoding="utf-8")
+    reporting.build_report_v3(pack_root, review_claims=False)
+    md = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(
+        encoding="utf-8")
+    assert "`D$\;D$pt`" not in md, "code fragments must not become claims"
+    assert "`L$> L$?t`" not in md
+    assert "`<GtC<Tt?1`" not in md
+    assert "`u3<.t/<Rt`" not in md
+    assert "!This program cannot be run in DOS mode." in md
+    assert md.count("`GetCommandLineA`") == 1, "duplicates must be emitted once"
+    assert "Software\Classes\ms-settings" in md

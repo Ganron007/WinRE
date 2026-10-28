@@ -663,9 +663,28 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
         if strings_refs:
             set_evidence(f"{strings_refs[-1]}.total")
             A(f"- Deep strings tool returned {strings_record.get('total', 0)} strings.")
-            for index, value in enumerate((strings_record.get("strings") or [])[:10]):
+            # The first strings in enumeration order are usually code-byte
+            # fragments ("D$\;D$pt") with no analytic value, and duplicates
+            # repeat across sections; every bullet becomes a claim the
+            # reviewer must judge, and one fragment was noise-refused
+            # (2026-10-27 s08 static, C0024 'contradicted' with no reason on
+            # a claim that is its own quote). Emit only DISTINCT strings
+            # that contain at least one 4-character alphanumeric run;
+            # locators keep the original row indices.
+            shown = 0
+            seen_strings: set[str] = set()
+            for index, value in enumerate(strings_record.get("strings") or []):
+                if shown >= 10:
+                    break
+                text = str(value)[:120]
+                if text in seen_strings:
+                    continue
+                if not re.search(r"[A-Za-z0-9]{4}", text):
+                    continue
+                seen_strings.add(text)
                 set_evidence(f"{strings_refs[-1]}.strings[{index}]")
-                A(f"  - `{str(value)[:120]}`")
+                A(f"  - `{text}`")
+                shown += 1
     A("")
 
     A("## 3. Static evidence (per tool)")
