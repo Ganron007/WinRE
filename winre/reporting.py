@@ -715,6 +715,17 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     if ds:
         for s in ds[:15]:
             A(f"- `{s[:120]}`")
+    elif floss.get("error") or floss.get("ok") is False:
+        # A failed floss run is not a zero result: rendering the crash as
+        # "none decoded (0 total)" told the reviewer the tool found nothing
+        # when it never ran (2026-10-27 s08 static, C0030 insufficient - the
+        # cited excerpt is the error record, and the silent-degradation
+        # class B says a capability that did not run must not look like one
+        # that found nothing).
+        set_evidence("quick/quick.json#$.evidence.floss.error",
+                     *(history_refs_by_tool.get("floss") or []))
+        A(f"- floss failed on this sample - nothing was decoded "
+          f"({str(floss.get('error'))[:160]})")
     else:
         A(f"- none decoded ({floss.get('total_decoded', 0)} total)")
     A("")

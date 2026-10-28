@@ -575,3 +575,42 @@ def test_the_strings_bullets_skip_fragments_and_duplicates(tmp_path):
     assert "!This program cannot be run in DOS mode." in md
     assert md.count("`GetCommandLineA`") == 1, "duplicates must be emitted once"
     assert "Software\Classes\ms-settings" in md
+
+
+def test_a_failed_floss_run_is_not_reported_as_a_zero_result(tmp_path):
+    """2026-10-27 s08 static C0030: floss crashed ('Invalid File') and the
+    report rendered the crash as 'none decoded (0 total)' - the reviewer
+    correctly judged the claim insufficient against the cited error record.
+    A failed tool must say so; the silent-degradation class B forbids
+    rendering a capability that did not run as one that found nothing."""
+    pack_root = _pack(tmp_path)
+    quick = json.loads(
+        (pack_root / "quick" / "quick.json").read_text(encoding="utf-8"))
+    quick["evidence"]["floss"] = {"ok": False, "tool": "floss",
+                                  "total_decoded": 0,
+                                  "error": "Exception: Invalid File: None"}
+    (pack_root / "quick" / "quick.json").write_text(
+        json.dumps(quick), encoding="utf-8")
+    reporting.build_report_v3(pack_root, review_claims=False)
+    md = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(
+        encoding="utf-8")
+    assert "floss failed on this sample" in md
+    assert "Exception: Invalid File" in md
+    assert "none decoded" not in md
+
+
+def test_an_honest_zero_decoded_result_still_says_none_decoded(tmp_path):
+    """The other direction: when floss genuinely ran and decoded nothing,
+    the zero result stays."""
+    pack_root = _pack(tmp_path)
+    quick = json.loads(
+        (pack_root / "quick" / "quick.json").read_text(encoding="utf-8"))
+    quick["evidence"]["floss"] = {"ok": True, "tool": "floss",
+                                  "decoded_strings": [], "total_decoded": 0}
+    (pack_root / "quick" / "quick.json").write_text(
+        json.dumps(quick), encoding="utf-8")
+    reporting.build_report_v3(pack_root, review_claims=False)
+    md = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(
+        encoding="utf-8")
+    assert "none decoded (0 total)" in md
+    assert "floss failed" not in md
