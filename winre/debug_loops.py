@@ -365,6 +365,21 @@ def ep_break(sample: str, xc: X64DbgClient | None = None,
     except Exception:
         pass
     r = xc.load_binary(sample)
+    # LoadBinary FAILS OPEN in the upstream plugin: a missing file AND an
+    # image the loader rejects (e.g. an entry-point RVA outside the image)
+    # both return ok=True with "Binary init command sent. The debuggee may
+    # still be loading." and nothing else ever happens (2026-10-29 probe:
+    # notepad32 loads with a SUCCESS text and full events; a loader-rejected
+    # sample produces zero events). Record the response text - it is the
+    # only load signal the plugin gives - and verify the module instead of
+    # trusting the ok flag.
+    load_text = ""
+    try:
+        _c = (r.get("result") or {}).get("content") or [{}]
+        load_text = str(_c[0].get("text", ""))[:200]
+    except Exception:
+        pass
+    evidence.append({"label": "load", "response": load_text})
     if not r.get("ok"):
         return {"ok": False, "error": f"load failed: {r.get('error')}",
                 "diagnostics": _debugger_diagnostics(xc),

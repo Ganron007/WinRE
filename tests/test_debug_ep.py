@@ -32,7 +32,10 @@ class FakeEpXc:
         return {"ok": True, "result": {}}
 
     def load_binary(self, path):
-        return {"ok": True}
+        text = ("Binary loaded. Paused at 0x401000." if self.module_present
+                else "Binary init command sent. The debuggee may still be loading.")
+        return {"ok": True, "result": {"content": [{"type": "text",
+                                                    "text": text}]}}
 
     def execute_command(self, cmd):
         self.commands.append(cmd)
@@ -86,6 +89,11 @@ def test_ep_break_refuses_to_free_run_when_the_bp_does_not_register(monkeypatch)
     assert "did not register" in str(r.get("error")), r.get("error")
     assert xc.run_calls == 0, (
         "the flow must not free-run the target without an EP breakpoint")
+    load_rows = [e for e in r.get("evidence") or []
+                 if e.get("label") == "load"]
+    assert load_rows and "may still be loading" in load_rows[0]["response"], (
+        "the plugin's load response text must be recorded (2026-10-29: it is "
+        "the only signal LoadBinary gives, and it fails open)")
 
 
 def test_set_entry_bp_never_arms_bp_zero(monkeypatch):

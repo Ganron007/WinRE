@@ -91,6 +91,19 @@ WinRE `winre/mcp/x64dbg_client.py` wraps this HTTP — see [`SSH-CONTRACT.md`](S
 - `TraceInto` max 100 instr (`tools.zig:381`), `ReadMemory` 4096 (`tools.zig:997`).
 - In-process — debugger crash kills MCP (use `RestartDebug`).
 - `GetPEB`/`GetSEHChain` x32-focused — x64 PEB via `EvalExpression` fallback.
+- **`LoadBinary` fails open.** A missing path AND an image the Windows
+  loader rejects both return `ok=true` with the text "Binary init command
+  sent. The debuggee may still be loading." — no event, no target, no
+  error. Only a successful load says "SUCCESS: Binary loaded" and emits
+  "Process created" in the event log. A load is therefore verified by the
+  module appearing (`ListModules`), never by the response text: a rejected
+  image (e.g. an entry-point RVA outside `SizeOfImage`, measured live on
+  2026-10-29 with a sample whose `AddressOfEntryPoint` was `0xFFC00000`
+  against a `0x147000` image) can never produce a debuggee, and no
+  debugger can run it. The pipeline arms no breakpoint until the module is
+  mapped, never free-runs an unverified load, and records the plugin's
+  response text plus full diagnostics (state, events, breakpoints,
+  modules) when a load cannot be confirmed.
 
 ## References
 
