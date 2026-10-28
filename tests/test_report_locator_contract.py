@@ -614,3 +614,36 @@ def test_an_honest_zero_decoded_result_still_says_none_decoded(tmp_path):
         encoding="utf-8")
     assert "none decoded (0 total)" in md
     assert "floss failed" not in md
+
+
+def test_a_multi_line_error_is_one_report_line(tmp_path):
+    """2026-10-27 s08 static M0001/U0001-3: the floss error carries an
+    ASCII-art banner with newlines; embedding it raw split the claim into
+    three visible lines that no longer matched the claim ledger. One A()
+    call is one report line - multi-line content is collapsed."""
+    pack_root = _pack(tmp_path)
+    quick = json.loads(
+        (pack_root / "quick" / "quick.json").read_text(encoding="utf-8"))
+    quick["evidence"]["floss"] = {
+        "ok": False, "tool": "floss", "total_decoded": 0,
+        "error": "banner\n| in getFileMeta:3010                         |\n"
+                 "+---------------------------------------------+\n"
+                 "Exception: Invalid File: None"}
+    (pack_root / "quick" / "quick.json").write_text(
+        json.dumps(quick), encoding="utf-8")
+    reporting.build_report_v3(pack_root, review_claims=False)
+    md = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(
+        encoding="utf-8")
+    line = [ln for ln in md.splitlines() if "floss failed on this sample" in ln]
+    assert len(line) == 1, f"the failure line must render exactly once: {line}"
+    assert "Exception: Invalid File: None" in line[0], line[0]
+    assert not any(ln.lstrip().startswith("| in getFileMeta")
+                   for ln in md.splitlines()), (
+        "the banner must not become standalone report lines")
+    ledger = json.loads(
+        (pack_root / "report" / "evidence-locators.json").read_text(
+            encoding="utf-8")).get("claims") or []
+    matched = [row for row in ledger
+               if "floss failed on this sample" in str(row.get("text"))]
+    assert matched, "the collapsed line must be in the claim ledger"
+    assert "\n" not in str(matched[0].get("text"))

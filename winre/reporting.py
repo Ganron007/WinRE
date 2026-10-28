@@ -542,6 +542,13 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     def A(line: str) -> None:
         """Append report prose with stable locators for its source fields."""
         text = str(line)
+        if "\n" in text or "\r" in text:
+            # One A() call is ONE report line: a multi-line error string
+            # (floss crashed with an ASCII-art banner) used to split its
+            # claim into three visible lines that no longer matched the
+            # claim ledger (2026-10-27 s08 static M0001/U0001-3).
+            lead = text[:len(text) - len(text.lstrip())]
+            text = lead + re.sub(r"\s+", " ", text.strip())
         stripped = text.strip()
         structural = (not stripped or stripped.startswith(("#", "```"))
                       or bool(re.fullmatch(r"\|[\s:|\-]+\|", stripped)))
