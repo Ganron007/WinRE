@@ -844,6 +844,99 @@ def _report(pack: EvidencePack, sha: str, quick: dict, dynamic: dict | None,
     return report
 
 
+def rebuild_report(pack, sha: str) -> dict:
+    """Re-derive everything downstream of the evidence for an existing pack:
+    findings -> composite -> report -> rendered markdown + claim review ->
+    manifests -> audit. This is what the UI's manual 'report' stage runs.
+
+    The route used to call _report ALONE, which updated report.json while
+    the rendered REPORT-TECHNICAL-v3.md and report/claim-review.json kept
+    describing the previous report, and dropped the composite selection
+    (report.json vs rendered report vs review disagreeing inside one pack).
+    The sequence mirrors the pipeline tail (findings -> compose -> report ->
+    manifests -> generate_all -> audit) so a manual rebuild leaves the pack
+    exactly as a fresh run would have written it.
+    """
+    from .compose import compose_for_sample
+    from .manifest import write_pack_manifests
+    from .reporting import generate_all, build_audit_report, build_evidence_bundle
+
+    def _pack_meta() -> dict:
+        try:
+            return json.loads(
+                (pack.root / "META.json").read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    meta = _pack_meta()
+    pack_mode = meta.get("pack_mode") or (pack.mode or pack.root.name)
+    run_id = meta.get("run_id")
+    quick = pack.read("quick", "quick.json") or {}
+    dynamic = pack.read("dynamic", "STAGE.json")
+    deep = pack.read("deep", "deep.json") or {}
+
+    findings_record = _build_findings(
+        pack_mode, pack.root, sha=sha, evidence_dir=pack.stages["dynamic"],
+        run_id=run_id)
+    composite = compose_for_sample(sha, LOGS_DIR,
+                                   pending={pack_mode: findings_record})
+    composite["run_id"] = run_id
+    (pack.root / "composite.json").write_text(
+        json.dumps(composite, indent=2, default=str) + "\n", encoding="utf-8")
+    report = _report(pack, sha, quick, dynamic, deep, composition=composite)
+    try:
+        manifests = write_pack_manifests(
+            pack.root, run_id=run_id, sha256=sha, mode=pack_mode,
+            dynamic_requested=(pack_mode == "dynamic"))
+    except Exception as e:  # noqa: BLE001
+        manifests = {"ok": False, "error": str(e)[:200]}
+    reporting = generate_all(pack.root, review_claims=True)
+    audit_res = audit_mod.audit(pack.root,
+                                require_dynamic=(pack_mode == "dynamic"))
+    (pack.root / "audit.json").write_text(
+        json.dumps(audit_res, indent=2) + "\n", encoding="utf-8")
+    # refresh the pack-level META the board reads (verdict/flags only; the
+    # pipeline's own META write owns the rest of the shape)
+    try:
+        cur = _pack_meta()
+        cur.update({
+            "status": "completed",
+            "mode": pack_mode,
+            "pack_mode": pack_mode,
+            "run_id": run_id,
+            "source": report.get("source"),
+            "phase": report.get("phase"),
+            "verdict": (composite.get("level")
+                        or audit_res.get("selected_verdict")
+                        or audit_res.get("static_verdict")),
+            "mode_verdict": audit_res.get("static_verdict"),
+            "selected_verdict_source": report.get("selected_verdict_source"),
+            "truly_green": audit_res.get("truly_green"),
+            "unmet_expectations": audit_res.get("unmet_expectations") or [],
+            "findings": findings_record,
+            "composite": composite,
+            "generated_at": utcnow(),
+        })
+        (pack.root / "META.json").write_text(
+            json.dumps(cur, indent=2, default=str) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    try:
+        build_audit_report(pack.root)
+        build_evidence_bundle(pack.root)
+    except Exception as e:  # noqa: BLE001
+        reporting.setdefault("finalize_error", str(e)[:200])
+    try:
+        manifests_after = write_pack_manifests(
+            pack.root, run_id=run_id, sha256=sha, mode=pack_mode,
+            dynamic_requested=(pack_mode == "dynamic"))
+    except Exception as e:  # noqa: BLE001
+        manifests_after = {"ok": False, "error": str(e)[:200]}
+    return {"report": report, "composite": composite,
+            "reporting": reporting, "audit": audit_res,
+            "manifests": manifests_after or manifests}
+
+
 def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool = False,
                  enable_dynamic: bool = False, dry_llm: bool = False,
                  mode: str = "agentic", enable_agentic_dbg: bool = False,

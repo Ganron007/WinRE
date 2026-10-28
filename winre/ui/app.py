@@ -1049,12 +1049,13 @@ def create_app() -> "Flask":
                     rep = yara_gen.generate_rules(pack.root, pack.stages["yara"])
                     return {"ok": True, "result": rep}
                 if stage == "report":
-                    from winre.pipeline import _report
-                    quick = pack.read("quick", "quick.json") or {}
-                    dynamic = pack.read("dynamic", "STAGE.json")
-                    deep = pack.read("deep", "deep.json") or {}
-                    rep = _report(pack, sha, quick, dynamic, deep)
-                    return {"ok": True, "result": rep}
+                    # Full re-derivation, not _report alone: a bare _report
+                    # updated report.json while the rendered markdown and
+                    # the claim review kept describing the previous report,
+                    # and the composite selection was dropped.
+                    from winre.pipeline import rebuild_report
+                    out = rebuild_report(pack, sha)
+                    return {"ok": True, "result": out}
                 if stage == "audit":
                     from winre import audit as audit_mod
                     res = audit_mod.audit(pack.root)
