@@ -234,37 +234,75 @@ def _debugger_diagnostics(xc: X64DbgClient) -> dict:
     return diag
 
 
-def _set_entry_bp(xc: X64DbgClient, stem: str) -> dict:
+def _wait_for_module(xc: X64DbgClient, basename: str,
+                     timeout_s: float = 6.0) -> bool:
+    """Wait until the loaded module appears in x64dbg's module list.
+
+    LoadBinary can return before the module is mapped; arming
+    'bp mod.entry(...)' before that silently registers nothing (2026-10-27
+    s08 dbg: the EP bp never registered while s02's identical form did).
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            lm = xc.list_modules()
+            res = lm.get("result") if isinstance(lm, dict) else None
+            if isinstance(res, dict) and isinstance(res.get("content"), list) \
+                    and res["content"]:
+                mods = str(res["content"][0].get("text", "")).lower()
+                if basename.lower() in mods:
+                    return True
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False
+
+
+def _set_entry_bp(xc: X64DbgClient, sample: str) -> dict:
     """Explicit EP breakpoint (settings-independent).
 
     x64dbg's auto entry-break depends on user settings and packed samples
-    can slip past a plain `run` — set the EP breakpoint ourselves, verify it
+    can slip past a plain `run` - set the EP breakpoint ourselves, verify it
     registered, and fall back to eval+bp when the expression form differs.
+    The module is addressed by the stem and by the full basename (module
+    name forms differ across sessions), and a failed eval NEVER arms a
+    breakpoint at 0: an unregistered EP bp must fail the attempt closed,
+    not free-run the target (2026-10-27 s08 dbg - 'bp 0x0' from a failed
+    eval, then a free run, lost an instant-exit debuggee before any pause).
     """
+    stem = _win_stem(sample)
+    base = _win_basename(sample)
     out: dict = {"tried": []}
-    try:
-        cmd = f"bp mod.entry({stem}:0)"
-        xc.execute_command(cmd)
-        bps = _bp_text(xc)
-        out["tried"].append({"cmd": cmd,
-                             "registered": "entry" in bps.lower()})
-    except Exception as e:
-        out["tried"].append({"cmd": "bp mod.entry", "error": str(e)[:120]})
+    for name in dict.fromkeys((stem, base)):
+        cmd = f"bp mod.entry({name}:0)"
+        try:
+            xc.execute_command(cmd)
+            bps = _bp_text(xc)
+            out["tried"].append({"cmd": cmd,
+                                 "registered": "entry" in bps.lower()})
+            if out["tried"][-1]["registered"]:
+                break
+        except Exception as e:
+            out["tried"].append({"cmd": cmd, "error": str(e)[:120]})
     if not any(t.get("registered") for t in out["tried"]):
         try:
-            ev = xc.eval(f"mod.entry({stem}:0)")
+            ev = xc.eval(f"mod.entry({base}:0)")
             res = ev.get("result") if isinstance(ev, dict) else None
             txt = ""
             if isinstance(res, dict) and isinstance(res.get("content"), list) \
                     and res["content"]:
                 txt = str(res["content"][0].get("text", ""))
             m = re.search(r"0x[0-9A-Fa-f]+", txt)
-            if m:
-                addr = int(m.group(0), 16)
+            addr = int(m.group(0), 16) if m else 0
+            if addr:
                 xc.execute_command(f"bp {hex(addr)}")
                 bps = _bp_text(xc)
                 out["tried"].append({"cmd": f"bp {hex(addr)}",
                                      "registered": hex(addr).lower() in bps.lower()})
+            else:
+                out["tried"].append({"cmd": "eval+bp",
+                                     "refused": "eval produced no usable "
+                                                "address - never bp 0x0"})
         except Exception as e:
             out["tried"].append({"cmd": "eval+bp", "error": str(e)[:120]})
     out["registered"] = any(t.get("registered") for t in out["tried"])
@@ -332,11 +370,25 @@ def ep_break(sample: str, xc: X64DbgClient | None = None,
                 "diagnostics": _debugger_diagnostics(xc),
                 "evidence": evidence}
     time.sleep(2)
+    _wait_for_module(xc, _win_basename(sample))
     try:
-        ep = _set_entry_bp(xc, _win_stem(sample))
+        ep = _set_entry_bp(xc, sample)
         evidence.append({"label": "ep_bp", **ep})
     except Exception as e:
         evidence.append({"label": "ep_bp_error", "error": str(e)[:120]})
+        ep = {"registered": False}
+    if not ep.get("registered"):
+        # Fail closed: running with no EP breakpoint free-runs the target,
+        # and an instant-exit debuggee is gone before any pause (2026-10-27
+        # s08 dbg: the EP bp never registered, the eval fallback armed
+        # 'bp 0x0', and the free run ended the session with zero
+        # observations).
+        return {"ok": False,
+                "error": ("EP breakpoint did not register - refusing to "
+                          "free-run the target"),
+                "session_ended": False,
+                "diagnostics": _debugger_diagnostics(xc),
+                "evidence": evidence}
     xc.run()
     w = _await_pause(xc, max_wait_s)
     if not w.get("paused"):
