@@ -1054,6 +1054,14 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
             if observation.get("scope"):
                 A(f"- Observer scope: {observation['scope']}.")
             if observation.get("unique_images"):
+                # The image list lives in process_summary.json#$.summary.
+                # unique_images; citing the whole summary here overflowed
+                # the reviewer's excerpt (the list starts far beyond the
+                # 512-char window) and the claimed images were invisible
+                # to the reviewer - claim refused insufficient (2026-10-29
+                # s13 dbg C0064). Cite the exact array.
+                set_evidence("dynamic/debug_monitor/"
+                             "process_summary.json#$.summary.unique_images")
                 A("- Process images observed: " + ", ".join(
                     f"`{str(name)[:100]}`"
                     for name in observation["unique_images"][:12]))

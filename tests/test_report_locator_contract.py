@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 
 from winre import reporting
+from winre.evidence import EvidencePack
 from winre.report_quality import resolve_reference
 
 SHA = "a" * 64
@@ -770,3 +771,55 @@ def test_the_dbg_phase_line_cites_the_pack_identity(tmp_path):
     line_refs = {(locators.get(f"E{eid}") or {}).get("reference")
                  for eid in ids}
     assert "META.json#$.pack_mode" in line_refs, line_refs
+
+
+def test_the_process_images_line_cites_the_unique_images_array(tmp_path):
+    """2026-10-29 s13 dbg C0064: the 'Process images observed' line cited
+    the whole monitor summary, whose excerpt truncates far before the
+    unique_images list - the claimed images were invisible to the reviewer
+    and the claim was refused insufficient. The line must cite the exact
+    array field."""
+    _pack(tmp_path)  # seed the case dirs; the dbg pack reads its own mode root
+    pack_root = tmp_path / SHA / "dbg"
+    (pack_root / "deep").mkdir(parents=True, exist_ok=True)
+    (pack_root / "report").mkdir(parents=True, exist_ok=True)
+    (pack_root / "META.json").write_text(json.dumps({
+        "sha256": SHA, "mode": "dbg", "pack_mode": "dbg",
+        "run_id": "d" * 32, "status": "completed"}), encoding="utf-8")
+    deep = json.loads(
+        (tmp_path / SHA / "static" / "deep" / "deep.json").read_text(
+            encoding="utf-8"))
+    deep["agent"]["debug_run"] = {"requested": True, "attempted": True,
+                                  "status": "completed"}
+    (pack_root / "deep" / "deep.json").write_text(
+        json.dumps(deep), encoding="utf-8")
+    findings = {
+        "schema": "winre-findings/v1", "mode": "dbg", "sha256": SHA,
+        "ok": True, "run_id": "d" * 32,
+        "findings": {"debug_observation": {
+            "requested": True, "attempted": True, "window_completed": True,
+            "observed_seconds": 30.0, "exit_observed": True,
+            "monitor_status": "collected", "target_observed": True,
+            "process_starts": 5, "process_stops": 5,
+            "unique_images": ["SIHClient.exe", "WMIADAP.exe"]}}}
+    (pack_root / "findings.json").write_text(
+        json.dumps(findings), encoding="utf-8")
+    (pack_root / "dynamic" / "debug_monitor").mkdir(parents=True, exist_ok=True)
+    (pack_root / "dynamic" / "debug_monitor" / "process_summary.json").write_text(
+        json.dumps({"summary": {
+            "unique_images": ["SIHClient.exe", "WMIADAP.exe"]}}),
+        encoding="utf-8")
+    reporting.build_report_v3(pack_root, review_claims=False)
+    md = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(
+        encoding="utf-8")
+    line = [ln for ln in md.splitlines() if "Process images observed" in ln]
+    assert line, "the images line must render"
+    ids = re.findall(r"\[E(\d+)\]", line[0])
+    assert ids, f"the images line published with no locator: {line[0]}"
+    locators = json.loads(
+        (pack_root / "report" / "evidence-locators.json").read_text(
+            encoding="utf-8")).get("locators") or {}
+    line_refs = {(locators.get(f"E{eid}") or {}).get("reference")
+                 for eid in ids}
+    assert ("dynamic/debug_monitor/process_summary.json"
+            "#$.summary.unique_images") in line_refs, line_refs
