@@ -804,8 +804,8 @@ def test_the_process_images_line_cites_the_unique_images_array(tmp_path):
             "unique_images": ["SIHClient.exe", "WMIADAP.exe"]}}}
     (pack_root / "findings.json").write_text(
         json.dumps(findings), encoding="utf-8")
-    (pack_root / "dynamic" / "debug_monitor").mkdir(parents=True, exist_ok=True)
-    (pack_root / "dynamic" / "debug_monitor" / "process_summary.json").write_text(
+    (pack_root / "deep" / "debug_monitor").mkdir(parents=True, exist_ok=True)
+    (pack_root / "deep" / "debug_monitor" / "process_summary.json").write_text(
         json.dumps({"summary": {
             "unique_images": ["SIHClient.exe", "WMIADAP.exe"]}}),
         encoding="utf-8")
@@ -821,5 +821,5 @@ def test_the_process_images_line_cites_the_unique_images_array(tmp_path):
             encoding="utf-8")).get("locators") or {}
     line_refs = {(locators.get(f"E{eid}") or {}).get("reference")
                  for eid in ids}
-    assert ("dynamic/debug_monitor/process_summary.json"
+    assert ("deep/debug_monitor/process_summary.json"
             "#$.summary.unique_images") in line_refs, line_refs

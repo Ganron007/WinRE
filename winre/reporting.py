@@ -1059,8 +1059,12 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                 # the reviewer's excerpt (the list starts far beyond the
                 # 512-char window) and the claimed images were invisible
                 # to the reviewer - claim refused insufficient (2026-10-29
-                # s13 dbg C0064). Cite the exact array.
-                set_evidence("dynamic/debug_monitor/"
+                # s13 dbg C0064). Cite the exact array. The monitor writes
+                # under deep/ in dbg packs and under dynamic/ in detonation
+                # packs - cite the stage that exists.
+                _mon_base = ("deep/debug_monitor" if pack_mode == "dbg"
+                             else "dynamic/debug_monitor")
+                set_evidence(f"{_mon_base}/"
                              "process_summary.json#$.summary.unique_images")
                 A("- Process images observed: " + ", ".join(
                     f"`{str(name)[:100]}`"
