@@ -647,3 +647,40 @@ def test_a_multi_line_error_is_one_report_line(tmp_path):
                if "floss failed on this sample" in str(row.get("text"))]
     assert matched, "the collapsed line must be in the claim ledger"
     assert "\n" not in str(matched[0].get("text"))
+
+
+def test_the_pe_header_lines_cite_leaves_when_the_pe_object_is_over_limit(tmp_path):
+    """2026-10-29 s12 static control: the pe evidence object exceeded the
+    6 KB review limit (6572 chars - large import/version blocks), the
+    whole-object locator was refused as over-broad, and the Machine and
+    Signed lines published with no locator - both claims unverifiable.
+    The lines must cite the leaf fields they state, which always fit."""
+    pack_root = _pack(tmp_path)
+    quick = json.loads(
+        (pack_root / "quick" / "quick.json").read_text(encoding="utf-8"))
+    quick["evidence"]["pe"]["imports"] = [
+        {"dll": f"library_number_{i:03d}.dll",
+         "functions": [f"ImportedFunctionNameNumber{i}_{j}" for j in range(8)]}
+        for i in range(15)]
+    quick["evidence"]["pe"]["version_info"] = [
+        {"key": f"SomeVersionKeyNumber{i}", "value": f"value number {i} "}
+        for i in range(30)]
+    (pack_root / "quick" / "quick.json").write_text(
+        json.dumps(quick), encoding="utf-8")
+    reporting.build_report_v3(pack_root, review_claims=False)
+    md = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(
+        encoding="utf-8")
+    machine_line = [ln for ln in md.splitlines() if "entrypoint" in ln]
+    signed_line = [ln for ln in md.splitlines() if "Signed:" in ln]
+    assert machine_line and signed_line, "the header lines must render"
+    locators = json.loads(
+        (pack_root / "report" / "evidence-locators.json").read_text(
+            encoding="utf-8")).get("locators") or {}
+    refs = {(m or {}).get("reference") for m in locators.values()}
+    for line, needed in ((machine_line[0], "quick/quick.json#$.evidence.pe.machine"),
+                         (signed_line[0], "quick/quick.json#$.evidence.pe.signed")):
+        ids = re.findall(r"\[E(\d+)\]", line)
+        assert ids, f"line published with no locator: {line}"
+        line_refs = {(locators.get(f"E{eid}") or {}).get("reference")
+                     for eid in ids}
+        assert needed in line_refs, (line, line_refs)

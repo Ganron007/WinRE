@@ -624,7 +624,17 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     A("")
     A("## 2. File overview")
     A("")
-    set_evidence("quick/quick.json#$.evidence.pe")
+    # The whole pe object can exceed the 6 KB review limit on samples with
+    # large import/version blocks (s12: 6,572 chars) - when it is refused as
+    # over-broad the Machine/Signed lines published with NO locator and the
+    # review marked them unverifiable. Cite the leaf fields the two lines
+    # actually state; the whole object stays as a fallback for packs where
+    # it fits.
+    set_evidence("quick/quick.json#$.evidence.pe.machine",
+                 "quick/quick.json#$.evidence.pe.entrypoint",
+                 "quick/quick.json#$.evidence.pe.compile_ts",
+                 "quick/quick.json#$.evidence.pe.signed",
+                 "quick/quick.json#$.evidence.pe")
     pe = ev.get("pe") or {}
     if pe:
         A(f"- Machine: `{pe.get('machine')}` entrypoint `0x{pe.get('entrypoint', 0):x}` "
