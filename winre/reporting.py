@@ -1334,8 +1334,15 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                     A(f"    - {l}")
         ed = _load(pack_root / "dynamic" / "emu_diff.json") or {}
         if ed.get("ok"):
+            # The computed figures (overlap_count, divergence_score) live in
+            # the emu_diff record itself; citing only predicted/observed left
+            # the printed overlap/divergence numbers invisible to the
+            # reviewer and the claim was refused insufficient (2026-10-29
+            # s13 dynamic C0074). Cite the computed fields too.
             set_evidence("dynamic/emu_diff.json#$.predicted",
                          "dynamic/emu_diff.json#$.observed",
+                         "dynamic/emu_diff.json#$.overlap_count",
+                         "dynamic/emu_diff.json#$.divergence_score",
                          "dynamic/speakeasy.json#$.api_calls",
                          "dynamic/frida_summary.json#$.top_apis")
             A(f"- **Emulation-vs-detonation:** speakeasy predicted "

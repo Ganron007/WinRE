@@ -851,3 +851,38 @@ def test_the_coverage_gap_line_cites_its_reason(tmp_path):
                  for eid in ids}
     assert ("artifact-manifest.json#$.coverage.windbg.reason") in line_refs, (
         line_refs)
+
+
+def test_the_emu_diff_line_cites_its_computed_fields(tmp_path):
+    """2026-10-29 s13 dynamic C0074: the Emulation-vs-detonation line
+    printed overlap_count and divergence_score but cited only
+    predicted/observed - the printed figures were invisible to the reviewer
+    and the claim was refused insufficient. The computed fields must be
+    cited."""
+    pack_root = _pack(tmp_path)
+    (pack_root / "dynamic").mkdir(parents=True, exist_ok=True)
+    (pack_root / "dynamic" / "STAGE.json").write_text(json.dumps({
+        "detonation_ran": True}), encoding="utf-8")
+    (pack_root / "dynamic" / "META.json").write_text(json.dumps({
+        "detonation_ran": True, "sample_pid": 4242}), encoding="utf-8")
+    (pack_root / "dynamic" / "emu_diff.json").write_text(json.dumps({
+        "ok": True, "predicted": 0, "observed": 5, "overlap": [],
+        "overlap_count": 0, "only_observed": ["createfile"],
+        "only_observed_count": 5, "divergence_score": 1.0}),
+        encoding="utf-8")
+    (pack_root / "dynamic" / "frida_summary.json").write_text(
+        json.dumps({"top_apis": ["createfile"]}), encoding="utf-8")
+    reporting.build_report_v3(pack_root, review_claims=False)
+    md = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(
+        encoding="utf-8")
+    line = [ln for ln in md.splitlines() if "Emulation-vs-detonation" in ln]
+    assert line, "the emu-diff line must render"
+    ids = re.findall(r"\[E(\d+)\]", line[0])
+    assert ids, f"the emu-diff line published with no locator: {line[0]}"
+    locators = json.loads(
+        (pack_root / "report" / "evidence-locators.json").read_text(
+            encoding="utf-8")).get("locators") or {}
+    line_refs = {(locators.get(f"E{eid}") or {}).get("reference")
+                 for eid in ids}
+    assert "dynamic/emu_diff.json#$.overlap_count" in line_refs, line_refs
+    assert "dynamic/emu_diff.json#$.divergence_score" in line_refs, line_refs
