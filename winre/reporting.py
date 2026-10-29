@@ -1158,8 +1158,13 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
             capture_details.append(f"reason=`{capture['reason']}`")
         A("- Off-box network capture: " + "; ".join(capture_details) + ".")
     for name, row in requested_gaps[:8]:
+        # Cite the reason field too: the reviewer refused a gap line as
+        # insufficient when only requested+status were cited - the status
+        # says "failed" but the claim prints the reason, which was
+        # invisible to the reviewer (2026-10-29 s13 dynamic C0062).
         set_evidence(f"artifact-manifest.json#$.coverage.{name}.requested",
-                     f"artifact-manifest.json#$.coverage.{name}.status")
+                     f"artifact-manifest.json#$.coverage.{name}.status",
+                     f"artifact-manifest.json#$.coverage.{name}.reason")
         A(f"  - `{name}`: {row.get('status')} - {row.get('reason')}")
 
     if has_dynamic:

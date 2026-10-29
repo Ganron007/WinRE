@@ -822,3 +822,32 @@ def test_the_process_images_line_cites_the_unique_images_array(tmp_path):
                  for eid in ids}
     assert ("deep/debug_monitor/process_summary.json"
             "#$.unique_images") in line_refs, line_refs
+
+
+def test_the_coverage_gap_line_cites_its_reason(tmp_path):
+    """2026-10-29 s13 dynamic C0062: the coverage-gap bullet printed the
+    reason ('windbg: failed - cdb exit ...') but cited only requested+status,
+    so the printed reason was invisible to the reviewer and the claim was
+    refused insufficient. The reason field must be cited."""
+    pack_root = _pack(tmp_path)
+    inv_path = pack_root / "artifact-manifest.json"
+    inv = json.loads(inv_path.read_text(encoding="utf-8")) if inv_path.is_file() else {}
+    inv.setdefault("coverage", {})["windbg"] = {
+        "requested": True, "required": False, "status": "failed",
+        "reason": "cdb exit 3489661214: "}
+    inv["coverage_gaps"] = 1
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+    reporting.build_report_v3(pack_root, review_claims=False)
+    md = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(
+        encoding="utf-8")
+    line = [ln for ln in md.splitlines() if "`windbg`:" in ln]
+    assert line, "the gap line must render"
+    ids = re.findall(r"\[E(\d+)\]", line[0])
+    assert ids, f"the gap line published with no locator: {line[0]}"
+    locators = json.loads(
+        (pack_root / "report" / "evidence-locators.json").read_text(
+            encoding="utf-8")).get("locators") or {}
+    line_refs = {(locators.get(f"E{eid}") or {}).get("reference")
+                 for eid in ids}
+    assert ("artifact-manifest.json#$.coverage.windbg.reason") in line_refs, (
+        line_refs)
