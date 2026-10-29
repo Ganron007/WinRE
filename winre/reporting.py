@@ -686,8 +686,13 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
             # reviewer must judge, and one fragment was noise-refused
             # (2026-10-27 s08 static, C0024 'contradicted' with no reason on
             # a claim that is its own quote). Emit only DISTINCT strings
-            # that contain at least one 4-character alphanumeric run;
-            # locators keep the original row indices.
+            # that contain at least one 4-character alphanumeric run; locators
+            # keep the original row indices. The 2026-10-29 s12 run showed the
+            # 4-run filter alone is not enough on x64 samples: function
+            # prologue fragments ("SUVWATAUAVAWH", "\$ UWAWH") are pure
+            # uppercase alnum runs that pass it - require a lowercase letter
+            # too (real words/identifiers are mixed case; pure-uppercase
+            # acronyms are a display loss the raw string evidence keeps).
             shown = 0
             seen_strings: set[str] = set()
             for index, value in enumerate(strings_record.get("strings") or []):
@@ -697,6 +702,8 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                 if text in seen_strings:
                     continue
                 if not re.search(r"[A-Za-z0-9]{4}", text):
+                    continue
+                if not re.search(r"[a-z]", text):
                     continue
                 seen_strings.add(text)
                 set_evidence(f"{strings_refs[-1]}.strings[{index}]")

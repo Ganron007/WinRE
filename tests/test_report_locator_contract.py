@@ -577,6 +577,61 @@ def test_the_strings_bullets_skip_fragments_and_duplicates(tmp_path):
     assert "Software\Classes\ms-settings" in md
 
 
+def test_the_strings_bullets_filter_pure_uppercase_x64_prologues(tmp_path):
+    """2026-10-29 s12 static C0023: on x64 samples the enumeration order
+    starts with function-prologue fragments that are PURE uppercase alnum
+    runs ("SUVWATAUAVAWH", "\$ UWAWH") - they pass the 4-alnum filter
+    and one was noise-refused as a self-quoting claim. Bullets require a
+    lowercase letter (real identifiers are mixed case)."""
+    pack_root = _pack(tmp_path)
+    deep = json.loads(
+        (pack_root / "deep" / "deep.json").read_text(encoding="utf-8"))
+    deep["agent"]["history"].append({
+        "tool": "strings_tool",
+        "result": {"ok": True, "tool": "strings_tool", "total": 5,
+                   "strings": ["SUVWATAUAVAWH", "\\$ UWAWH",
+                               "@UATAUAVAWH",
+                               "!This program cannot be run in DOS mode.",
+                               "ms-settings Shell\\Open\\command"]}})
+    (pack_root / "deep" / "deep.json").write_text(
+        json.dumps(deep), encoding="utf-8")
+    reporting.build_report_v3(pack_root, review_claims=False)
+    md = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(
+        encoding="utf-8")
+    assert "SUVWATAUAVAWH" not in md
+    assert "UWAWH" not in md
+    assert "!This program cannot be run in DOS mode." in md
+    assert "ms-settings" in md
+
+
+def test_the_review_prompt_carries_the_bare_value_claim_contract(
+        tmp_path, monkeypatch):
+    """2026-10-29 s12 static C0023: a bare quoted-value claim (the string
+    bullet) was noise-refused 'contradicted' - a verdict that cannot apply
+    to an existence claim. The review prompt must state the semantics:
+    supported when the excerpt contains the value, insufficient when it
+    does not, never contradicted."""
+    pack_root = _pack(tmp_path)
+    captured = {}
+    from winre import llm_client
+
+    def fake_chat_result(messages, **kwargs):
+        captured["prompt"] = next((m.get("content") for m in messages
+                                   if m.get("role") == "user"), "")
+        return {"content": "", "finish_reason": "stop", "tool_calls": [],
+                "usage": {}, "model": "stub", "response_id": "stub",
+                "error": None}
+
+    monkeypatch.setattr(llm_client, "chat_result", fake_chat_result)
+    monkeypatch.setattr(llm_client, "model_for", lambda role: "stub-model")
+    monkeypatch.setattr(llm_client, "API_KEY", "stub-key")
+    monkeypatch.setattr(llm_client, "BASE_URL", "http://127.0.0.1:9/v1")
+    reporting.build_report_v3(pack_root, review_claims=True)
+    prompt = captured.get("prompt") or ""
+    assert "existence claim" in prompt
+    assert "never " in prompt and "contradicted" in prompt
+
+
 def test_a_failed_floss_run_is_not_reported_as_a_zero_result(tmp_path):
     """2026-10-27 s08 static C0030: floss crashed ('Invalid File') and the
     report rendered the crash as 'none decoded (0 total)' - the reviewer
