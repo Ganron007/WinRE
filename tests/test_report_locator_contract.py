@@ -806,8 +806,7 @@ def test_the_process_images_line_cites_the_unique_images_array(tmp_path):
         json.dumps(findings), encoding="utf-8")
     (pack_root / "deep" / "debug_monitor").mkdir(parents=True, exist_ok=True)
     (pack_root / "deep" / "debug_monitor" / "process_summary.json").write_text(
-        json.dumps({"summary": {
-            "unique_images": ["SIHClient.exe", "WMIADAP.exe"]}}),
+        json.dumps({"unique_images": ["SIHClient.exe", "WMIADAP.exe"]}),
         encoding="utf-8")
     reporting.build_report_v3(pack_root, review_claims=False)
     md = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(
@@ -822,4 +821,4 @@ def test_the_process_images_line_cites_the_unique_images_array(tmp_path):
     line_refs = {(locators.get(f"E{eid}") or {}).get("reference")
                  for eid in ids}
     assert ("deep/debug_monitor/process_summary.json"
-            "#$.summary.unique_images") in line_refs, line_refs
+            "#$.unique_images") in line_refs, line_refs

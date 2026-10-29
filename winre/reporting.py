@@ -1064,8 +1064,8 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                 # packs - cite the stage that exists.
                 _mon_base = ("deep/debug_monitor" if pack_mode == "dbg"
                              else "dynamic/debug_monitor")
-                set_evidence(f"{_mon_base}/"
-                             "process_summary.json#$.summary.unique_images")
+                set_evidence(f"{_mon_base}/process_summary.json"
+                             "#$.unique_images")
                 A("- Process images observed: " + ", ".join(
                     f"`{str(name)[:100]}`"
                     for name in observation["unique_images"][:12]))
