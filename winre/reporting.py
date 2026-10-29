@@ -586,7 +586,13 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                      "dynamic/STAGE.json#$.skipped",
                      "findings.json#$.findings.dynamic")
     elif phase == "static+debugger":
-        set_evidence("findings.json#$.findings.debug_observation")
+        # Cite the pack's own identity record too: the observation record
+        # does not state a phase, and the reviewer refused "Phase: dbg" on
+        # exactly that gap (2026-10-29 s13 dbg, claim C0004 - the same
+        # refusal the other branches already fixed by citing META.json).
+        set_evidence("META.json#$.mode",
+                     "META.json#$.pack_mode",
+                     "findings.json#$.findings.debug_observation")
     else:
         set_evidence("META.json#$.mode", "META.json#$.pack_mode")
     # The phase line must name what the EVIDENCE says, not a composed label:

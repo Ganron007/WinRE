@@ -739,3 +739,34 @@ def test_the_pe_header_lines_cite_leaves_when_the_pe_object_is_over_limit(tmp_pa
         line_refs = {(locators.get(f"E{eid}") or {}).get("reference")
                      for eid in ids}
         assert needed in line_refs, (line, line_refs)
+
+
+def test_the_dbg_phase_line_cites_the_pack_identity(tmp_path):
+    """2026-10-29 s13 dbg C0004: the 'Phase: dbg' line cited only the debug
+    observation record, which never states a phase - the reviewer judged
+    the claim insufficient. The dbg branch must cite the pack's own
+    META.json (pack_mode states 'dbg') like the other branches do."""
+    pack_root = _pack(tmp_path)
+    (pack_root / "META.json").write_text(json.dumps({
+        "sha256": SHA, "mode": "dbg", "pack_mode": "dbg",
+        "run_id": "d" * 32, "status": "completed",
+    }), encoding="utf-8")
+    deep = json.loads(
+        (pack_root / "deep" / "deep.json").read_text(encoding="utf-8"))
+    deep["agent"]["debug_run"] = {"requested": True, "attempted": True,
+                                  "status": "completed"}
+    (pack_root / "deep" / "deep.json").write_text(
+        json.dumps(deep), encoding="utf-8")
+    reporting.build_report_v3(pack_root, review_claims=False)
+    md = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(
+        encoding="utf-8")
+    line = [ln for ln in md.splitlines() if "**Phase:**" in ln]
+    assert line, "the phase line must render"
+    ids = re.findall(r"\[E(\d+)\]", line[0])
+    assert ids, f"the phase line published with no locator: {line[0]}"
+    locators = json.loads(
+        (pack_root / "report" / "evidence-locators.json").read_text(
+            encoding="utf-8")).get("locators") or {}
+    line_refs = {(locators.get(f"E{eid}") or {}).get("reference")
+                 for eid in ids}
+    assert "META.json#$.pack_mode" in line_refs, line_refs
