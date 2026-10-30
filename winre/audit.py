@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -221,6 +222,8 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
     # is not sufficient; every report claim must have a supported review.
     report_review: dict = {"ok": False, "status": "missing"}
     report_review_ok = False
+    binding_failures: list = []
+    binding_debug = os.environ.get("WINRE_AUDIT_DEBUG") == "1"
     review_path = evidence / "report" / "claim-review.json"
     report_path = evidence / "report" / "REPORT-TECHNICAL-v3.md"
     locator_path = evidence / "report" / "evidence-locators.json"
@@ -285,11 +288,13 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                             or row.get("claim") != ledger.get("text")
                             or row.get("locators") != ledger.get("locators")):
                         source_rows_valid = False
+                        if binding_debug: binding_failures.append(f"source_rows_valid:line-290")
                         break
             if source_rows_valid:
                 for row in reviewed_claims:
                     if not str(row.get("claim_id", "")).startswith("C"):
                         source_rows_valid = False
+                        if binding_debug: binding_failures.append(f"source_rows_valid:line-295")
                         break
                     row_locators = set(str(value) for value in (row.get("locators") or []))
                     row_sources = row.get("evidence_sources") or []
@@ -303,6 +308,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                     if not row_locators or row_locators != {
                             str(source.get("locator")) for source in row_sources}:
                         source_rows_valid = False
+                        if binding_debug: binding_failures.append(f"source_rows_valid:line-308")
                         break
                     if (not isinstance(reviewed_locators, list)
                             or not reviewed_locators
@@ -317,12 +323,14 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                             or set(quotes_by_locator) != set(reviewed_locators)
                             or not all(item.get("valid") is True for item in quote_rows)):
                         source_rows_valid = False
+                        if binding_debug: binding_failures.append(f"source_rows_valid:line-322")
                         break
                     quote_matches_selected_sources: set[str] = set()
                     for source in row_sources:
                         locator = locator_rows.get(str(source.get("locator")))
                         if not isinstance(locator, dict):
                             source_rows_valid = False
+                            if binding_debug: binding_failures.append(f"source_rows_valid:line-328")
                             break
                         reference = str(locator.get("reference") or "")
                         resolved = source_resolution_cache.get(reference)
@@ -336,11 +344,13 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                             source_resolution_cache[reference] = resolved
                         if not resolved.get("ok"):
                             source_rows_valid = False
+                            if binding_debug: binding_failures.append(f"source_rows_valid:line-341")
                             break
                         if (source.get("artifact") != resolved.get("artifact")
                                 or source.get("json_path") != resolved.get("pointer")
                                 or source.get("artifact_sha256") != resolved.get("sha256")):
                             source_rows_valid = False
+                            if binding_debug: binding_failures.append(f"source_rows_valid:line-346")
                             break
                         source_id = str(source.get("locator"))
                         quote = quotes_by_locator.get(source_id, "")
@@ -350,6 +360,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                     if (not source_rows_valid
                             or quote_matches_selected_sources != set(reviewed_locators)):
                         source_rows_valid = False
+                        if binding_debug: binding_failures.append(f"source_rows_valid:line-355")
                         break
                     if not source_rows_valid:
                         break
@@ -363,6 +374,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                                  if isinstance(attempt, dict) else None)
                     if not isinstance(artifacts, dict):
                         call_records_valid = False
+                        if binding_debug: binding_failures.append(f"call_records_valid:line-368")
                         break
                     request_rel = str(artifacts.get("request_path") or "")
                     response_rel = str(artifacts.get("response_path") or "")
@@ -373,6 +385,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                             or evidence.resolve() not in response_file.parents
                             or not request_file.is_file() or not response_file.is_file()):
                         call_records_valid = False
+                        if binding_debug: binding_failures.append(f"call_records_valid:line-378")
                         break
                     request_bytes = request_file.read_bytes()
                     response_bytes = response_file.read_bytes()
@@ -381,6 +394,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                             or hashlib.sha256(response_bytes).hexdigest()
                             != artifacts.get("response_sha256")):
                         call_records_valid = False
+                        if binding_debug: binding_failures.append(f"call_records_valid:line-386")
                         break
                     request_doc = json.loads(request_bytes.decode("utf-8"))
                     response_doc = json.loads(response_bytes.decode("utf-8"))
@@ -413,6 +427,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                             or response_doc.get("error") is not None
                             or attempt.get("error") is not None):
                         call_records_valid = False
+                        if binding_debug: binding_failures.append(f"call_records_valid:line-418")
                         break
 
                     # The reviewer is forced to emit one constrained function
@@ -436,6 +451,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                             or not isinstance(response_function, dict)
                             or response_function.get("name") != "submit_claim_reviews"):
                         call_records_valid = False
+                        if binding_debug: binding_failures.append(f"call_records_valid:line-441")
                         break
 
                     # Bind the saved decision to the exact prompt batch and raw
@@ -448,6 +464,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                             or methodology_marker not in prompt_text
                             or claims_marker not in prompt_text):
                         call_records_valid = False
+                        if binding_debug: binding_failures.append(f"call_records_valid:line-453")
                         break
                     try:
                         analysis_text = prompt_text.split(analysis_marker, 1)[1].split(
@@ -462,6 +479,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                         response_rows = json.loads(arguments_text).get("reviews")
                     except (IndexError, json.JSONDecodeError, AttributeError):
                         call_records_valid = False
+                        if binding_debug: binding_failures.append(f"call_records_valid:line-467")
                         break
                     if (prompt_identity != {"sha256": root_meta.get("sha256"),
                                            "run_id": root_meta.get("run_id")}
@@ -470,6 +488,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                             or not isinstance(prompt_claim_rows, list)
                             or not isinstance(response_rows, list)):
                         call_records_valid = False
+                        if binding_debug: binding_failures.append(f"call_records_valid:line-475")
                         break
                     batch_claims: dict[str, dict] = {}
                     for item in prompt_claim_rows:
@@ -478,6 +497,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                                 or not isinstance(item.get("claim"), str)
                                 or not isinstance(item.get("evidence"), list)):
                             call_records_valid = False
+                            if binding_debug: binding_failures.append(f"call_records_valid:line-483")
                             break
                         batch_claims[item["id"]] = item
                     attempt_ids = attempt.get("claim_ids")
@@ -487,10 +507,12 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                             or set(attempt_ids) != set(batch_claims)
                             or any(claim_id in call_prompt_claims for claim_id in batch_claims)):
                         call_records_valid = False
+                        if binding_debug: binding_failures.append(f"call_records_valid:line-492")
                         break
                     if (not isinstance(payload, dict)
                             or payload.get("model") != report_review.get("reviewer_model")):
                         call_records_valid = False
+                        if binding_debug: binding_failures.append(f"call_records_valid:line-496")
                         break
                     call_prompt_claims.update(batch_claims)
 
@@ -507,25 +529,37 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                                 or len(response_row["locator_ids"])
                                    != len(set(response_row["locator_ids"]))):
                             call_records_valid = False
+                            if binding_debug: binding_failures.append(f"call_records_valid:line-512")
                             break
                         claim_id = response_row["claim_id"]
                         verdict = response_row["verdict"]
                         locator_ids = response_row["locator_ids"]
+                        # A locator id outside the claim's own evidence set is
+                        # discarded (the review applies the same discard and
+                        # records it in unknown_locators) — NOT a batch
+                        # rejection: rejecting the whole batch turned one
+                        # foreign id into a lost claim (2026-10-31 s15 dbg:
+                        # the run-time audit failed exactly here after the
+                        # foreign-id discard landed on the review side).
+                        evidence_locators = {
+                            str(item.get("locator")) for item in
+                            (batch_claims[claim_id].get("evidence") or [])
+                            if isinstance(item, dict)}
+                        own_locator_ids = [lid for lid in locator_ids
+                                           if lid in evidence_locators]
                         if (claim_id in batch_decisions
                                 or claim_id not in batch_claims
                                 or verdict not in {"supported", "contradicted", "insufficient"}
-                                or any(locator_id not in {
-                                    str(item.get("locator")) for item in
-                                    (batch_claims[claim_id].get("evidence") or [])
-                                    if isinstance(item, dict)}
-                                       for locator_id in locator_ids)):
+                                or (verdict != "insufficient" and not own_locator_ids)):
                             call_records_valid = False
+                            if binding_debug: binding_failures.append(f"call_records_valid:line-525")
                             break
                         batch_decisions[claim_id] = {
-                            "verdict": verdict, "locators": locator_ids}
+                            "verdict": verdict, "locators": own_locator_ids}
                     if (not call_records_valid
                             or set(batch_decisions) != set(batch_claims)):
                         call_records_valid = False
+                        if binding_debug: binding_failures.append(f"call_records_valid:line-531")
                         break
                     call_decisions.update(batch_decisions)
 
@@ -542,6 +576,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                 if set(call_prompt_claims) != expected_claim_ids \
                         or set(call_decisions) != expected_claim_ids:
                     call_records_valid = False
+                    if binding_debug: binding_failures.append(f"call_records_valid:line-547")
                 else:
                     for claim_id in sorted(expected_claim_ids):
                         reviewed = reviewed_by_id.get(claim_id) or {}
@@ -563,12 +598,14 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                                 or not _decision_binding_matches(decision, reviewed)
                                 or decision.get("verdict") != reviewed.get("status")):
                             call_records_valid = False
+                            if binding_debug: binding_failures.append(f"call_records_valid:line-568")
                             break
                         for locator_id, prompt_source in evidence_by_locator.items():
                             locator = locator_rows.get(locator_id)
                             source = result_sources.get(locator_id) or {}
                             if not isinstance(locator, dict):
                                 call_records_valid = False
+                                if binding_debug: binding_failures.append(f"call_records_valid:line-574")
                                 break
                             reference = str(locator.get("reference") or "")
                             resolved = source_resolution_cache.get(reference)
@@ -584,6 +621,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                                     or source.get("json_path") != resolved.get("pointer")
                                     or source.get("artifact_sha256") != resolved.get("sha256")):
                                 call_records_valid = False
+                                if binding_debug: binding_failures.append(f"call_records_valid:line-589")
                                 break
                         if not call_records_valid:
                             break
@@ -605,7 +643,8 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
             if not report_review_ok:
                 report_review = {**report_review, "ok": False,
                                  "status": "invalid-or-unsupported",
-                                 "report_sha256_current": report_sha}
+                                 "report_sha256_current": report_sha,
+                                 "binding_failures": binding_failures[:40]}
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
             report_review = {"ok": False, "status": "unreadable",
                              "reason": f"{type(exc).__name__}: {exc}"}
