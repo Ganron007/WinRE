@@ -59,6 +59,22 @@ def _stage_ok(evidence: Path, stage: str) -> dict:
     return {"stage": stage, "ran": False, "error": f"{stage} meta missing"}
 
 
+def _decision_binding_matches(decision: dict, reviewed: dict) -> bool:
+    """The saved decision binds the claim the same way the review row does.
+
+    The reviewer may name a locator outside the claim's own set (it sees the
+    whole batch's excerpts); the review discards such ids (recorded in
+    unknown_locators) and binds the resolved subset. The audit must apply the
+    same discard when comparing the saved decision against the row, or a
+    decision the review already passed fails here (2026-10-30 s14 dynamic:
+    the raw selection with one neighbour id failed the binding check).
+    """
+    expected = {str(v) for v in (reviewed.get("locators") or [])}
+    bound = [str(v) for v in (decision.get("locators") or [])
+             if str(v) in expected]
+    return bound == (reviewed.get("reviewed_locators") or [])
+
+
 def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                                                         "dynamic", "deep",
                                                         "yara", "report"),
@@ -544,7 +560,7 @@ def audit(evidence: Path, *, stages: tuple[str, ...] = ("intake", "quick",
                         if (prompt_claim.get("claim") != reviewed.get("claim")
                                 or set(evidence_by_locator) != expected_locators
                                 or set(result_sources) != expected_locators
-                                or decision.get("locators") != reviewed.get("reviewed_locators")
+                                or not _decision_binding_matches(decision, reviewed)
                                 or decision.get("verdict") != reviewed.get("status")):
                             call_records_valid = False
                             break

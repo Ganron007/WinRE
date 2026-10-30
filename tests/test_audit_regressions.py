@@ -476,3 +476,26 @@ def test_vt_detection_floor_clamps_a_benign_verdict():
     assert _apply_vt_detection_floor(
         {"verdict": "benign", "confidence": "medium", "summary": "s"},
         _vt_heavy_detection(low))["verdict"] == "benign"
+
+
+def test_decision_binding_discards_foreign_locator_ids():
+    """2026-10-30 s14 dynamic control: the reviewer's decision for C0006 named
+    the claim's own four locator ids plus one id belonging to the NEIGHBOUR
+    claim. The review discarded the foreign id (299de16) and bound the
+    resolved subset; the audit's decision-binding check must apply the SAME
+    discard - a decision whose own-claim subset matches the row's binding is
+    valid, and one that drops or swaps an own id still fails."""
+    from winre.audit import _decision_binding_matches
+    reviewed = {"locators": ["E010", "E011", "E012", "E013"],
+                "reviewed_locators": ["E010", "E011", "E012", "E013"]}
+    decision = {"locators": ["E010", "E011", "E012", "E013", "E014"]}
+    assert _decision_binding_matches(decision, reviewed) is True
+    # a missing own id still fails closed
+    assert _decision_binding_matches(
+        {"locators": ["E010", "E011", "E012"]}, reviewed) is False
+    # a swapped own id still fails closed
+    assert _decision_binding_matches(
+        {"locators": ["E010", "E011", "E013", "E014"]}, reviewed) is False
+    # a foreign id does not smuggle in a missing own id
+    assert _decision_binding_matches(
+        {"locators": ["E010", "E011", "E012", "E014"]}, reviewed) is False
