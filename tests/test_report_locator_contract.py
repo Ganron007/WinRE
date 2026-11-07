@@ -854,6 +854,54 @@ def test_the_process_images_line_cites_the_unique_images_array(tmp_path):
             "#$.unique_images") in line_refs, line_refs
 
 
+def test_the_process_images_line_renders_stored_values_verbatim(tmp_path):
+    """2026-11-07 s17 dbg C0041 (second instance after s16 dbg attempt 1):
+    the line truncated every image to 100 chars, turning long \\Device\\
+    paths into corrupt prefixes (...\\Microsof, ...\\ServiceH) that do not
+    literally match the cited array values - a strict reviewer correctly
+    refused the claim 'insufficient'. Every rendered value must be the
+    stored value verbatim."""
+    _pack(tmp_path)  # seed the case dirs; the dbg pack reads its own mode root
+    pack_root = tmp_path / SHA / "dbg"
+    (pack_root / "deep").mkdir(parents=True, exist_ok=True)
+    (pack_root / "report").mkdir(parents=True, exist_ok=True)
+    (pack_root / "META.json").write_text(json.dumps({
+        "sha256": SHA, "mode": "dbg", "pack_mode": "dbg",
+        "run_id": "d" * 32, "status": "completed"}), encoding="utf-8")
+    deep = json.loads(
+        (tmp_path / SHA / "static" / "deep" / "deep.json").read_text(
+            encoding="utf-8"))
+    deep["agent"]["debug_run"] = {"requested": True, "attempted": True,
+                                  "status": "completed"}
+    (pack_root / "deep" / "deep.json").write_text(
+        json.dumps(deep), encoding="utf-8")
+    long_path = ("\\Device\\HarddiskVolume3\\Program Files (x86)\\Microsoft"
+                 " Office\\root\\vfs\\ProgramFilesCommonX86\\Microsoft Shared"
+                 "\\Office16\\ActionsServer\\ActionsServer.exe")
+    findings = {
+        "schema": "winre-findings/v1", "mode": "dbg", "sha256": SHA,
+        "ok": True, "run_id": "d" * 32,
+        "findings": {"debug_observation": {
+            "requested": True, "attempted": True, "window_completed": True,
+            "observed_seconds": 30.0, "exit_observed": True,
+            "monitor_status": "collected", "target_observed": True,
+            "process_starts": 2, "process_stops": 2,
+            "unique_images": ["SIHClient.exe", long_path]}}}
+    (pack_root / "findings.json").write_text(
+        json.dumps(findings), encoding="utf-8")
+    (pack_root / "deep" / "debug_monitor").mkdir(parents=True, exist_ok=True)
+    (pack_root / "deep" / "debug_monitor" / "process_summary.json").write_text(
+        json.dumps({"unique_images": ["SIHClient.exe", long_path]}),
+        encoding="utf-8")
+    reporting.build_report_v3(pack_root, review_claims=False)
+    md = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(
+        encoding="utf-8")
+    line = [ln for ln in md.splitlines() if "Process images observed" in ln]
+    assert line, "the images line must render"
+    assert long_path in line[0], (
+        "the stored value must render verbatim, not truncated: " + line[0])
+
+
 def test_the_coverage_gap_line_cites_its_reason(tmp_path):
     """2026-10-29 s13 dynamic C0062: the coverage-gap bullet printed the
     reason ('windbg: failed - cdb exit ...') but cited only requested+status,

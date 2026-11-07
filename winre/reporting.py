@@ -1066,8 +1066,14 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                              else "dynamic/debug_monitor")
                 set_evidence(f"{_mon_base}/process_summary.json"
                              "#$.unique_images")
+                # Render each stored value VERBATIM. A [:100] cut turned long
+                # \Device\ paths into corrupt prefixes (...\Microsof, ...\
+                # ServiceH) that no longer match the cited evidence values -
+                # the reviewer correctly refused the claim insufficient
+                # (2026-11-07 s17 dbg C0041, second instance after the s16
+                # dbg variance; both traces show prefix-only matches).
                 A("- Process images observed: " + ", ".join(
-                    f"`{str(name)[:100]}`"
+                    f"`{name}`"
                     for name in observation["unique_images"][:12]))
         else:
             set_evidence("findings.json#$.findings.debug_observation",
