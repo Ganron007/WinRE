@@ -633,6 +633,36 @@ def test_the_review_prompt_carries_the_bare_value_claim_contract(
     assert "never " in prompt and "contradicted" in prompt
 
 
+def test_the_review_prompt_carries_the_enumeration_restatement_contract(
+        tmp_path, monkeypatch):
+    """2026-11-07 s17 dbg C0041 (second instance after s16 dbg attempt 1):
+    the 'Process images observed' line enumerates values that the cited
+    excerpt verbatim contains, yet the reviewer noise-refused it
+    'insufficient' (no reason, while selecting the exact locator). An
+    enumeration restatement is the plural of the bare-value existence
+    claim; the prompt must say so."""
+    pack_root = _pack(tmp_path)
+    captured = {}
+    from winre import llm_client
+
+    def fake_chat_result(messages, **kwargs):
+        captured["prompt"] = next((m.get("content") for m in messages
+                                   if m.get("role") == "user"), "")
+        return {"content": "", "finish_reason": "stop", "tool_calls": [],
+                "usage": {}, "model": "stub", "response_id": "stub",
+                "error": None}
+
+    monkeypatch.setattr(llm_client, "chat_result", fake_chat_result)
+    monkeypatch.setattr(llm_client, "model_for", lambda role: "stub-model")
+    monkeypatch.setattr(llm_client, "API_KEY", "stub-key")
+    monkeypatch.setattr(llm_client, "BASE_URL", "http://127.0.0.1:9/v1")
+    reporting.build_report_v3(pack_root, review_claims=True)
+    prompt = captured.get("prompt") or ""
+    assert "enumeration" in prompt
+    assert "process images" in prompt
+    assert "raw list shape" in prompt
+
+
 def test_a_failed_floss_run_is_not_reported_as_a_zero_result(tmp_path):
     """2026-10-27 s08 static C0030: floss crashed ('Invalid File') and the
     report rendered the crash as 'none decoded (0 total)' - the reviewer
