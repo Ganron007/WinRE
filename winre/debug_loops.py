@@ -1959,6 +1959,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="x64dbg debug-loop scenarios")
     ap.add_argument("scenario", choices=["ep_break", "oep_by_section", "oep_by_esp",
                                          "wpm_dump", "crypt_dump",
+                                         "write_bp_trace",
                                          "agentic_unpack", "api_loop"])
     ap.add_argument("sample", help="VM path e.g. C:\\samples\\foo.exe")
     ap.add_argument("--api", default="WriteProcessMemory")

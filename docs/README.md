@@ -24,6 +24,8 @@ below as needed.
 
 > **Not published here:** operator-local internals (lab addressing, hostnames,
 > keys, machine inventories) are intentionally kept out of this directory and
-> the repository. Configuration placeholders (for example `FLARE_*`,
-> `WINRE_LLM_*`) are documented in [INSTALL.md](INSTALL.md) and
-> [OPERATE.md](OPERATE.md).
+> the repository. This includes `docs/MALCAT.md` (gitignored: Malcat is
+> licensed; its guide lives only in local working copies — see
+> `docs/TOOL-PATHS.md` for the tool contract). Configuration placeholders
+> (for example `FLARE_*`, `WINRE_LLM_*`) are documented in
+> [INSTALL.md](INSTALL.md) and [OPERATE.md](OPERATE.md).

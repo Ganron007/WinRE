@@ -33,7 +33,7 @@ probes every tool above plus the python module set, and ends with one line
 that must read `SKIPPED BY US: 0`:
 
 ```
-census: 40/41 required present | operator-installed absent: 1 (IDA Pro (licensed)) | SKIPPED BY US: 0
+census: 42/43 required present | operator-installed absent: 1 (IDA Pro (licensed)) | SKIPPED BY US: 0
 ```
 
 Anything in the `SKIPPED BY US` list fails the battery, names the tool and
@@ -48,8 +48,8 @@ names who provides it.
 | floss [base]/[setup] | 
 lare-floss pip module (installed offline from staged wheels) or C:\\Tools\\FLOSS\\floss.exe | - | decoded/stack strings | floss evidence absent |
 | Detect It Easy `[base]`/`[stage]` | `C:\Tools\die\diec.exe` | — | packer/compiler taxonomy (decrypt-gate) | taxonomy falls back to entropy-only |
-| yara-x `[base]` | `C:\Tools\yara-x\yr.exe` | — | curated-ruleset scan (verdict driver) | yara-hit rule can't fire |
-| curated YARA rules `[setup]` | `C:\Tools\yara-rules` (`*.yar`) | `YARA_RULES_DIR` | family matches | yarascan reports `no rules staged` |
+| yara-x `[base]` | `C:\Tools\yr\yr.exe` or `C:\Tools\yara-x\yr.exe` (both probed) | — | curated-ruleset scan (verdict driver) | yara-hit rule can't fire |
+| curated YARA rules `[setup]` | `C:\Tools\yara-rules` (`*.yar`) | — (path is a module constant in `tools/flare_static_tools.py`; report-side rule matching honors `WINRE_YARA_RULES`, `winre/findings.py`) | family matches | yarascan reports `no rules staged` |
 | Sysinternals strings64 `[base]` | `C:\Tools\sysinternals\strings64.exe` | — | raw string extraction | strings tool skips |
 | radare2 `[base]` | `C:\Tools\radare2\radare2.exe` | — | r2_decompile, sink_sites | those tools skip |
 | scdbg `[base]` | `C:\Tools\scdbg\scdbg.exe` | — | shellcode extraction emulation | shellcode_extract degrades |

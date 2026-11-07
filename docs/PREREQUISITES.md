@@ -34,7 +34,9 @@ binds all interfaces.
 ## Control plane (operator host)
 
 - **Windows 10/11 or Linux** with OpenSSH client (`ssh`, `scp`) and Python
-  **3.10+** (3.13 tested)
+  **3.13 (the tested interpreter)**. 3.14+ emits a langchain-core
+  pydantic-v1 incompatibility warning and the staged floss wheels are cp313 —
+  3.13 is the supported host.
 - Python packages: `langchain-openai`, `langgraph`, `langchain-core`,
   `pydantic` (see `.env.template` for LLM config)
 - An **OpenAI-compatible LLM endpoint** (model, base URL, API key) for the

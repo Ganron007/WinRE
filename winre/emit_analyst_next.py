@@ -93,7 +93,10 @@ def build_items(dyn: Path, sha: str, meta: dict[str, Any]) -> dict[str, Any]:
                 "title": "Enrich captured PCAP with tshark",
                 "why": "Sandbox already captured traffic; light DNS/HTTP/SNI extract is safe to re-run.",
                 "commands": [
-                    f"python3 /opt/scripts/enrich_pcap_tshark.py {dyn}",
+                    # the control-plane runner executes winre/enrich_pcap_tshark.py
+                    # from the repo (analysis.py) — the /opt/scripts path was a
+                    # RevAI leftover (2026-11-07 review)
+                    f"python winre/enrich_pcap_tshark.py {dyn}",
                 ],
                 "analyst_only": False,
             }

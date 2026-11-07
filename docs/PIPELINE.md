@@ -8,17 +8,23 @@ WinRE uses deterministic tools to produce evidence. The agentic engine can
 interpret that evidence through an OpenAI-compatible LLM. It does not ask the
 LLM to execute samples or replace deterministic collection.
 
-## Current validation boundary — 2026-10-20
+## Current validation boundary — 2026-11-07
 
-Revision `348edfc` passes the full local suite (**805 passed, 3 skipped**). The
-maintainer's reference FlareVM was re-synced from that source and its official
-environment verifier returned **0 failures** with **43/43 required tools**;
-the single warning is the expected on-demand x64dbg MCP listener. These checks
-validate source regressions and environment wiring. No fresh sample has yet
-passed end-to-end acceptance on this revision, so a supported mode in the
-tables below describes an implemented workflow, not a claim that every sample
-or mode has been accepted. Maintainers track per-mode release acceptance
-separately from this operator guide.
+Revision `a35592a` (the 2026-11-07 full review: feature/dependency/docs/UI
+sweeps, UI run-path fixes, JSONL evidence-budget unification) passes the full
+local suite (**873 passed, 3 skipped**). The reference FlareVM (GOLD snapshot
+`GOLD-2026-10-23`) is deployed at parity with the verifier at **0 failures**
+and **43/43 required tools**; the single warning is the expected on-demand
+x64dbg MCP listener.
+
+**Standalone validation campaign: COMPLETE.** Seven samples reached 4/4
+MATRIX COMPLETE (static, agentic, agentic-dbg, dynamic all green:
+s07, s09, s13, s14, s15, s16, s17); s10 stands at 3/4 (Frida refuses its
+UPX+signed stub — a sample limitation) and s08 at 2/4 (an x64dbg
+EP-breakpoint engine limitation on that module name). A supported mode in
+the tables below describes an implemented, sample-proven workflow.
+Maintainers track per-mode release acceptance separately from this operator
+guide.
 
 ## Engines and evidence sections
 

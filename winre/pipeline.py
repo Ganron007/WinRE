@@ -712,20 +712,6 @@ def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
             "agent": out.get("agent"), "llm_analysis": out.get("llm_analysis")}
 
 
-def _deep_prompt(sample: Path, quick: dict, deep_evidence: dict) -> str:
-    q = (quick or {}).get("evidence") or {}
-    return (
-        "You are a malware analyst. Interpret ONLY the deterministic evidence "
-        "below (Windows PE on a FlareVM sandbox). Do not invent behavior; cite "
-        "evidence. Give: 1) verdict (malicious/unknown/benign), 2) key behaviors "
-        "observed, 3) what is NOT evidenced.\n\n"
-        f"sample: {sample.name}\n"
-        f"quick: {json.dumps(q, indent=2)[:3000]}\n"
-        f"deep mcp: {json.dumps(deep_evidence.get('x64dbg', {}), indent=2)[:1500]}\n"
-        f"malcat fns: {json.dumps(deep_evidence.get('malcat_top_fns', {}), indent=2)[:1500]}\n"
-    )
-
-
 def _yara(pack: EvidencePack, quick: dict, dynamic: dict | None) -> dict:
     t0 = time.time()
     try:

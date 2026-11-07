@@ -4,9 +4,19 @@
   <p style="margin:0 0 10px">
     {% if a.truly_green %}<span class="badge up">truly_green</span>
     {% else %}<span class="badge down">not green</span>{% endif %}
+    <span class="badge {{ 'up' if a.all_green else 'down' }}" title="every requested stage ran">all_green</span>
+    <span class="badge {{ 'up' if a.quality_green else 'down' }}" title="no fallbacks/failed tools; claim review fully supported">quality_green</span>
     {% if a.dynamic_blocked %}<span class="badge warn">dynamic blocked</span>{% endif %}
-    <span class="muted" style="margin-left:8px">static_yara_wins · dynamic corroborates, never clears</span>
+    <span class="muted" style="margin-left:8px">static_yara_wins={{ 'true' if a.static_yara_wins else 'false' }} · dynamic corroborates, never clears</span>
   </p>
+  {% if a.claim_review and a.claim_review.claims_total %}
+  <p class="muted" style="font-size:var(--tx-xs); margin:0 0 8px">
+    claim review (<span class="mono">{{ a.claim_review.status }}</span>):
+    {% for st, n in a.claim_review.by_status.items() %}
+      <span class="badge {{ 'up' if st == 'supported' else ('warn' if st == 'insufficient' else 'down') }}">{{ st }} {{ n }}</span>
+    {% endfor %}
+  </p>
+  {% endif %}
   <div class="table-wrap"><table>
     <thead><tr><th>stage</th><th>ran</th><th>summary</th><th>fallback</th><th>error</th></tr></thead>
     <tbody>

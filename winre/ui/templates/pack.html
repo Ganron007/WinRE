@@ -47,7 +47,7 @@
           {% if v.audit.fallback_stages %}fallback: {{ v.audit.fallback_stages|join(', ') }} · {% endif %}
           {% if v.audit.failed_tools %}failed tools: {{ v.audit.failed_tools|length }} · {% endif %}
           {% if v.audit.dynamic_conflict %}dynamic/static conflict · {% endif %}
-          static_yara_wins
+          static_yara_wins={{ 'true' if v.audit.static_yara_wins else 'false' }}
         </span>
       {% endif %}
       <a href="/packs/{{ pack.sha }}/report/ANALYST-NEXT.md{% if pack.mode %}?mode={{ pack.mode }}{% endif %}" style="margin-left:auto; font-size:var(--tx-xs)">analyst-next →</a>

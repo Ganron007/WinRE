@@ -17,6 +17,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import subprocess
@@ -54,6 +55,43 @@ EXPORT_SIZE_CAP = int(os.environ.get("WINRE_EXPORT_SIZE_CAP",
 _run_lock = threading.Lock()
 _run_state: dict = {"running": False, "last": None, "pid": None,
                     "sha": None, "log": [], "mode": "agentic"}
+
+
+def _ring_emit(line: str):
+    """Append one line to the run-page ring log (bounded)."""
+    _run_state["log"].append(line.rstrip())
+    if len(_run_state["log"]) > 400:
+        _run_state["log"] = _run_state["log"][-400:]
+
+
+class _Tee(io.TextIOBase):
+    """Captures into the run-page ring log AND forwards to the real
+    stdout — never swallow other threads' output, and never leave a dead
+    stream behind if a handler binds stderr. Shared by the pipeline run,
+    the manual stage runs, and the single-tool fires (2026-11-07 review:
+    stage/tool output used to bypass the ring log entirely)."""
+
+    def __init__(self, real):
+        self._real = real
+
+    def write(self, s):
+        for ln in str(s).splitlines():
+            _ring_emit(ln)
+        try:
+            self._real.write(str(s))
+            self._real.flush()
+        except Exception:
+            pass
+        return len(s)
+
+    def flush(self):
+        try:
+            self._real.flush()
+        except Exception:
+            pass
+
+    def isatty(self):
+        return False
 
 
 def _section_root(sha: str, mode: str | None) -> Path:
@@ -132,34 +170,6 @@ def _pack_verdicts(root: Path) -> dict:
     return out
 
 
-def _sample_summary(sha: str) -> dict:
-    """Everything the UI needs for ONE sample across its modes.
-
-    This is the new workflow's view: four independent producers, one
-    composite, and whether the gate will let the next run start.
-    """
-    modes = {}
-    for m in MODES:
-        root = LOGS_DIR / sha / m
-        if root.is_dir():
-            modes[m] = _pack_verdicts(root)
-    comp = _mode_composite(sha) or {}
-    return {
-        "sha": sha,
-        "modes": modes,
-        "composite": {
-            "level": comp.get("level"),
-            "confidence": comp.get("confidence"),
-            "basis": (comp.get("basis") or [])[:12],
-            "deciding_mode": comp.get("deciding_mode"),
-            "sources": comp.get("sources") or {},
-            "conflicts": comp.get("conflicts") or [],
-        },
-        "vm_gate": _vm_gate_state(),
-    }
-
-
-
 def _findings(root: Path) -> dict | None:
     """A mode's findings.json - the analysis plane's output (DESIGN.md 2)."""
     return _read_json(root / "findings.json")
@@ -168,9 +178,9 @@ def _findings(root: Path) -> dict | None:
 def _mode_composite(sha: str) -> dict | None:
     """The dynamic-weighted verdict over whichever modes produced findings.
 
-    Static is a first-class producer but never the deciding voice: WinRE runs
-    the sample on Windows under a debugger and in a live detonation, and the
-    execution is the stronger claim.
+    Execution modes carry more weight and only they can escalate; when no
+    execution mode produced a definite level, a static/agentic mode IS the
+    deciding voice (compose.py) — the composite labels it static-derived.
     """
     try:
         from winre.compose import compose_for_sample
@@ -178,17 +188,6 @@ def _mode_composite(sha: str) -> dict | None:
     except Exception:
         return None
 
-
-def _vm_gate_state() -> dict:
-    """Whether a run may start. A detonated VM is not a trustworthy analysis
-    host, so this is a gate and not a footnote (DESIGN.md 7)."""
-    try:
-        from winre import vm_gate
-        cfg = flare_cfg()
-        return {"clean": vm_gate.dirty_blocker(cfg) is None,
-                "blocker": vm_gate.dirty_blocker(cfg)}
-    except Exception as e:
-        return {"clean": False, "blocker": {"reason": f"gate unreachable: {e}"}}
 
 def _packs() -> list[dict]:
     """List evidence packs (newest first) with audit summaries + verdicts.
@@ -276,6 +275,22 @@ def _pack_detail(sha: str, mode: str | None = None) -> dict | None:
                     except Exception:
                         files[f.name] = {"error": "unreadable"}
         detail["stages"][stage] = files
+    # root-level pack artifacts (audit.json, composite.json, execution_plan.json,
+    # artifact-manifest.json, stage_trace.json) — 2026-11-07 review F6: these
+    # had no inline view at all; served under the pseudo-stage "_pack"
+    root_files = {}
+    for f in sorted(d.iterdir()):
+        if f.is_file() and f.suffix in (".json", ".md", ".txt"):
+            try:
+                if f.suffix == ".json":
+                    root_files[f.name] = json.loads(f.read_text(
+                        encoding="utf-8", errors="replace"))
+                else:
+                    root_files[f.name] = f.read_text(
+                        encoding="utf-8", errors="replace")[:4000]
+            except Exception:
+                root_files[f.name] = {"error": "unreadable"}
+    detail["stages"]["_pack"] = root_files
     detail["views"] = _pack_views(d, detail["stages"])
     pm = _read_json(d / "META.json") or {}
     detail["mode"] = (pm.get("mode") if pm.get("mode") in MODES
@@ -459,6 +474,19 @@ def _pack_views(root: Path, files: dict) -> dict:
         "engine": dj.get("engine") if isinstance(dj, dict) else None,
         "meta": get("deep", "META.json"),
     }
+    # verdict-floor provenance (2026-11-07 review F7): a floored verdict
+    # (VT heavy-detection, curated-YARA) used to be invisible — the card
+    # showed only the label, never the reason it was floored.
+    if isinstance(agent, dict):
+        av = agent.get("verdict")
+        if isinstance(av, dict) and av.get("verdict_floored"):
+            v["deep"]["verdict_floor"] = {
+                "floor_source": av.get("floor_source"),
+                "floor_vt": av.get("floor_vt"),
+                "floor_rules": av.get("floor_rules"),
+                "original_verdict": av.get("original_verdict"),
+                "original_confidence": av.get("original_confidence"),
+            }
     findings = _read_json(root / "findings.json") or {}
     v["correlation"] = findings.get("correlation")
 
@@ -509,6 +537,7 @@ def _pack_views(root: Path, files: dict) -> dict:
 
     # audit — gate checklist
     audit = _read_json(root / "audit.json") or {}
+    rcr = audit.get("report_claim_review") or {}
     v["audit"] = {
         "truly_green": audit.get("truly_green"),
         "all_green": audit.get("all_green"),
@@ -525,6 +554,16 @@ def _pack_views(root: Path, files: dict) -> dict:
         "dynamic_conflict": audit.get("dynamic_conflict"),
         "dynamic_blocked": audit.get("dynamic_blocked"),
         "snapshot_gate": audit.get("snapshot_gate"),
+        # the audit's actual value, not a fixed caption (2026-11-07 review F15)
+        "static_yara_wins": audit.get("static_yara_wins"),
+        # the independent claim review's outcome at a glance (2026-11-07
+        # review F6: the histogram lived two clicks deep in a stage file)
+        "claim_review": {
+            "status": rcr.get("status"),
+            "ok": rcr.get("ok"),
+            "claims_total": rcr.get("claims_total"),
+            "by_status": rcr.get("by_status") or {},
+        },
     }
     return v
 
@@ -649,7 +688,11 @@ def _vm_health() -> dict:
 
 # Actual execution order in run_remote_pipeline: static first, dynamic LAST
 # (opt-in; absent in static-only runs). Used for run-page stage display.
-STAGE_ORDER = ("intake", "quick", "deep", "dynamic", "yara", "report")
+# audit is last: after the report lands the board used to say "report" while
+# the audit was still the thing running (2026-11-07 review F20). audit has
+# no stage dir, so once report is the newest landed stage the board shows
+# audit until the run flips to complete.
+STAGE_ORDER = ("intake", "quick", "deep", "dynamic", "yara", "report", "audit")
 
 
 def _valid_sha(sha: str) -> bool:
@@ -717,39 +760,8 @@ def _run_pipeline_in_thread(sample_path: str, max_seconds: int,
             except Exception:
                 pass
 
-            def _emit(line: str):
-                _run_state["log"].append(line.rstrip())
-                if len(_run_state["log"]) > 400:
-                    _run_state["log"] = _run_state["log"][-400:]
-
-            class _Tee(io.TextIOBase):
-                """Captures into the ring log AND forwards to the real
-                stdout — never swallow other threads' output, and never
-                leave a dead stream behind if a handler binds stderr."""
-
-                def __init__(self, real):
-                    self._real = real
-
-                def write(self, s):
-                    for ln in str(s).splitlines():
-                        _emit(ln)
-                    try:
-                        self._real.write(str(s))
-                        self._real.flush()
-                    except Exception:
-                        pass
-                    return len(s)
-
-                def flush(self):
-                    try:
-                        self._real.flush()
-                    except Exception:
-                        pass
-
-                def isatty(self):
-                    return False
-
             # capture pipeline stdout into the in-memory ring log
+            # (module-level _Tee — shared with stage/tool runs)
             real_out, real_err = sys.stdout, sys.stderr
             sys.stdout = sys.stderr = _Tee(real_out)
             try:
@@ -883,6 +895,47 @@ def create_app() -> "Flask":
     @app.route("/run", methods=["GET", "POST"])
     def run():
         if request.method == "POST":
+            # Validate BEFORE reserving: the sample-not-found early return
+            # used to leak the reservation (running=True forever — every
+            # later POST 409'd until the console restarted; 2026-11-07
+            # review F1).
+            sample = request.form.get("sample", "").strip()
+            if not sample or not Path(sample).is_file():
+                return jsonify({"ok": False,
+                                "error": f"sample not found: {sample}"}), 400
+            # CLI parity (2026-11-07 review F11): 150 s cap and idle-stop
+            # OFF by default, matching python -m winre.pipeline. A UI run
+            # and a CLI run of the same command must use the same window.
+            try:
+                max_seconds = max(10, min(600,
+                                          int(request.form.get("max_seconds", 150))))
+            except ValueError:
+                max_seconds = 150
+            pesieve = request.form.get("pesieve") == "on"
+            dry_llm = request.form.get("dry_llm") == "on"
+            dynamic = request.form.get("dynamic") == "on"
+            agentic_dbg = request.form.get("agentic_dbg") == "on"
+            adaptive = dynamic and request.form.get("adaptive") == "on"
+            try:
+                # 0 = OFF (the CLI default; a sleeping sample looks idle)
+                idle_stop_seconds = max(0, min(120, int(
+                    request.form.get("idle_stop_seconds", 0))))
+            except ValueError:
+                idle_stop_seconds = 0
+            mode = request.form.get("mode", "agentic")
+            if mode not in MODES:
+                mode = "agentic"
+            # The live board tracks the PACK section, not the engine mode:
+            # dbg/dynamic runs write under dbg//dynamic/ and the board used
+            # to read the agentic/ section (2026-11-07 review F2). Resolve
+            # with the driver's own authority so the section is right from
+            # intake onward.
+            from winre.evidence import resolve_pack_mode
+            try:
+                pack_mode = resolve_pack_mode(mode, agentic_dbg=agentic_dbg,
+                                              dynamic=dynamic)
+            except ValueError as e:
+                return jsonify({"ok": False, "error": str(e)}), 400
             # admission is atomic: check+reserve under the lock so two rapid
             # POSTs can't both spawn pipelines (execution still serializes)
             with _run_lock:
@@ -890,44 +943,24 @@ def create_app() -> "Flask":
                     return jsonify({"ok": False,
                                     "error": "pipeline already running"}), 409
                 _run_state["running"] = True  # reserved; thread keeps it true
+            thread_started = False
             try:
-                sample = request.form.get("sample", "").strip()
-                if not sample or not Path(sample).is_file():
-                    return jsonify({"ok": False,
-                                    "error": f"sample not found: {sample}"}), 400
-                try:
-                    max_seconds = max(10, min(600,
-                                              int(request.form.get("max_seconds", 45))))
-                except ValueError:
-                    max_seconds = 45
-                pesieve = request.form.get("pesieve") == "on"
-                dry_llm = request.form.get("dry_llm") == "on"
-                dynamic = request.form.get("dynamic") == "on"
-                agentic_dbg = request.form.get("agentic_dbg") == "on"
-                adaptive = dynamic and request.form.get("adaptive") == "on"
-                try:
-                    idle_stop_seconds = max(3, min(120, int(
-                        request.form.get("idle_stop_seconds", 10))))
-                except ValueError:
-                    idle_stop_seconds = 10
-                mode = request.form.get("mode", "agentic")
-                if mode not in MODES:
-                    mode = "agentic"
                 _run_state["sha"] = None
                 _run_state["log"] = []
                 _run_state["last"] = None
-                _run_state["mode"] = mode
+                _run_state["mode"] = pack_mode
                 _run_pipeline_in_thread(sample, max_seconds, pesieve, dry_llm,
                                         dynamic, agentic_dbg, mode,
                                         adaptive=adaptive,
                                         idle_stop_seconds=idle_stop_seconds)
+                thread_started = True
                 # form POST: redirect back so the browser lands on the live
                 # progress board instead of a raw JSON body
                 return redirect("/run", 303)
-            except Exception:
-                with _run_lock:
-                    _run_state["running"] = False  # release the reservation
-                raise
+            finally:
+                if not thread_started:
+                    with _run_lock:
+                        _run_state["running"] = False  # release the reservation
         return render_template("run.html", running=_run_state["running"],
                                last=_run_state["last"])
 
@@ -1065,21 +1098,34 @@ def create_app() -> "Flask":
             except Exception as e:  # noqa: BLE001
                 return {"ok": False, "error": str(e)[:300]}
 
+        # Reserve at POST under the lock (2026-11-07 review F3: the old
+        # check ran outside the lock, so two rapid POSTs both passed it and
+        # both stages executed back-to-back). The thread holds the
+        # reservation; no re-acquire here (the lock is not reentrant).
+        with _run_lock:
+            if _run_state["running"]:
+                return jsonify({"ok": False,
+                                "error": "pipeline already running"}), 409
+            _run_state["running"] = True
+
         def _do():
-            with _run_lock:
-                _run_state["running"] = True
-                _run_state["sha"] = sha
-                _run_state["mode"] = mode
-                _run_state["log"] = []
-                try:
-                    # reuse the same capture helper by calling inline
-                    _run_state["last"] = _run_one()
-                    if not isinstance(_run_state["last"], dict):
-                        _run_state["last"] = {"ok": False, "error": "no result"}
-                except Exception as e:  # noqa: BLE001
-                    _run_state["last"] = {"ok": False, "error": str(e)}
-                finally:
-                    _run_state["running"] = False
+            _run_state["sha"] = sha
+            _run_state["mode"] = mode
+            _run_state["log"] = []
+            # tee stage output into the ring log like pipeline runs do
+            # (2026-11-07 review F19: the live board used to show an empty
+            # log while a manual stage ran)
+            real_out, real_err = sys.stdout, sys.stderr
+            sys.stdout = sys.stderr = _Tee(real_out)
+            try:
+                _run_state["last"] = _run_one()
+                if not isinstance(_run_state["last"], dict):
+                    _run_state["last"] = {"ok": False, "error": "no result"}
+            except Exception as e:  # noqa: BLE001
+                _run_state["last"] = {"ok": False, "error": str(e)}
+            finally:
+                sys.stdout, sys.stderr = real_out, real_err
+                _run_state["running"] = False
 
         threading.Thread(target=_do, daemon=True).start()
         return jsonify({"ok": True, "msg": f"stage {stage} started",
@@ -1166,20 +1212,28 @@ def create_app() -> "Flask":
                                "file": rec["file"], "error": rec["error"],
                                "preview": preview}}
 
+        # Same atomic reservation as the stage route (2026-11-07 review F3).
+        with _run_lock:
+            if _run_state["running"]:
+                return jsonify({"ok": False,
+                                "error": "pipeline already running"}), 409
+            _run_state["running"] = True
+
         def _do():
-            with _run_lock:
-                _run_state["running"] = True
-                _run_state["sha"] = sha
-                _run_state["mode"] = mode
-                _run_state["log"] = []
-                try:
-                    _run_state["last"] = _run_one()
-                    if not isinstance(_run_state["last"], dict):
-                        _run_state["last"] = {"ok": False, "error": "no result"}
-                except Exception as e:  # noqa: BLE001
-                    _run_state["last"] = {"ok": False, "error": str(e)}
-                finally:
-                    _run_state["running"] = False
+            _run_state["sha"] = sha
+            _run_state["mode"] = mode
+            _run_state["log"] = []
+            real_out, real_err = sys.stdout, sys.stderr
+            sys.stdout = sys.stderr = _Tee(real_out)
+            try:
+                _run_state["last"] = _run_one()
+                if not isinstance(_run_state["last"], dict):
+                    _run_state["last"] = {"ok": False, "error": "no result"}
+            except Exception as e:  # noqa: BLE001
+                _run_state["last"] = {"ok": False, "error": str(e)}
+            finally:
+                sys.stdout, sys.stderr = real_out, real_err
+                _run_state["running"] = False
 
         threading.Thread(target=_do, daemon=True).start()
         return jsonify({"ok": True, "msg": f"tool {tool} started",
@@ -1319,7 +1373,11 @@ def create_app() -> "Flask":
         for seg in (sha, stage, fname):
             if not seg or seg in (".", "..") or "/" in seg or "\\" in seg:
                 abort(400, "invalid path segment")
-        base = (_section_root(sha, request.args.get("mode")) / stage).resolve()
+        section = _section_root(sha, request.args.get("mode")).resolve()
+        # "_pack" = the section root itself (root-level artifacts:
+        # audit.json, composite.json, execution_plan.json — 2026-11-07
+        # review F6). The containment check below still applies.
+        base = section if stage == "_pack" else (section / stage).resolve()
         d = (base / fname).resolve()
         try:
             d.relative_to(base)

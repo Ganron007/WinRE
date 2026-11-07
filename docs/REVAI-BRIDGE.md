@@ -178,10 +178,12 @@ export WINRE_ENV=/etc/winre.env     # file holding the 4 lines
 ## 5. If the driver box also has RevAI config
 
 Maintain two independent configurations on that host: RevAI's `llm.env` and
-WinRE's own env file (§3.1), or their respective process exports. The RevAI
-bridge resolves only `WINRE_LLM_*` settings and removes `REVAI_LLM_*` values
-from the WinRE child environment. A missing WinRE key is reported rather than
-filled from RevAI. This applies to ordinary agentic, debugger and detonation
+WinRE's own env file (§3.1), or their respective process exports. WinRE
+resolves only `WINRE_LLM_*` settings; `ops/sync_llm_config.py` carries only
+`WINRE_LLM_*` keys when copying a config, so RevAI's values never enter
+WinRE's config file. (The child process environment is not scrubbed at
+runtime — keep the two export sets separate at the shell level.) A missing
+WinRE key is reported rather than filled from RevAI. This applies to ordinary agentic, debugger and detonation
 modes; deterministic static mode makes no agentic analysis calls, but a green
 audit still requires the separate report-claim review.
 

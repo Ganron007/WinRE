@@ -1389,37 +1389,21 @@ def run_dynamic(
                     continue
                 print(f"[dynamic_run_v2] deploy {name}", flush=True)
                 _scp_to(cfg, local, f"{tools}/{name}")
-            # Keep Frida script with path decode on Flare
-            frida_local = Path("/opt/scripts/frida_api_trace.py")
-            if not frida_local.is_file():
-                frida_local = (
-                    Path(__file__).resolve().parents[2]
-                    / "flarevm-deploy"
-                    / "dynamic"
-                    / "frida_api_trace.py"
-                )
-            if not frida_local.is_file():
-                # from Tools/v6_deploy/V6.2/scripts -> Tools/flarevm-deploy
-                frida_local = (
-                    Path(__file__).resolve().parents[2]
-                    / "flarevm-deploy"
-                    / "dynamic"
-                    / "frida_api_trace.py"
-                )
-            # parents: scripts->V6.2->v6_deploy->Tools
-            if frida_local.is_file():
-                _scp_to(
-                    cfg,
-                    frida_local,
-                    "C:/Tools/flarevm-deploy/dynamic/frida_api_trace.py",
-                )
+            # (The old frida_api_trace.py deploy block was removed 2026-11-07:
+            # it scp'd RevAI-era copies to C:/Tools/flarevm-deploy/dynamic/ —
+            # a path nothing reads. The job runs C:\WinRE\tools\
+            # frida_api_trace.py, which the repo sync ships.)
 
         print(f"[dynamic_run_v2] scp sample -> {remote_sample}", flush=True)
         _scp_to(cfg, Path(sample), remote_sample)
 
-        job_win = cfg["job_ps1"]
-        # Prefer deployed tools copy
-        job_win = f"{tools_win}\\flare_dynamic_job.ps1"
+        # FLARE_DYNAMIC_JOB overrides the job script ONLY when explicitly
+        # set; the deployed tools copy is the default (the override used to
+        # be silently discarded by the very next assignment — 2026-11-07
+        # review; cfg["job_ps1"] carries a reveng-dynamic default that is
+        # NOT the deployed copy, so it cannot be trusted as the fallback)
+        job_win = (os.environ.get("FLARE_DYNAMIC_JOB", "").strip()
+                   or f"{tools_win}\\flare_dynamic_job.ps1")
         pesieve_flag = " -EnablePeSieve" if enable_pesieve else ""
         # behaviour gate (RevAI handoff item 9). Quoted: the spec is a comma
         # list; an empty value disables the gate.

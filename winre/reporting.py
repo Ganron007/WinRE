@@ -345,6 +345,7 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
     active_refs: tuple[str, ...] = ()
     reference_cache: dict[str, bool] = {}
     evidence_json_cache: dict[Path, Any] = {}
+    jsonl_excerpt_cache: dict[tuple[str, str], bool] = {}
     unresolved_requested_refs: list[str] = []
 
     def _reference_exists(reference: str) -> bool:
@@ -380,7 +381,11 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
         a locator that points at a whole array makes its claim
         unverifiable whatever the reviewer answers. Builders must narrow
         broad locators; this measures the excerpt so a broad one is never
-        published. Unmeasurable refs (JSONL selectors) are not over-broad.
+        published. JSONL selectors are measured with the reviewer's own
+        resolver: they used to be exempt by accident (json.loads on the
+        whole trace fails), while the reviewer resolved the selected rows
+        and refused any excerpt over the limit — a run-failing asymmetry
+        (2026-11-07 review).
         """
         rel, sep, pointer = reference.partition("#")
         if not sep or not rel or not pointer:
@@ -388,6 +393,14 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
         path = (pack_root / rel).resolve()
         if not path.is_file():
             return False
+        if path.suffix.lower() == ".jsonl":
+            key = (str(path), pointer)
+            if key not in jsonl_excerpt_cache:
+                from .report_quality import resolve_reference as _resolve
+                resolved = _resolve(pack_root, reference)
+                jsonl_excerpt_cache[key] = bool(
+                    resolved.get("ok") and resolved.get("excerpt_truncated"))
+            return jsonl_excerpt_cache[key]
         if path not in evidence_json_cache:
             try:
                 evidence_json_cache[path] = json.loads(path.read_text(encoding="utf-8"))

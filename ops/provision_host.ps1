@@ -71,13 +71,22 @@ $py = (Get-Command python -EA SilentlyContinue).Source
 if (-not $py) { $py = (Get-Command python3 -EA SilentlyContinue).Source }
 if (-not $py) { Bad "python not on PATH - the analysis plane is Python"; exit 1 }
 Ok "python -> $py"
+# The tested host interpreter is 3.13: langchain-core still imports the
+# pydantic.v1 shim (incompatible with 3.14+) and the staged floss wheel set
+# is cp313. Warn — do not block — so the drift is visible (2026-11-07 review).
+$pyVer = & $py -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+if ($pyVer -ne "3.13") {
+    Write-Host "  [WARN]   host python is $pyVer; the tested interpreter is 3.13" -ForegroundColor Yellow
+    Write-Host "           (langchain-core emits a pydantic-v1 warning on 3.14+; floss/binary2strings wheels are cp313)" -ForegroundColor Yellow
+}
 
 # ---------------------------------------------------------------- pip pkgs
 # Each entry: pip name, import name, why the analysis plane needs it.
 $pipPkgs = @(
     @{ name = "yara-python"; imp = "yara";  why = "memory-dump YARA triage - the only thing that can triage the 121-306 MB of pulled memory evidence" },
     @{ name = "flare-floss"; imp = "floss"; why = "static string de-obfuscation" },
-    @{ name = "flare-capa";  imp = "capa";  why = "capability extraction (weighted in compose)" }
+    @{ name = "flare-capa";  imp = "capa";  why = "capability extraction (weighted in compose)" },
+    @{ name = "flask";       imp = "flask"; why = "the UI console (winre/ui/app.py) runs HERE on the control plane - it was only ever installed on the guest, which uses nothing of it (2026-11-07 review)" }
 )
 
 foreach ($p in $pipPkgs) {

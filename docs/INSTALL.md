@@ -14,7 +14,8 @@ overrides for non-default installs (IDA/Malcat especially) are in
 git clone <repo-url> WinRE
 cd WinRE
 
-python -m pip install langchain-openai langgraph langchain-core pydantic
+python -m pip install langchain-openai langgraph langchain-core pydantic flask
+# (flask serves the UI console, winre/ui/app.py — a control-plane component)
 # Supplemental static tools use pure Python/pefile; the VM needs pefile, psutil
 # and (for Speakeasy) setuptools<81 pinned (pkg_resources removal):
 python -m pip install pefile psutil "setuptools<81"

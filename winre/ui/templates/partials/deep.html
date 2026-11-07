@@ -32,6 +32,15 @@
     {% if agent.get('fallback_reason') %}
       <div class="notice warn">fallback: {{ agent.fallback_reason }}</div>
     {% endif %}
+    {% set floor = d.get('verdict_floor') %}
+    {% if floor %}
+      <div class="notice warn" style="font-size:var(--tx-xs)">
+        verdict floored{% if floor.get('original_verdict') %} from <b>{{ floor.original_verdict }}</b>{% endif %}
+        by <b>{{ floor.get('floor_source') or 'unknown floor' }}</b>
+        {% if floor.get('floor_vt') %} — VT detections {{ floor.floor_vt.get('malicious') if floor.floor_vt is mapping else floor.floor_vt }}{% endif %}
+        {% if floor.get('floor_rules') %} — rules {{ floor.floor_rules|join(', ') }}{% endif %}
+      </div>
+    {% endif %}
     {% set up = agent.get('unpack_prepass') %}
     {% if up is mapping %}
       <p class="muted" style="font-size:var(--tx-xs)">

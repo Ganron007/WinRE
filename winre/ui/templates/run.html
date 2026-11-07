@@ -26,8 +26,8 @@
       <pre id="logpre" style="max-height:260px; overflow:auto">waiting for output…</pre>
     </div>
   </div>  <script>
-    // real execution order: static first, dynamic LAST (opt-in)
-    const STAGES = ['intake','quick','deep','dynamic','yara','report'];
+    // real execution order: static first, dynamic LAST (opt-in), audit after report
+    const STAGES = ['intake','quick','deep','dynamic','yara','report','audit'];
     const escapeHtml = x => String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     let autoScroll = true;
     let logFilter = '';
@@ -124,7 +124,7 @@
         <div class="row" style="margin-top:10px">
           <div>
             <label>Detonation seconds (dynamic; cap if adaptive)</label>
-            <input name="max_seconds" type="number" value="45" min="10" max="600">
+            <input name="max_seconds" type="number" value="150" min="10" max="600">
           </div>
           <div>
             <label>Deep-dive mode</label>
@@ -156,9 +156,9 @@
             <input type="checkbox" name="adaptive">
             <span style="color:var(--warn)">Adaptive window</span>
             <span class="muted" style="font-size:var(--tx-xs)">— stop the trace after</span>
-            <input name="idle_stop_seconds" type="number" value="10" min="3" max="120"
+            <input name="idle_stop_seconds" type="number" value="0" min="0" max="120"
                    style="width:52px; padding:1px 4px; font-size:var(--tx-xs)">
-            <span class="muted" style="font-size:var(--tx-xs)">s without new events (seconds above = cap; effective window recorded in META)</span></label>
+            <span class="muted" style="font-size:var(--tx-xs)">s without new events (0 = off, the CLI default — a sleeping sample looks idle; seconds above = cap; effective window recorded in META)</span></label>
         </div>
 
         <p style="font-size:var(--tx-sm); margin:8px 0 0">
@@ -174,7 +174,9 @@
         </div>
 
         <div style="margin-top:16px">
-          <button class="btn" type="submit">Run pipeline</button>
+          <button class="btn" type="submit" id="runBtn">Run pipeline</button>
+          <span class="muted" id="runBlockNote" style="font-size:var(--tx-xs)" hidden>
+            gate blocked — every mode is refused until the VM is restored/attested</span>
         </div>
       </form>
     </div>
@@ -221,6 +223,9 @@
       warn.hidden = !chk.checked;
       pes.hidden = !chk.checked;
       adapt.hidden = !chk.checked;
+      // uncheck the dynamic-only options with their label (2026-11-07 review
+      // F9: the boxes kept their state hidden and pesieve was read anyway)
+      if (!chk.checked) { pes.checked = false; adapt.checked = false; }
     });
     dbg.addEventListener('change', refreshMode);
     dry.addEventListener('change', refreshMode);
@@ -267,10 +272,19 @@
         actEl.style.display = (g.mode !== 'off') ? 'flex' : 'none';
         // enforce (default) locks the detonation checkbox while blocked;
         // observe is the explicit benign-test override and never blocks.
+        // The gate blocks EVERY mode (the driver refuses before any stage),
+        // so the Run button itself is disabled too (2026-11-07 review F5).
+        const runBtn = document.getElementById('runBtn');
+        const runNote = document.getElementById('runBlockNote');
         if (chk) {
           chk.disabled = enforce && g.blocked;
           chk.title = (enforce && g.blocked) ? 'gate blocked — restore/attest first' : '';
         }
+        if (runBtn) {
+          runBtn.disabled = enforce && g.blocked;
+          runBtn.title = (enforce && g.blocked) ? 'gate blocked — restore/attest first' : '';
+        }
+        if (runNote) runNote.hidden = !(enforce && g.blocked);
       } catch (e) { /* keep probing text */ }
     }
     gateRefresh();
