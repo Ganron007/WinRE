@@ -1231,8 +1231,9 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                 unconfirmed = [e for e in fd["created_files"]
                                if isinstance(e, dict) and not (e.get("successful_writes") or 0)]
                 if confirmed:
-                    A(f"  - create/truncate + confirmed writes: {len(confirmed)} "
-                      f"file(s); these are also counted as drops")
+                    paths = ", ".join(f"`{e.get('path', '?')}`" for e in confirmed[:5])
+                    extra = f" and {len(confirmed) - 5} more" if len(confirmed) > 5 else ""
+                    A(f"  - confirmed file writes on drop-target paths ({len(confirmed)}): {paths}{extra}")
                 if unconfirmed:
                     A(f"  - successful create/truncate effects without a confirmed "
                       f"write: {len(unconfirmed)}; these are not counted as drops")

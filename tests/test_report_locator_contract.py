@@ -907,10 +907,12 @@ def test_the_created_files_line_distinguishes_confirmed_from_unconfirmed(tmp_pat
     (pack_root / "findings.json").write_text(json.dumps(findings), encoding="utf-8")
     reporting.build_report_v3(pack_root, review_claims=False)
     md = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(encoding="utf-8")
-    assert "create/truncate + confirmed writes" in md, (
+    assert "confirmed file writes on drop-target paths" in md, (
         "confirmed-write entries must be reported accurately")
     assert "without a confirmed write" not in md, (
         "the old text contradicts the data when writes are confirmed")
+    assert "C:\windows\test.exe" in md, (
+        "the file path must be visible so the reviewer can verify it")
 
 
 def test_the_created_files_line_reports_unconfirmed_separately(tmp_path):
@@ -932,4 +934,4 @@ def test_the_created_files_line_reports_unconfirmed_separately(tmp_path):
     md = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(encoding="utf-8")
     assert "without a confirmed write" in md, (
         "unconfirmed entries must still be reported as such")
-    assert "create/truncate + confirmed writes" not in md
+    assert "confirmed file writes on drop-target paths" not in md
