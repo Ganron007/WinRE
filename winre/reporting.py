@@ -1221,8 +1221,21 @@ def build_report_v3(pack_root: Path, *, review_claims: bool = True) -> dict:
                              *[ref for item in fd["created_files"]
                                if isinstance(item, dict)
                                for ref in raw_frida_refs(event_refs=item.get("event_refs"))])
-                A(f"  - successful create/truncate effects without a confirmed "
-                  f"write: {len(fd['created_files'])}; these are not counted as drops")
+                # The created_files list captures create/truncate events on
+                # drop-target paths. Some of those files ALSO have confirmed
+                # writes (they appear in drops too). Saying "without a
+                # confirmed write" when the data shows successful writes
+                # contradicts the evidence (2026-10-31 s16 dynamic C0042).
+                confirmed = [e for e in fd["created_files"]
+                             if isinstance(e, dict) and (e.get("successful_writes") or 0) > 0]
+                unconfirmed = [e for e in fd["created_files"]
+                               if isinstance(e, dict) and not (e.get("successful_writes") or 0)]
+                if confirmed:
+                    A(f"  - create/truncate + confirmed writes: {len(confirmed)} "
+                      f"file(s); these are also counted as drops")
+                if unconfirmed:
+                    A(f"  - successful create/truncate effects without a confirmed "
+                      f"write: {len(unconfirmed)}; these are not counted as drops")
             effect_intent = fd.get("file_effect_intent") or {}
             if effect_intent:
                 set_evidence("findings.json#$.findings.file_effect_intent",

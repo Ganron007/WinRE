@@ -886,3 +886,50 @@ def test_the_emu_diff_line_cites_its_computed_fields(tmp_path):
                  for eid in ids}
     assert "dynamic/emu_diff.json#$.overlap_count" in line_refs, line_refs
     assert "dynamic/emu_diff.json#$.divergence_score" in line_refs, line_refs
+
+
+def test_the_created_files_line_distinguishes_confirmed_from_unconfirmed(tmp_path):
+    """2026-10-31 s16 dynamic C0042: the report said 'successful create/truncate
+    effects without a confirmed write: 1' but the findings data showed the file
+    HAD 4 successful writes (851968 bytes) AND was a proven drop. The report
+    must distinguish confirmed-write entries from unconfirmed ones."""
+    pack_root = _pack(tmp_path)
+    (pack_root / "dynamic").mkdir(parents=True, exist_ok=True)
+    (pack_root / "dynamic" / "STAGE.json").write_text(json.dumps({"detonation_ran": True}), encoding="utf-8")
+    (pack_root / "dynamic" / "META.json").write_text(json.dumps({"detonation_ran": True, "sample_pid": 4242}), encoding="utf-8")
+    findings = {
+        "schema": "winre-findings/v1", "mode": "dynamic", "sha256": SHA,
+        "ok": True, "run_id": "d" * 32,
+        "findings": {"created_files": [
+            {"path": "C:\windows\test.exe", "successful_create_or_truncate": 4,
+             "successful_writes": 4, "bytes_written": 851968, "event_refs": []}]}
+    }
+    (pack_root / "findings.json").write_text(json.dumps(findings), encoding="utf-8")
+    reporting.build_report_v3(pack_root, review_claims=False)
+    md = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(encoding="utf-8")
+    assert "create/truncate + confirmed writes" in md, (
+        "confirmed-write entries must be reported accurately")
+    assert "without a confirmed write" not in md, (
+        "the old text contradicts the data when writes are confirmed")
+
+
+def test_the_created_files_line_reports_unconfirmed_separately(tmp_path):
+    """The other direction: entries WITHOUT confirmed writes are still
+    reported as 'without a confirmed write' (the honest zero-result)."""
+    pack_root = _pack(tmp_path)
+    (pack_root / "dynamic").mkdir(parents=True, exist_ok=True)
+    (pack_root / "dynamic" / "STAGE.json").write_text(json.dumps({"detonation_ran": True}), encoding="utf-8")
+    (pack_root / "dynamic" / "META.json").write_text(json.dumps({"detonation_ran": True, "sample_pid": 4242}), encoding="utf-8")
+    findings = {
+        "schema": "winre-findings/v1", "mode": "dynamic", "sha256": SHA,
+        "ok": True, "run_id": "d" * 32,
+        "findings": {"created_files": [
+            {"path": "C:\windows\test.exe", "successful_create_or_truncate": 2,
+             "successful_writes": 0, "bytes_written": 0, "event_refs": []}]}
+    }
+    (pack_root / "findings.json").write_text(json.dumps(findings), encoding="utf-8")
+    reporting.build_report_v3(pack_root, review_claims=False)
+    md = (pack_root / "report" / "REPORT-TECHNICAL-v3.md").read_text(encoding="utf-8")
+    assert "without a confirmed write" in md, (
+        "unconfirmed entries must still be reported as such")
+    assert "create/truncate + confirmed writes" not in md
