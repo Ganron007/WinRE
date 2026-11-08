@@ -552,12 +552,39 @@ def test_guest_python_honors_flare_python_env_and_cfg(monkeypatch):
     assert tr._remote_py() == r"C:\CustomPy\python.exe"
 
 
-def test_pipeline_dynamic_sets_reveng_logs_dir_to_pack_logs_dir():
-    """Item 3.e: pipeline._dynamic uses pack.logs_dir for REVENG_LOGS_DIR."""
-    import inspect
+def test_pipeline_local_dynamic_path_is_deleted_and_refused():
+    """Brief 2: pipeline._dynamic is removed; local pipeline refuses dynamic."""
     from winre import pipeline
-    src = inspect.getsource(pipeline._dynamic)
-    assert 'env["REVENG_LOGS_DIR"] = str(pack.logs_dir)' in src
+    assert not hasattr(pipeline, "_dynamic")
+    res = pipeline.run_pipeline(Path("nonexistent.exe"), enable_dynamic=True)
+    assert res.get("aborted") is True
+    assert "local pipeline refuses debug/dynamic execution" in res.get("error", "")
+
+
+def test_host_requirements_and_setup_venv_exist():
+    """Brief 1: requirements-host.txt and ops/setup_host_venv.ps1 exist with tested pins."""
+    req_file = REPO / "requirements-host.txt"
+    assert req_file.is_file(), "requirements-host.txt must exist"
+    req_text = req_file.read_text(encoding="utf-8")
+    for pkg in ("langgraph", "langchain-core", "pydantic", "Flask", "yara-python", "flare-capa", "flare-floss", "pytest"):
+        assert pkg.lower() in req_text.lower(), f"{pkg} must be declared in requirements-host.txt"
+
+    setup_script = REPO / "ops" / "setup_host_venv.ps1"
+    assert setup_script.is_file(), "ops/setup_host_venv.ps1 must exist"
+    setup_text = setup_script.read_text(encoding="utf-8")
+    assert "3.13" in setup_text
+    assert "requirements-host.txt" in setup_text
+
+
+def test_windbg_bridge_deleted_and_mcp_windbg_documented():
+    """Brief 3: windbg_bridge.py is removed; WINDBG-MCP.md documents standalone/manual MCP status."""
+    bridge_py = REPO / "winre" / "mcp" / "windbg_bridge.py"
+    assert not bridge_py.exists(), "winre/mcp/windbg_bridge.py must be deleted"
+
+    doc = REPO / "docs" / "WINDBG-MCP.md"
+    assert doc.is_file()
+    doc_text = doc.read_text(encoding="utf-8")
+    assert "**removed** in the 2026-11-08 review" in doc_text
 
 
 def test_envfile_and_powershell_quote_stripping_are_harmonized(tmp_path):

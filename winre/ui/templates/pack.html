@@ -79,7 +79,7 @@
   </div>
   <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center">
     {% for s in ['quick','dynamic','deep','yara','report','audit'] %}
-    <button class="btn ghost" style="font-size:var(--tx-xs)"
+    <button id="btn_stage_{{ s }}" class="btn ghost" style="font-size:var(--tx-xs)"
             onclick="runStage('{{ s }}')">▶ {{ s }}</button>
     {% endfor %}
     <span style="margin-left:10px; font-size:var(--tx-xs)">
@@ -124,7 +124,31 @@ async function hitl(action) {
     body: JSON.stringify({sha: '{{ pack.sha }}', action})});
   const j = await r.json();
   document.getElementById('hitlState').textContent = JSON.stringify(j.snapshot || j);
+  checkGateForDynamic();
 }
+async function checkGateForDynamic() {
+  try {
+    const res = await fetch('/api/gate');
+    const st = await res.json();
+    const btn = document.getElementById('btn_stage_dynamic');
+    if (btn) {
+      if (st.mode === 'enforce' && (st.blocked || !st.ledger_clean || !st.marker)) {
+        btn.disabled = true;
+        btn.style.opacity = '0.5';
+        btn.style.cursor = 'not-allowed';
+        btn.title = 'VM is dirty or gate blocked — restore snapshot GOLD-2026-10-23 and reapply before running dynamic stage';
+      } else {
+        btn.disabled = false;
+        btn.style.opacity = '1';
+        btn.style.cursor = 'pointer';
+        btn.title = 'Run dynamic stage';
+      }
+    }
+  } catch (e) {
+    console.error('gate check failed', e);
+  }
+}
+document.addEventListener('DOMContentLoaded', checkGateForDynamic);
 async function runStage(stage) {
   const el = document.getElementById('stageOut');
   el.style.display = 'block';

@@ -37,8 +37,10 @@ binds all interfaces.
   **3.13 (the tested interpreter)**. 3.14+ emits a langchain-core
   pydantic-v1 incompatibility warning and the staged floss wheels are cp313 —
   3.13 is the supported host.
-- Python packages: `langchain-openai`, `langgraph`, `langchain-core`,
-  `pydantic` (see `.env.template` for LLM config)
+- Python packages: pinned in `requirements-host.txt` (`langchain-openai`,
+  `langgraph`, `langchain-core`, `pydantic`, `flask`, `flare-capa`, `flare-floss`,
+  `yara-python`). Automated venv provisioning is provided by
+  `ops/setup_host_venv.ps1` (or system-wide via `ops/provision_host.ps1`).
 - An **OpenAI-compatible LLM endpoint** (model, base URL, API key) for the
   deep-dive agent. Optional — without it the pipeline runs deterministic
   fallbacks and stays honest about it (`deterministic_fallback`)

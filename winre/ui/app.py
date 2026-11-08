@@ -951,6 +951,22 @@ def create_app() -> "Flask":
                                               dynamic=dynamic)
             except ValueError as e:
                 return jsonify({"ok": False, "error": str(e)}), 400
+
+            # Option A (2026-11-08): Bind UI admission directly to snapshot gate ledger
+            if dynamic or agentic_dbg:
+                from winre import snapshot_gate
+                gate_st = snapshot_gate.gate_status()
+                if snapshot_gate.mode() == "enforce" and gate_st.get("blocked"):
+                    return jsonify({
+                        "ok": False,
+                        "blocked": True,
+                        "error": (
+                            f"VM snapshot gate blocked: {gate_st.get('reason')}. "
+                            "Restore snapshot GOLD-2026-10-23 and reapply before running dynamic or agentic-dbg stage."
+                        ),
+                        "gate": gate_st,
+                    }), 412
+
             # admission is atomic: check+reserve under the lock so two rapid
             # POSTs can't both spawn pipelines (execution still serializes)
             with _run_lock:
@@ -1055,13 +1071,26 @@ def create_app() -> "Flask":
                 or _newest_section_mode(sha) or "agentic")
         if mode not in MODES:
             mode = "agentic"
-        if stage == "dynamic" and not body.get("confirm_snapshot"):
-            return jsonify({
-                "ok": False,
-                "error": ("dynamic refused: confirm a clean VM snapshot first "
-                          "(POST /api/hitl/snapshot verified_clean, then "
-                          "retry with confirm_snapshot=true)"),
-            }), 403
+        if stage == "dynamic":
+            from winre import snapshot_gate
+            gate_st = snapshot_gate.gate_status()
+            if snapshot_gate.mode() == "enforce" and gate_st.get("blocked"):
+                return jsonify({
+                    "ok": False,
+                    "blocked": True,
+                    "error": (
+                        f"VM snapshot gate blocked: {gate_st.get('reason')}. "
+                        "Restore snapshot GOLD-2026-10-23 and reapply before running dynamic stage."
+                    ),
+                    "gate": gate_st,
+                }), 412
+            if not body.get("confirm_snapshot") and not (gate_st.get("marker") and gate_st.get("ledger_clean")):
+                return jsonify({
+                    "ok": False,
+                    "error": ("dynamic refused: confirm a clean VM snapshot first "
+                              "(POST /api/hitl/snapshot verified_clean, then "
+                              "retry with confirm_snapshot=true)"),
+                }), 403
 
         from winre import remote_driver as _rd
 

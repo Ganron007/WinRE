@@ -8,7 +8,7 @@
 
 ## 1. Why this changed
 
-The old `winre/mcp/windbg_bridge.py` (12-tool per-process `windbg -c` fallback) is **superseded**:
+The old `winre/mcp/windbg_bridge.py` (12-tool per-process `windbg -c` fallback) was **removed** in the 2026-11-08 review (Option A). `WinDbgMCPClient` and `mcp-windbg` are retained as documented standalone/manual analyst tooling for interactive MCP sessions (e.g., Claude / Cursor / LLM agent inspection of live Windows kernels/dumps):
 - Per-call windbg spawn hangs without a debug target (no headless attach to a live GUI process from an SSH session).
 - Store-version WinDbg path was AppX-discoverable, not fixed.
 - pykd doesn't exist on Windows (Linux-only pip package).

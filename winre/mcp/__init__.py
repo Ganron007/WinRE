@@ -11,8 +11,7 @@ Public surface:
                      Malcat headless MCP server (45 tools)
     windbg_client  — WinDbgMCPClient (POST http://127.0.0.1:9097/mcp)
                      mcp-windbg server (10 tools: dumps, remote, kernel)
-    windbg_bridge  — LEGACY 12-tool per-process bridge (:9096); superseded
-                     by mcp-windbg (windbg_client). Kept for reference.
+                     Note: legacy windbg_bridge.py was removed in 2026-11-08 review.
 """
 from .x64dbg_client import X64DbgClient, X64DbgError  # noqa: F401
 from .malcat_client import MalcatClient, MalcatError  # noqa: F401

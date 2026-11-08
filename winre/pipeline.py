@@ -9,8 +9,7 @@ RevAI/RevEng cannot do.
 Spine (each stage writes logs/<sha>/<stage>/ + META.json):
     1. intake   — hash, format, magic, session record
     2. quick    — deterministic triage: Malcat MCP + IDA/Ghidra SQL
-    3. dynamic  — detonation (orchestrator --mode local): FakeNet/Procmon/
-                  Frida/pe-sieve + x64dbg OEP dump
+    3. dynamic  — detonation (requires --driver remote; refused on host by local pipeline)
     4. deep     — agentic MCP pass: x64dbg (71 tools) / Malcat (45) /
                   WinDbg (10) driven by the LLM via MCP clients
     5. yara     — deterministic YARA + Sigma from evidence
@@ -331,227 +330,6 @@ def _first_cell(result: dict):
     return None
 
 
-def _dynamic(sample: Path, pack: EvidencePack, sha: str,
-             max_seconds: int, enable_pesieve: bool,
-             adaptive: bool = False,
-             idle_stop_seconds: int = 0,
-             stop_on: str = "network,file",
-             stop_on_settle: int = 20,
-             run_id: str | None = None) -> dict:
-    """Run orchestrator --mode local, copy its dynamic pack into evidence."""
-    t0 = time.time()
-    orch = Path(__file__).resolve().parent / "orchestrator.py"
-    env = os.environ.copy()
-    env["WINRE_ORCHESTRATOR_MODE"] = "local"
-    env.setdefault("WINRE_ORCH_LOCK", r"C:\WinRE\lock\orchestrator.lock")
-    # logs root (NOT the section): the guest helper keeps a diagnostic
-    # logs/_vm_state.json; the authoritative gate ledger stays in the separate
-    # control-plane internal/ directory. Dynamic artifacts remain mode-pinned.
-    env["REVENG_LOGS_DIR"] = str(pack.logs_dir)
-    env["REVENG_SESSIONS_DIR"] = str(SESSIONS_DIR)
-    # per-run nonce: the local driver verifies the stamp by VALUE too, so a
-    # stale META from a previous run can never pass as this run's pack
-    from .run_nonce import check as nonce_check, new_run_id
-    from .evidence import sha256_file
-    import shutil
-    run_id = run_id or new_run_id()
-    # The producer must not write into the accepted evidence directory. A
-    # failed/crashed run can then leave only a run-bound partial directory;
-    # it cannot mix stale siblings with a fresh META.
-    producer_dir = (pack.root.parent / ".winre-producer" /
-                    (pack.mode or "legacy") / run_id / "dynamic")
-    suffix = sample.suffix.lower()
-    if not suffix or len(suffix) > 10 or not suffix[1:].isalnum():
-        suffix = ".bin"
-    staged_sample = (pack.root.parent / ".winre-staging" / sha / run_id
-                     / f"sample{suffix}")
-    session_file = SESSIONS_DIR / "runs" / f"{run_id}.json"
-    if producer_dir.exists() or session_file.exists() or staged_sample.exists():
-        failed = stage_result("dynamic", False,
-                              error="run-specific staging/producer/session path already exists",
-                              elapsed_s=round(time.time() - t0, 1), run_id=run_id)
-        pack.write("dynamic", "STAGE.json", failed)
-        return failed
-    try:
-        archived = archive_stage_for_fresh_run(pack)
-        if not archived.get("ok"):
-            raise RuntimeError(archived.get("error") or "archive failed")
-        source_hash = sha256_file(sample)
-        if source_hash != sha:
-            raise RuntimeError("input sample changed after intake identity was computed")
-        staged_sample.parent.mkdir(parents=True, exist_ok=False)
-        shutil.copy2(sample, staged_sample)
-        staged_hash = sha256_file(staged_sample)
-        source_after_copy = sha256_file(sample)
-        if staged_hash != sha or source_after_copy != sha:
-            raise RuntimeError("sample staging hash mismatch or source changed during copy")
-        pack.write("intake", "LOCAL-STAGING.json", {
-            "schema": "winre.local-staging/v1", "ok": True,
-            "run_id": run_id, "sha256": sha,
-            "source_path": str(sample.resolve()),
-            "staged_path": str(staged_sample.resolve()),
-            "staged_sha256": staged_hash,
-            "source_sha256_after_copy": source_after_copy,
-        })
-        # Wrappers are not evidence and may remain when the prior directory
-        # contained no payload. Remove them explicitly before this attempt.
-        dynamic_dir = pack.stages["dynamic"]
-        dynamic_dir.mkdir(parents=True, exist_ok=True)
-        for name in ("STAGE.json", "SKIP.json", "META.json", "manifest.json"):
-            stale = dynamic_dir / name
-            if stale.exists():
-                stale.unlink()
-        producer_dir.mkdir(parents=True, exist_ok=False)
-        session_file.parent.mkdir(parents=True, exist_ok=True)
-        session_file.write_text(json.dumps({
-            "sha256": sha, "sample_path": str(staged_sample.resolve()),
-            "file_type": {"format": "pe"},
-        }), encoding="utf-8")
-    except Exception as e:
-        failed = stage_result("dynamic", False,
-                              error=f"dynamic run preparation failed: {type(e).__name__}: {e}",
-                              elapsed_s=round(time.time() - t0, 1), run_id=run_id,
-                              archived=locals().get("archived"))
-        pack.write("dynamic", "STAGE.json", failed)
-        try:
-            pack.write("intake", "LOCAL-STAGING.json", {
-                "schema": "winre.local-staging/v1", "ok": False,
-                "run_id": run_id, "sha256": sha,
-                "source_path": str(sample),
-                "staged_path": str(staged_sample),
-                "error": f"{type(e).__name__}: {e}"[:240],
-            })
-        except Exception:
-            pass
-        return failed
-
-    env["WINRE_DYNAMIC_DIR"] = str(producer_dir)
-    env["WINRE_SESSION_FILE"] = str(session_file)
-    env["WINRE_RUN_ID"] = run_id
-    cmd = [sys.executable, str(orch), sha, "--sample", str(staged_sample.resolve()),
-           "--mode", "local", "--max-seconds", str(max_seconds), "--run-id", run_id]
-    if enable_pesieve:
-        cmd.append("--pesieve")
-    if adaptive:
-        cmd += ["--adaptive", "--idle-stop-seconds", str(int(idle_stop_seconds))]
-    if stop_on is not None:
-        cmd += ["--stop-on", str(stop_on),
-                "--stop-on-settle", str(int(stop_on_settle))]
-    try:
-        cp = subprocess.run(cmd, capture_output=True, text=True, env=env,
-                            timeout=int(max_seconds) + 600,
-                            encoding="utf-8", errors="replace")
-    except subprocess.TimeoutExpired:
-        cp = None
-
-    # A completed producer is accepted only when the nonce, sample identity,
-    # terminal state and finish marker all agree. A valid but red run is still
-    # promotable so its partial capture remains inspectable as current evidence.
-    meta_path = producer_dir / "META.json"
-    try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        meta = {}
-    nonce = nonce_check(meta, run_id)
-    metadata_complete = bool(
-        meta.get("sha256") == sha and nonce.get("fresh")
-        and not meta.get("running") and meta.get("finished_at"))
-    promoted = False
-    partial_path = None
-    if metadata_complete:
-        try:
-            target = pack.stages["dynamic"]
-            target.mkdir(parents=True, exist_ok=True)
-            if any(target.iterdir()):
-                raise RuntimeError("canonical dynamic stage is not empty")
-            target.rmdir()
-            shutil.move(str(producer_dir), str(target))
-            promoted = True
-        except Exception as e:
-            meta["acceptance_error"] = f"producer promotion failed: {type(e).__name__}: {e}"
-    if not promoted and producer_dir.exists():
-        partial_parent = pack.root / "previous_runs"
-        partial_parent.mkdir(parents=True, exist_ok=True)
-        partial_dest = partial_parent / f"dynamic_partial_{run_id}"
-        try:
-            shutil.move(str(producer_dir), str(partial_dest))
-            partial_path = str(partial_dest.relative_to(pack.root)).replace("\\", "/")
-        except OSError as e:
-            meta["preserve_error"] = f"{type(e).__name__}: {e}"
-    if session_file.exists():
-        try:
-            session_file.unlink()
-        except OSError:
-            pass
-    ok = bool(promoted and metadata_complete and meta.get("ok"))
-    if cp is None:
-        error = "orchestrator timeout"
-    elif not metadata_complete:
-        error = (meta.get("error") or meta.get("acceptance_error")
-                 or nonce.get("reason") or "producer META is incomplete or not terminal")
-    else:
-        error = meta.get("error") if not ok else ""
-    stage_meta = stage_result("dynamic", ok,
-                              error=error,
-                              summary=f"events={meta.get('frida_events')} ok={ok}",
-                              frida_events=meta.get("frida_events"),
-                              verdict=meta.get("verdict"),
-                              elapsed_s=round(time.time() - t0, 1),
-                              gate_pass=meta.get("gate_marker_consumed"),
-                              run_id=run_id, nonce=nonce,
-                              archived=archived, producer_promoted=promoted,
-                              sample_staging={"run_id": run_id,
-                                              "sha256": sha,
-                                              "staged_path": str(staged_sample),
-                                              "staged_sha256": staged_hash},
-                              partial_evidence=partial_path,
-                              producer_exit=(cp.returncode if cp is not None else None))
-    # If no producer was accepted, write only a wrapper for this attempt; old
-    # detonation artifacts are already retained under previous_runs/.
-    pack.stages["dynamic"].mkdir(parents=True, exist_ok=True)
-    pack.write("dynamic", "STAGE.json", stage_meta)
-    # ---- the artifact manifest (design §8) ---------------------------------
-    # Same contract as remote_driver: written after the pull so it describes what
-    # actually arrived, and it is what makes "this run produced no network
-    # capture" distinguishable from "the network capture is empty".
-    try:
-        from . import manifest as _manifest
-        stage_meta["manifest"] = _manifest.write_manifest(
-            pack.stages["dynamic"], run_id=run_id, sha256=sha,
-            mode=pack.mode or "dynamic", meta=meta,
-            requested={
-                "frida": {"requested": True, "required": True},
-                "procmon": {"requested": True, "required": True},
-                "network": {"requested": True, "required": True},
-                "network_enrichment": {"requested": True, "required": False},
-                "memory": {"requested": True, "required": False},
-                "process_snapshot": {"requested": True, "required": False},
-                "malcat": {"requested": True, "required": False},
-                "job": {"requested": True, "required": True},
-            })
-        pack.write("dynamic", "STAGE.json", stage_meta)
-    except Exception as e:
-        stage_meta["manifest"] = {"schema": "winre-artifact-manifest/v1",
-                                  "ok": False,
-                                  "error": f"{type(e).__name__}: {e}"}
-    # The VM refused the execution (the local driver has no control-plane
-    # preflight: the gate acts inside the orchestrator). Preserve any previous
-    # pack rather than leaving stale artifacts beside a record that says there
-    # are none (code audit 2026-09-28, HIGH).
-    if not ok and "snapshot gate" in str(meta.get("error") or ""):
-        from .evidence import (dynamic_skip_record, preserve_dynamic,
-                               write_dynamic_skip)
-        prev = preserve_dynamic(pack)
-        write_dynamic_skip(pack, dynamic_skip_record(
-            reason="snapshot_gate_blocked", ok=False,
-            error=meta.get("error"),
-            summary="blocked by snapshot gate (no detonation ran in this run)",
-            preserved_previous=(prev.get("preserved_previous")
-                                or (archived or {}).get("preserved_previous")),
-            preserved_artifacts=prev.get("preserved_artifacts") or None,
-            extra={"gate_mode": meta.get("gate_mode"),
-                   "preserve_error": prev.get("preserve_error")}))
-    return stage_meta
 
 
 def _deep(sample: Path, pack: EvidencePack, quick: dict, dry_llm: bool = False,
@@ -1072,14 +850,10 @@ def run_pipeline(sample: Path, *, max_seconds: int = 150, enable_pesieve: bool =
         from .evidence import mark_dynamic_not_requested
         mark_dynamic_not_requested(pack)
     if enable_dynamic:
-        # static already complete; detonation runs on (restored) VM now.
-        # dynamic is corroboration — do not let it fail static artifacts.
-        dynamic = _dynamic(sample, pack, sha, max_seconds, enable_pesieve,
-                           adaptive=adaptive,
-                           idle_stop_seconds=idle_stop_seconds,
-                           stop_on=stop_on, stop_on_settle=stop_on_settle,
-                           run_id=run_id)
-        results["dynamic"] = dynamic
+        # local pipeline strictly refuses dynamic execution (requires remote driver)
+        raise RuntimeError(
+            "local pipeline refuses dynamic execution: dynamic detonation requires "
+            "--driver remote (FlareVM guest via SSH)")
 
     # Finalize the current mode's findings before any report or export reads
     # them. The pending candidate is trusted only for this in-process run;

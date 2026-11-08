@@ -81,6 +81,10 @@ if ($pyVer -ne "3.13") {
 }
 
 # ---------------------------------------------------------------- pip pkgs
+# Pinned host dependencies are declared in requirements-host.txt. For an isolated
+# virtual environment, see ops\setup_host_venv.ps1.
+$reqHost = Join-Path $repo "requirements-host.txt"
+
 # Each entry: pip name, import name, why the analysis plane needs it.
 $pipPkgs = @(
     @{ name = "yara-python"; imp = "yara";  why = "memory-dump YARA triage - the only thing that can triage the 121-306 MB of pulled memory evidence" },
@@ -97,7 +101,11 @@ foreach ($p in $pipPkgs) {
     }
     if ($Check) { Bad "$($p.name) not importable"; continue }
     "  .... installing $($p.name)"
-    & $py -m pip install --quiet --upgrade $p.name 2>&1 | Out-Null
+    if (Test-Path $reqHost) {
+        & $py -m pip install --quiet -r $reqHost 2>&1 | Out-Null
+    } else {
+        & $py -m pip install --quiet --upgrade $p.name 2>&1 | Out-Null
+    }
     & $py -c "import $($p.imp)" 2>$null
     if ($LASTEXITCODE -eq 0) { Ok "$($p.name) installed" }
     else { Bad "$($p.name) failed to install - $($p.why)" }

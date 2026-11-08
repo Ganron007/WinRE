@@ -27,7 +27,6 @@ REPO = Path(__file__).resolve().parents[1]
 # or are library shims). Keep this list tiny and justified.
 NO_HELP = {
     "tools.apimon_filter": "argparse-less filter; no CLI surface",
-    "winre.mcp.windbg_bridge": "bridge server; starts on import of main()",
 }
 
 
