@@ -24,6 +24,42 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    from winre.procmon_approvelists import (
+        iter_procmon_csv,
+        is_global_noise,
+        is_cmd_noise,
+        is_file_noise,
+        is_reg_noise,
+        is_dll_noise,
+        generalize_path,
+    )
+except ImportError:
+    try:
+        from procmon_approvelists import (  # type: ignore
+            iter_procmon_csv,
+            is_global_noise,
+            is_cmd_noise,
+            is_file_noise,
+            is_reg_noise,
+            is_dll_noise,
+            generalize_path,
+        )
+    except ImportError:
+        def iter_procmon_csv(csv_path: Path, max_rows: int = 3_000_000):  # type: ignore
+            with csv_path.open("r", encoding="utf-8", errors="replace", newline="") as f:
+                reader = csv.DictReader(f)
+                for i, row in enumerate(reader):
+                    if i >= max_rows:
+                        break
+                    yield {k.strip(): (v or "").strip() for k, v in row.items() if k}
+        def is_global_noise(p: str) -> bool: return False  # type: ignore
+        def is_cmd_noise(c: str, p: str = "") -> bool: return False  # type: ignore
+        def is_file_noise(p: str, op: str = "", d: str = "", pn: str = "") -> bool: return False  # type: ignore
+        def is_reg_noise(p: str, op: str = "", pn: str = "") -> bool: return False  # type: ignore
+        def is_dll_noise(p: str, pn: str = "") -> bool: return False  # type: ignore
+        def generalize_path(p: str) -> str: return p  # type: ignore
+
 _RUNKEY_RE = re.compile(r"\\currentversion\\run(?:once)?\\?", re.I)
 _SERVICES_RE = re.compile(r"system\\currentcontrolset\\services\\", re.I)
 _TASKS_RE = re.compile(r"\\windows\\tasks\\|\\system32\\tasks\\", re.I)
@@ -38,7 +74,7 @@ PERSISTENCE_FAMILIES = {
     "run_key": ("Run-key write", lambda r, p: r == "RegSetValue"
                 and _RUNKEY_RE.search(p or "")),
     "service": ("Service create/start", lambda r, p: r in ("CreateFile", "RegSetValue")
-                and _SERVICES_RE.search(p or "")),
+                and _SERVICES_RE.search(p or "") and not is_reg_noise(p or "")),
     "scheduled_task": ("Scheduled task", lambda r, p: r in ("CreateFile", "WriteFile")
                        and _TASKS_RE.search(p or "")),
     "startup_folder": ("Startup-folder write", lambda r, p: r in ("CreateFile", "WriteFile")
@@ -46,31 +82,28 @@ PERSISTENCE_FAMILIES = {
     "wmi": ("WMI usage", lambda r, p: r == "RegSetValue"
             and _WMI_RE.search(p or "")),
     "drop_file": ("Payload drop (appdata/programdata)", lambda r, p:
-                  r in ("CreateFile", "WriteFile") and _APPDATA_RE.search(p or "")),
+                  r in ("CreateFile", "WriteFile") and _APPDATA_RE.search(p or "")
+                  and not is_file_noise(p or "")),
     "dll_sideload": ("DLL load from non-system path", lambda r, p:
                      r == "Load Image" and p and ".dll" in p.lower()
-                     and not _NON_SYS_DLL.search(p)),
+                     and not _NON_SYS_DLL.search(p) and not is_dll_noise(p or "")),
 }
 
 
 def _parse_csv(path: Path, max_rows: int = 3_000_000) -> list[dict]:
     rows = []
     try:
-        with path.open("r", encoding="utf-8", errors="replace", newline="") as f:
-            reader = csv.DictReader(f)
-            for i, row in enumerate(reader):
-                rows.append({
-                    "time": (row.get("Time of Day") or row.get("Time") or "").strip(),
-                    "process": (row.get("Process Name") or "").strip(),
-                    "pid": (row.get("PID") or "").strip(),
-                    "operation": (row.get("Operation") or "").strip(),
-                    "path": (row.get("Path") or "").strip(),
-                    "detail": (row.get("Detail") or "").strip(),
-                    "result": (row.get("Result") or "").strip(),
-                })
-                if i >= max_rows:
-                    break
-    except OSError as e:
+        for row in iter_procmon_csv(path, max_rows=max_rows):
+            rows.append({
+                "time": (row.get("Time of Day") or row.get("Time") or "").strip(),
+                "process": (row.get("Process Name") or "").strip(),
+                "pid": (row.get("PID") or "").strip(),
+                "operation": (row.get("Operation") or "").strip(),
+                "path": (row.get("Path") or "").strip(),
+                "detail": (row.get("Detail") or "").strip(),
+                "result": (row.get("Result") or "").strip(),
+            })
+    except Exception as e:
         print(f"procmon_post: csv open failed: {e}", file=sys.stderr)
     return rows
 
@@ -104,7 +137,9 @@ def build_procmon_report(dyn_dir: Path) -> dict:
             if r["detail"]:
                 # Procmon Detail column carries the command line
                 cmdlines.setdefault(r["pid"], r["detail"][:300])
-        if r["operation"] in ("WriteFile", "CreateFile") and _APPDATA_RE.search(path or ""):
+        if (r["operation"] in ("WriteFile", "CreateFile")
+                and _APPDATA_RE.search(path or "")
+                and not is_file_noise(path or "")):
             if path not in drops:
                 drops.append(path[:160])
 
@@ -132,6 +167,19 @@ def build_procmon_report(dyn_dir: Path) -> dict:
     timeline = []
     for r in rows:
         op = r["operation"]
+        pname = r["process"]
+        path = r["path"]
+        detail = r["detail"]
+        if is_global_noise(pname):
+            continue
+        if op.lower().startswith("reg") and is_reg_noise(path, op, pname):
+            continue
+        if op == "Load Image" and is_dll_noise(path, pname):
+            continue
+        if op in ("WriteFile", "CreateFile") and is_file_noise(path, op, detail, pname):
+            continue
+        if op == "Process Create" and is_cmd_noise(detail, pname):
+            continue
         if (op in ("Process Create", "RegSetValue", "CreateService",
                    "StartService", "Load Image", "WriteFile", "CreateFile",
                    "NetworkConnect", "TCP Connect", "UDP Send", "UDP Receive")
@@ -149,12 +197,22 @@ def build_procmon_report(dyn_dir: Path) -> dict:
         for e in timeline[:50_000]:
             w.writerow(e)
 
+    # Read existing summary (if present from guest summary) to preserve
+    # guest-computed metrics (rows_total, top_operations, notable_files, etc.)
+    existing_summary: dict = {}
+    summary_path = dyn_dir / "procmon_summary.json"
+    if summary_path.is_file():
+        try:
+            loaded = json.loads(summary_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing_summary = loaded
+        except Exception:
+            existing_summary = {}
+
     report = {
+        **existing_summary,
         # Keep the shared summary contract intact: the guest summary uses
-        # `status=ok`, and UI/manifest consumers gate on this field. This
-        # host-side enrichment overwrites procmon_summary.json after transfer,
-        # so omitting status here made a successfully parsed capture look
-        # unavailable in the finalized pack.
+        # `status=ok`, and UI/manifest consumers gate on this field.
         "status": "ok",
         "ok": True,
         "rows_scanned": len(rows),

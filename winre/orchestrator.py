@@ -1375,7 +1375,7 @@ def run_dynamic(
         _ssh_run(cfg, f'cmd /c "if not exist {tools_win} mkdir {tools_win}"', timeout=60)
 
         if deploy_tools:
-            for name in ("flare_dynamic_job.ps1", "summarize_dynamic.py"):
+            for name in ("flare_dynamic_job.ps1", "summarize_dynamic.py", "procmon_approvelists.py"):
                 local = _local_tool(name)
                 if not local:
                     # also check sibling deploy paths

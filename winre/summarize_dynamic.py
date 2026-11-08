@@ -9,6 +9,44 @@ import re
 from collections import Counter
 from pathlib import Path
 
+try:
+    from winre.procmon_approvelists import (
+        iter_procmon_csv,
+        is_global_noise,
+        is_cmd_noise,
+        is_file_noise,
+        is_reg_noise,
+        is_dll_noise,
+        generalize_path,
+    )
+except ImportError:
+    try:
+        from procmon_approvelists import (  # type: ignore
+            iter_procmon_csv,
+            is_global_noise,
+            is_cmd_noise,
+            is_file_noise,
+            is_reg_noise,
+            is_dll_noise,
+            generalize_path,
+        )
+    except ImportError:
+        def iter_procmon_csv(csv_path: Path, max_rows: int = 3_000_000):  # type: ignore
+            with csv_path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
+                reader = csv.DictReader(fh)
+                for i, row in enumerate(reader):
+                    if i >= max_rows:
+                        break
+                    yield {k.strip(): (v or "").strip() for k, v in row.items() if k}
+
+        def is_global_noise(p: str) -> bool: return False  # type: ignore
+        def is_cmd_noise(c: str, p: str = "") -> bool: return False  # type: ignore
+        def is_file_noise(p: str, op: str = "", d: str = "", pn: str = "") -> bool: return False  # type: ignore
+        def is_reg_noise(p: str, op: str = "", pn: str = "") -> bool: return False  # type: ignore
+        def is_dll_noise(p: str, pn: str = "") -> bool: return False  # type: ignore
+        def generalize_path(p: str) -> str: return p  # type: ignore
+
+
 
 def summarize_frida(trace: Path) -> dict:
     apis: Counter = Counter()
@@ -315,31 +353,112 @@ def summarize_procmon(csv_path: Path, sample_name: str) -> dict:
     procs: Counter = Counter()
     rows_total = 0
     rows_sample = 0
+    filtered_events_count = 0
+    filtered_by_category = {
+        "global_process": 0,
+        "command_line": 0,
+        "file": 0,
+        "registry": 0,
+        "dll": 0,
+    }
+    notable_processes: list[dict] = []
+    notable_files: list[dict] = []
+    notable_registry: list[dict] = []
+    seen_files: set[str] = set()
+    seen_regs: set[str] = set()
+    seen_procs: set[tuple[str, str]] = set()
+
     try:
-        with csv_path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
-            reader = csv.DictReader(fh)
-            for row in reader:
-                rows_total += 1
-                pname = (row.get("Process Name") or row.get("Process") or "").strip()
-                if sample_name and sample_name.lower() not in pname.lower():
-                    # keep some global process creates
-                    op = (row.get("Operation") or "").strip()
-                    if op == "Process Create":
-                        procs[pname] += 1
-                    continue
-                rows_sample += 1
-                op = (row.get("Operation") or "").strip()
-                path = (row.get("Path") or "").strip()
-                ops[op] += 1
-                if path:
-                    if op.lower().startswith("reg") or "\\Registry\\" in path or path.startswith("HK"):
-                        regs[path] += 1
-                    else:
-                        paths[path] += 1
+        for row in iter_procmon_csv(csv_path):
+            rows_total += 1
+            pname = (row.get("Process Name") or row.get("Process") or "").strip()
+            op = (row.get("Operation") or "").strip()
+            path = (row.get("Path") or "").strip()
+            detail = (row.get("Detail") or "").strip()
+            pid = (row.get("PID") or "").strip()
+
+            # Filter known global background processes early
+            if is_global_noise(pname):
+                filtered_events_count += 1
+                filtered_by_category["global_process"] += 1
+                continue
+
+            is_sample = bool(not sample_name or sample_name.lower() in pname.lower())
+            if not is_sample:
+                # Capture notable non-sample process creations (e.g. child spawns)
                 if op == "Process Create":
-                    procs[path or pname] += 1
+                    if is_cmd_noise(detail, pname):
+                        filtered_events_count += 1
+                        filtered_by_category["command_line"] += 1
+                        continue
+                    procs[pname] += 1
+                continue
+
+            rows_sample += 1
+
+            # Registry operations
+            if op.lower().startswith("reg") or "\\Registry\\" in path or path.startswith("HK"):
+                if is_reg_noise(path, op, pname):
+                    filtered_events_count += 1
+                    filtered_by_category["registry"] += 1
+                    continue
+                regs[path] += 1
+                if op in ("RegSetValue", "RegCreateKey", "RegDeleteKey", "RegDeleteValue") and len(notable_registry) < 50:
+                    gen_path = generalize_path(path)
+                    if gen_path not in seen_regs:
+                        seen_regs.add(gen_path)
+                        notable_registry.append({
+                            "operation": op,
+                            "path": path,
+                            "generalized_path": gen_path,
+                            "process": pname,
+                            "pid": pid,
+                            "detail": detail[:160],
+                        })
+            elif op == "Process Create":
+                if is_cmd_noise(detail, path or pname):
+                    filtered_events_count += 1
+                    filtered_by_category["command_line"] += 1
+                    continue
+                procs[path or pname] += 1
+                key = (pname, path or detail)
+                if key not in seen_procs and len(notable_processes) < 50:
+                    seen_procs.add(key)
+                    notable_processes.append({
+                        "process": pname,
+                        "target": path,
+                        "cmdline": generalize_path(detail),
+                        "pid": pid,
+                    })
+            elif op == "Load Image":
+                if is_dll_noise(path, pname):
+                    filtered_events_count += 1
+                    filtered_by_category["dll"] += 1
+                    continue
+                paths[path] += 1
+            elif path:
+                if is_file_noise(path, op, detail, pname):
+                    filtered_events_count += 1
+                    filtered_by_category["file"] += 1
+                    continue
+                paths[path] += 1
+                if op in ("WriteFile", "CreateFile", "SetDispositionInformationFile", "SetRenameInformationFile") and len(notable_files) < 50:
+                    gen_path = generalize_path(path)
+                    if gen_path not in seen_files:
+                        seen_files.add(gen_path)
+                        notable_files.append({
+                            "operation": op,
+                            "path": path,
+                            "generalized_path": gen_path,
+                            "process": pname,
+                            "pid": pid,
+                        })
+
+            ops[op] += 1
+
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
     return {
         "status": "ok",
         "rows_total": rows_total,
@@ -348,6 +467,11 @@ def summarize_procmon(csv_path: Path, sample_name: str) -> dict:
         "top_paths": paths.most_common(40),
         "top_registry": regs.most_common(40),
         "process_creates": procs.most_common(20),
+        "filtered_events_count": filtered_events_count,
+        "filtered_by_category": filtered_by_category,
+        "notable_processes": notable_processes[:30],
+        "notable_files": notable_files[:40],
+        "notable_registry": notable_registry[:40],
     }
 
 
