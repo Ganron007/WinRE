@@ -180,3 +180,16 @@ def test_import_history_rejects_wrong_sample_hash(tmp_path):
     with pytest.raises(ValueError, match="must use the supported schema"):
         C.import_history(registry, SHA, history_file, operator="analyst",
                          basis="test", evidence_ref="history.json")
+
+
+def test_record_run_accepts_dynamic_mode(tmp_path):
+    source = tmp_path / "one.exe"
+    source.write_bytes(_minimal_pe())
+    registry = tmp_path / "registry.json"
+    C.inventory(source.parent, registry, "fixture")
+    result = C.record_run(registry, SHA, mode="dynamic", run_id=RUN1,
+                          code_revision="abc1234", config_digest="sha256:cfg1",
+                          outcome="completed")
+    assert result["ok"] is True
+    assert result["run"]["mode"] == "dynamic"
+

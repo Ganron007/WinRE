@@ -64,6 +64,10 @@
     <span class="muted" style="margin-left:8px; font-size:var(--tx-xs)">
       frida events <b>{{ m.get('frida_events', '?') }}</b>
       {% if m.get('verdict') %}· dynamic verdict <b>{{ m.get('verdict') }}</b>{% endif %}
+      {% if m.get('window') %}
+        · window <b>{{ m.window.get('effective_s', '?') }}s</b> / {{ m.window.get('requested_s', '?') }}s
+        (stop: <b>{{ m.get('window_stop_reason') or m.window.get('stop_reason', '?') }}</b>{% if m.get('window_gate') and m.window_gate.get('fired') %} · gate: <b>{{ m.window_gate.get('kind') }}:{{ m.window_gate.get('api') }}</b>{% endif %})
+      {% endif %}
     </span>
   </div>
   <div class="board-body">

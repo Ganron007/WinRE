@@ -26,7 +26,6 @@ Env:
   FLARE_SSH_PORT   default 22
   REVENG_DYNAMIC_SKIP=1     → write META skip and exit 0
   REVENG_DYNAMIC_PESIEVE=1  → Flare job runs pe-sieve (+ hollows_hunter) mid-detonation
-  REVENG_DYNAMIC_X64DBG=0   → skip x64dbg MCP OEP/dump pass
   WINRE_ORCHESTRATOR_MODE={ssh,local} → default --mode
   WINRE_ORCH_LOCK          → override lockfile path
 """
@@ -49,8 +48,10 @@ sys.path.insert(0, "/opt/scripts")
 try:
     from v2_lib import LOGS_DIR, SESSIONS_DIR, high_signal_yara_matches
 except Exception:
-    LOGS_DIR = Path(os.environ.get("REVENG_LOGS_DIR", "/opt/samples/logs"))
-    SESSIONS_DIR = Path(os.environ.get("REVENG_SESSIONS_DIR", "/opt/samples/sessions"))
+    _default_logs = r"C:\WinRE\logs" if os.name == "nt" else "/opt/samples/logs"
+    _default_sessions = r"C:\WinRE\sessions" if os.name == "nt" else "/opt/samples/sessions"
+    LOGS_DIR = Path(os.environ.get("REVENG_LOGS_DIR", _default_logs))
+    SESSIONS_DIR = Path(os.environ.get("REVENG_SESSIONS_DIR", _default_sessions))
 
     def high_signal_yara_matches(yara: dict | None) -> list:
         return []
@@ -682,10 +683,6 @@ def _x64dbg_oep_dump(sample: Path, dyn_dir: Path, meta: dict) -> None:
         rec.update(extra)
         meta["x64dbg_dump"] = rec
 
-    if os.environ.get("REVENG_DYNAMIC_X64DBG", "1") in ("0", "false", "no"):
-        meta["x64dbg_mcp_skipped"] = "REVENG_DYNAMIC_X64DBG=0"
-        _terminal(False, "REVENG_DYNAMIC_X64DBG=0", status="skipped")
-        return
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from winre.mcp import X64DbgClient  # type: ignore
@@ -1498,6 +1495,15 @@ def run_dynamic(
                 # rundll32, so a reader needs this first)
                 meta["loader"] = job_meta.get("loader") or "direct"
                 meta["loader_entry"] = job_meta.get("loader_entry")
+                # detonation-window telemetry (behaviour gate; RevAI item 9)
+                meta["max_seconds"] = job_meta.get("max_seconds")
+                if isinstance(job_meta.get("window"), dict):
+                    w = dict(job_meta["window"])
+                    g = w.get("gate") if isinstance(w.get("gate"), dict) else {}
+                    if g:
+                        meta["window_gate"] = g
+                    meta["window_stop_reason"] = w.get("stop_reason")
+                    meta["window"] = w
             except Exception:
                 pass
 

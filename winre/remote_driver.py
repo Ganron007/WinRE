@@ -21,7 +21,7 @@ become remote:
 Env:
     FLARE_HOST / FLARE_USER / FLARE_SSH_KEY / FLARE_SSH_PORT   (direct SSH on the lab network)
     WINRE_LLM_BASE_URL / WINRE_LLM_API_KEY / WINRE_LLM_MODEL   (LLM here)
-    WINRE_REMOTE_LOGS=logs   (local evidence root; pulled from VM)
+
     WINRE_REMOTE_PIPELINE=C:\WinRE   (repo path on the VM)
 """
 from __future__ import annotations
@@ -343,7 +343,11 @@ def _verified_remote_sample(pack: EvidencePack, sample_name: str,
         # Legacy/manual-stage fallback remains safe only because its bytes are
         # checked against this pack's SHA before any tool is called.
         if remote_path is None:
-            remote_path = rf"C:\samples\{sample_name}"
+            from pathlib import PureWindowsPath
+            clean_name = PureWindowsPath(sample_name.replace("/", "\\")).name
+            if not clean_name or clean_name != sample_name or ".." in sample_name or "\n" in sample_name or "\r" in sample_name or "'" in sample_name:
+                raise RuntimeError(f"analysis refused: malformed legacy sample name: {sample_name!r}")
+            remote_path = rf"C:\samples\{clean_name}"
 
     remote_hash = remote_sha256(cfg, remote_path)
     if remote_hash != expected:
@@ -391,8 +395,13 @@ def _remote_staging_abort(pack: EvidencePack, sha: str, run_id: str,
             "aborted": True, "error": message}
 
 
-def _remote_py(cfg: dict) -> str:
-    """Path of the repo's python on the VM (C:\\Python313 preferred)."""
+def _remote_py(cfg: dict | None = None) -> str:
+    """Path of the repo's python on the VM (FLARE_PYTHON or C:\\Python313 preferred)."""
+    env_py = os.environ.get("FLARE_PYTHON")
+    if env_py and env_py.strip():
+        return env_py.strip()
+    if cfg and cfg.get("python"):
+        return str(cfg["python"]).strip()
     for cand in (r"C:\Python313\python.exe", r"C:\ProgramData\chocolatey\bin\python.exe"):
         if cand:  # probed lazily per call; first is standard on FlareVM
             return cand
@@ -402,7 +411,8 @@ def _remote_py(cfg: dict) -> str:
 # ---------------------------------------------------------------------------
 # Remote helper (runs ON the VM via scp — avoids nested-quote breakage)
 # ---------------------------------------------------------------------------
-REMOTE_QUICK_HELPER = r'''
+REMOTE_QUICK_HELPER = r'''# GENERATED FILE — DO NOT EDIT DIRECTLY.
+# Source: winre/remote_driver.py
 """Remote quick-triage helper — runs on FlareVM, prints JSON to stdout.
 
 Usage: python _remote_quick_helper.py <sample_path> --json
@@ -715,7 +725,8 @@ def remote_quick(sample_name: str, pack: EvidencePack, cfg: dict, *,
 # ---------------------------------------------------------------------------
 # Remote dynamic helper (runs ON the VM via scp)
 # ---------------------------------------------------------------------------
-REMOTE_DYNAMIC_HELPER = r'''
+REMOTE_DYNAMIC_HELPER = r'''# GENERATED FILE — DO NOT EDIT DIRECTLY.
+# Source: winre/remote_driver.py
 """Remote dynamic helper — runs orchestrator --mode local on the VM.
 
 Usage: python _remote_dynamic_helper.py <sha> <sample_path> <max_seconds> [--pesieve] [--adaptive] [--idle-stop=N] [--section=agentic|static] [--run-id=<nonce>]

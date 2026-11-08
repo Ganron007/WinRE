@@ -12,5 +12,17 @@
     </p>
     {% endif %}
   {% endfor %}
+  {% if pack.previous_runs %}
+  <p class="muted" style="font-size:var(--tx-xs); margin:14px 0 4px"><b>previous_runs</b></p>
+  {% for arc in pack.previous_runs %}
+    <p class="muted" style="font-size:var(--tx-xs); margin:6px 0 2px">archive: <i>{{ arc.name }}</i></p>
+    <p style="margin:0">
+      {% for f in arc.files %}
+        <a class="btn ghost" style="padding:2px 10px; font-size:var(--tx-xs); margin:0 4px 4px 0"
+           href="/packs/{{ pack.sha }}/previous_runs/{{ arc.name }}/{{ f.name }}{% if pack.mode %}?mode={{ pack.mode }}{% endif %}">{{ f.name }}</a>
+      {% endfor %}
+    </p>
+  {% endfor %}
+  {% endif %}
   <p class="muted" style="font-size:var(--tx-xs)">Inline view is capped at 64KB per file; large artifacts use download links in the stage sections.</p>
 </details>

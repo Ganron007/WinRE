@@ -291,6 +291,21 @@ def _pack_detail(sha: str, mode: str | None = None) -> dict | None:
             except Exception:
                 root_files[f.name] = {"error": "unreadable"}
     detail["stages"]["_pack"] = root_files
+    previous_runs = []
+    pr_dir = d / "previous_runs"
+    if pr_dir.is_dir():
+        for arc in sorted(pr_dir.iterdir(), reverse=True):
+            if not arc.is_dir():
+                continue
+            arc_files = []
+            for f in sorted(arc.iterdir()):
+                if f.is_file():
+                    arc_files.append({"name": f.name, "size": f.stat().st_size})
+            previous_runs.append({
+                "name": arc.name,
+                "files": arc_files,
+            })
+    detail["previous_runs"] = previous_runs
     detail["views"] = _pack_views(d, detail["stages"])
     pm = _read_json(d / "META.json") or {}
     detail["mode"] = (pm.get("mode") if pm.get("mode") in MODES
@@ -1410,6 +1425,53 @@ def create_app() -> "Flask":
         truncated = len(chunk) > cap
         text = chunk[:cap].decode("utf-8", errors="replace")
         return jsonify({"sha": sha, "stage": stage, "file": fname,
+                        "size": size, "offset": offset,
+                        "truncated": truncated,
+                        "next_offset": offset + cap if truncated else None,
+                        "text": text})
+
+    @app.route("/packs/<sha>/previous_runs/<archive>/<path:fname>")
+    def pack_previous_run_file(sha: str, archive: str, fname: str):
+        from flask import Response, abort
+        if not _valid_sha(sha):
+            abort(400, "invalid sha")
+        for seg in (sha, archive):
+            if not seg or seg in (".", "..") or "/" in seg or "\\" in seg:
+                abort(400, "invalid path segment")
+        if not fname or fname in (".", "..") or ".." in fname.replace("\\", "/").split("/"):
+            abort(400, "invalid path segment")
+        section = _section_root(sha, request.args.get("mode")).resolve()
+        base = (section / "previous_runs" / archive).resolve()
+        d = (base / fname).resolve()
+        try:
+            d.relative_to(base)
+        except ValueError:
+            abort(400, "path escapes pack directory")
+        if not d.is_file():
+            return jsonify({"error": "not found"}), 404
+        if request.args.get("download") == "1":
+            def _stream():
+                with d.open("rb") as fh:
+                    while True:
+                        chunk = fh.read(65536)
+                        if not chunk:
+                            break
+                        yield chunk
+            return Response(_stream(), mimetype="application/octet-stream",
+                            headers={"Content-Disposition":
+                                     f"attachment; filename={Path(fname).name}"})
+        try:
+            offset = max(0, int(request.args.get("offset", "0")))
+        except ValueError:
+            offset = 0
+        size = d.stat().st_size
+        cap = 65536
+        with d.open("rb") as fh:
+            fh.seek(offset)
+            chunk = fh.read(cap + 1)
+        truncated = len(chunk) > cap
+        text = chunk[:cap].decode("utf-8", errors="replace")
+        return jsonify({"sha": sha, "archive": archive, "file": fname,
                         "size": size, "offset": offset,
                         "truncated": truncated,
                         "next_offset": offset + cap if truncated else None,

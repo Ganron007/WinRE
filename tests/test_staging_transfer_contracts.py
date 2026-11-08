@@ -238,6 +238,13 @@ def test_tampered_staging_path_shape_is_not_trusted(sample, pack, monkeypatch):
     assert calls == ["C:\\samples\\s1.exe"]
 
 
+def test_malformed_legacy_sample_names_are_refused(sample, pack):
+    for bad in ("../escape.exe", "..\\escape.exe", "s1.exe\nevil", "s1.exe'inject"):
+        with pytest.raises(RuntimeError, match="malformed legacy sample name"):
+            remote_driver._verified_remote_sample(pack, bad, {})
+
+
+
 # ------------------------------------------------------------------ H6: refusal
 
 

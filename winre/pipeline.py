@@ -347,7 +347,7 @@ def _dynamic(sample: Path, pack: EvidencePack, sha: str,
     # logs root (NOT the section): the guest helper keeps a diagnostic
     # logs/_vm_state.json; the authoritative gate ledger stays in the separate
     # control-plane internal/ directory. Dynamic artifacts remain mode-pinned.
-    env["REVENG_LOGS_DIR"] = str(pack.root.parent.parent)
+    env["REVENG_LOGS_DIR"] = str(pack.logs_dir)
     env["REVENG_SESSIONS_DIR"] = str(SESSIONS_DIR)
     # per-run nonce: the local driver verifies the stamp by VALUE too, so a
     # stale META from a previous run can never pass as this run's pack

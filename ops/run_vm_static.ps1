@@ -31,7 +31,7 @@ $dotenvPath = Join-Path $repo ".env"
 if (Test-Path $dotenvPath) {
     foreach ($ln in Get-Content $dotenvPath) {
         if ($ln -match "^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.+?)\s*$") {
-            $dotenv[$Matches[1]] = $Matches[2].Trim('"')
+            $dotenv[$Matches[1]] = $Matches[2].Trim("'`\"")
         }
     }
 }

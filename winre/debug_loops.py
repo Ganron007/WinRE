@@ -691,7 +691,7 @@ def _dump_parse_check(dump_path: str) -> dict:
                     "error": f"{type(e).__name__}: {e}"[:300]}
     # driver side (dump lives on the VM): same probe, compact error contract
     try:
-        from winre.remote_driver import flare_cfg, ssh_ps
+        from winre.remote_driver import flare_cfg, ssh_ps, _remote_py
         cfg = flare_cfg()
         if not cfg.get("host"):
             return {"parses": False, "checked": False, "where": "driver",
@@ -711,7 +711,8 @@ def _dump_parse_check(dump_path: str) -> dict:
             "    print(json.dumps({'ok': False, "
             "'error': type(e).__name__ + ': ' + str(e)}))\n"
         )
-        ps = "$c = @'\n" + code + "'@\n& C:\\Python313\\python.exe -c $c"
+        py = _remote_py(cfg)
+        ps = "$c = @'\n" + code + f"'@\n& {py} -c $c"
         r = ssh_ps(cfg, ps, timeout=60)
         d = _last_json_line(r.stdout or "")
         if d is None:

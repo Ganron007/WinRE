@@ -43,7 +43,8 @@ from winre.evidence import EvidencePack  # noqa: E402
 # ---------------------------------------------------------------------------
 # Remote SQL helper (runs ON the VM via scp — avoids nested-quote breakage)
 # ---------------------------------------------------------------------------
-_REMOTE_SQL_HELPER = r'''
+_REMOTE_SQL_HELPER = r'''# GENERATED FILE — DO NOT EDIT DIRECTLY.
+# Source: winre/agentic.py
 """Remote SQL helper for the LangGraph agent — runs on FlareVM.
 
 Usage: python _remote_sql_helper.py <b64_engine> <b64_sample> <b64_sql>
@@ -99,7 +100,8 @@ except json.JSONDecodeError:
 '''
 
 
-_REMOTE_GHDEC_HELPER = r'''
+_REMOTE_GHDEC_HELPER = r'''# GENERATED FILE — DO NOT EDIT DIRECTLY.
+# Source: winre/agentic.py
 """Remote Ghidra-decompile helper — runs on FlareVM via scp.
 
 Usage: python _remote_ghdec_helper.py <b64_sample> <b64_func>
@@ -151,6 +153,10 @@ class ToolRegistry:
 
     Both modes produce the SAME evidence — the transport differs only.
     """
+
+    def _remote_py(self) -> str:
+        """Unified guest Python interpreter path."""
+        return remote_driver._remote_py(self.cfg)
 
     def __init__(self, sample_name: str, sha: str, cfg: dict | None = None,
                  mode: str = "remote", remote_sample: str | None = None):
@@ -211,7 +217,7 @@ class ToolRegistry:
             remote_driver.scp_to(self.cfg, local, remote.replace("\\", "/"))
         except Exception as e:
             return {"error": f"scp helper: {e}"}
-        py = r"C:\Python313\python.exe"
+        py = self._remote_py()
         b64args = [base64.b64encode(a.encode("utf-8")).decode() for a in args]
         joined = " ".join(b64args)
         cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} '
@@ -286,7 +292,7 @@ class ToolRegistry:
             except Exception as e:
                 return {"error": str(e)[:250]}
         # remote mode: SSH-exec
-        py = r"C:\Python313\python.exe"
+        py = self._remote_py()
         cmd = (f'powershell -NoProfile -ExecutionPolicy Bypass -Command "& {py} '
                f'{tools_dir}\\flare_static_tools.py '
                f'{tool} "{self.remote_sample}" 2>&1"')
@@ -419,7 +425,7 @@ class ToolRegistry:
                 return json.loads(p.stdout).get("signature_match") or {}
             except Exception as e:
                 return {"error": str(e)[:250]}
-        py = r"C:\Python313\python.exe"
+        py = self._remote_py()
         _oneliner = (
             "import sys,json,base64; "
             "sys.path.insert(0, r'C:\\WinRE\\tools'); "
@@ -466,7 +472,7 @@ class ToolRegistry:
                 f"fa = json.loads(base64.b64decode('{b64}').decode()); "
                 f"print(json.dumps({{'r2_decompile': fst.r2_decompile("
                 f"r'{self.remote_sample}', fa)}}))")
-            cmd = _ps_py(r"C:\Python313\python.exe", _oneliner)
+            cmd = _ps_py(self._remote_py(), _oneliner)
             r = remote_driver.ssh_run(self.cfg, cmd, timeout=900)
             try:
                 return json.loads(r.stdout).get("r2_decompile") or {}

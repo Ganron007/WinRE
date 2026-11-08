@@ -49,7 +49,7 @@ $dotenvPath = Join-Path $repo ".env"
 if (Test-Path $dotenvPath) {
     foreach ($ln in Get-Content $dotenvPath) {
         if ($ln -match '^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.+?)\s*$') {
-            $k = $Matches[1]; $v = $Matches[2].Trim('"')
+            $k = $Matches[1]; $v = $Matches[2].Trim("'`\"")
             if (-not (Test-Path "Env:$k") -or -not (Get-Item "Env:$k").Value) {
                 Set-Item -Path "Env:$k" -Value $v
             }

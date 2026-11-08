@@ -524,3 +524,61 @@ def test_casepack_is_documented_as_a_pack_level_file():
     assert "case-" in doc and "DFIR-Nexus" in doc
     bridge = (REPO / "docs" / "REVAI-BRIDGE.md").read_text(encoding="utf-8")
     assert "case-" in bridge
+
+
+def test_remote_helpers_carry_generated_headers_and_windbg_helper_is_deleted():
+    """Item 3.b: runtime-written helpers must declare generated origin; windbg stub removed."""
+    from winre import agentic, remote_driver
+    assert agentic._REMOTE_SQL_HELPER.startswith("# GENERATED FILE")
+    assert agentic._REMOTE_GHDEC_HELPER.startswith("# GENERATED FILE")
+    assert remote_driver.REMOTE_QUICK_HELPER.startswith("# GENERATED FILE")
+    assert remote_driver.REMOTE_DYNAMIC_HELPER.startswith("# GENERATED FILE")
+    assert not (REPO / "winre" / "__remote_windbg_helper.py").exists()
+
+
+def test_guest_python_honors_flare_python_env_and_cfg(monkeypatch):
+    """Item 3.d: unify guest python path resolution through FLARE_PYTHON."""
+    from winre import remote_driver
+    from winre.agentic import ToolRegistry
+
+    monkeypatch.delenv("FLARE_PYTHON", raising=False)
+    py = remote_driver._remote_py({})
+    assert "Python313" in py or "chocolatey" in py or py == "python"
+
+    monkeypatch.setenv("FLARE_PYTHON", r"C:\CustomPy\python.exe")
+    assert remote_driver._remote_py({}) == r"C:\CustomPy\python.exe"
+
+    tr = ToolRegistry("sample.exe", "a" * 64, cfg={}, mode="remote")
+    assert tr._remote_py() == r"C:\CustomPy\python.exe"
+
+
+def test_pipeline_dynamic_sets_reveng_logs_dir_to_pack_logs_dir():
+    """Item 3.e: pipeline._dynamic uses pack.logs_dir for REVENG_LOGS_DIR."""
+    import inspect
+    from winre import pipeline
+    src = inspect.getsource(pipeline._dynamic)
+    assert 'env["REVENG_LOGS_DIR"] = str(pack.logs_dir)' in src
+
+
+def test_envfile_and_powershell_quote_stripping_are_harmonized(tmp_path):
+    """Item 3.g: single, double, and unquoted values parse identically."""
+    from winre.envfile import load_dotenv
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'TEST_DOUBLE="double_val"\n'
+        "TEST_SINGLE='single_val'\n"
+        "TEST_UNQUOTED=unquoted_val\n",
+        encoding="utf-8"
+    )
+    loaded = load_dotenv(str(env_file))
+    assert loaded["TEST_DOUBLE"] == "double_val"
+    assert loaded["TEST_SINGLE"] == "single_val"
+    assert loaded["TEST_UNQUOTED"] == "unquoted_val"
+
+
+def test_reveng_dynamic_x64dbg_not_read_in_orchestrator():
+    """Item 3.f: REVENG_DYNAMIC_X64DBG is not read by orchestrator."""
+    import inspect
+    from winre import orchestrator
+    src = inspect.getsource(orchestrator)
+    assert "REVENG_DYNAMIC_X64DBG" not in src

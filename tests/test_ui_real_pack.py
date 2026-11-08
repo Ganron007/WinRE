@@ -299,3 +299,42 @@ def _newest_mode_or_none(sha: str, body: str) -> str:
     """The mode the default page rendered (its switcher marks it as current)."""
     from winre.ui.app import _newest_section_mode
     return _newest_section_mode(sha) or ""
+
+
+def test_previous_runs_are_detected_and_served_in_ui(tmp_path, monkeypatch):
+    """Item 3.h: previous_runs archives are detected, listed, and served safely."""
+    import json
+    from winre.ui import app as ui_app
+    monkeypatch.setattr(ui_app, "LOGS_DIR", tmp_path)
+
+    sha = "e" * 64
+    pack_dir = tmp_path / sha / "dynamic"
+    pr_dir = pack_dir / "previous_runs" / "dynamic_20261107T120000Z"
+    pr_dir.mkdir(parents=True)
+    (pack_dir / "META.json").write_text(json.dumps({"sha256": sha, "mode": "dynamic"}), encoding="utf-8")
+    (pr_dir / "manifest.json").write_text(json.dumps({"archived": True}), encoding="utf-8")
+
+    client = ui_app.create_app().test_client()
+
+    detail = ui_app._pack_detail(sha, mode="dynamic")
+    assert detail is not None
+    assert "previous_runs" in detail
+    assert len(detail["previous_runs"]) == 1
+    arc = detail["previous_runs"][0]
+    assert arc["name"] == "dynamic_20261107T120000Z"
+    assert any(f["name"] == "manifest.json" for f in arc["files"])
+
+    # 1. file preview route
+    r = client.get(f"/packs/{sha}/previous_runs/dynamic_20261107T120000Z/manifest.json?mode=dynamic")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert "archived" in data["text"]
+
+    # 2. download route
+    r_dl = client.get(f"/packs/{sha}/previous_runs/dynamic_20261107T120000Z/manifest.json?mode=dynamic&download=1")
+    assert r_dl.status_code == 200
+    assert b"archived" in r_dl.data
+
+    # 3. path traversal refused
+    r_bad = client.get(f"/packs/{sha}/previous_runs/..%2f../etc/passwd?mode=dynamic")
+    assert r_bad.status_code == 400

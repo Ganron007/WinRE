@@ -20,7 +20,10 @@ SHA = "d" * 64
 
 
 def _client(tmp_path, monkeypatch):
+    ui_app._run_state["running"] = False
     monkeypatch.setattr(ui_app, "LOGS_DIR", tmp_path)
+    monkeypatch.setattr(ui_app, "_run_pipeline_in_thread",
+                        lambda *a, **k: ui_app._run_state.update({"running": False}))
     # never touch the real VM from these tests
     monkeypatch.setattr(ui_app.remote_driver, "run_remote_pipeline",
                         lambda *a, **k: (_ for _ in ()).throw(

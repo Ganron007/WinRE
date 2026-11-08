@@ -281,8 +281,8 @@ def record_run(registry_path: Path, sha: str, *, mode: str, run_id: str,
         raise ValueError("sample identity must be a 64-character SHA-256")
     if not RUN_ID_RE.fullmatch(run_id):
         raise ValueError("run_id must be a 32-character control-plane nonce")
-    if mode not in {"static", "agentic", "agentic-dbg"}:
-        raise ValueError("mode must be static, agentic, or agentic-dbg")
+    if mode not in {"static", "agentic", "agentic-dbg", "dynamic"}:
+        raise ValueError("mode must be static, agentic, agentic-dbg, or dynamic")
     if outcome not in {"completed", "failed", "aborted"}:
         raise ValueError("outcome must be completed, failed, or aborted")
     if not code_revision.strip() or not config_digest.strip():
@@ -459,7 +459,7 @@ def _parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("record-run", help="record an already completed/failed/aborted run")
     run.add_argument("--sha256", required=True)
-    run.add_argument("--mode", required=True, choices=("static", "agentic", "agentic-dbg"))
+    run.add_argument("--mode", required=True, choices=("static", "agentic", "agentic-dbg", "dynamic"))
     run.add_argument("--run-id", required=True)
     run.add_argument("--code-revision", required=True)
     run.add_argument("--config-digest", required=True)
