@@ -183,8 +183,8 @@ python -m winre.corpus_registry classify-family `
 Record runs only after they finish, with their mode, run ID, code revision and
 configuration digest. A repeat of the same sample and mode requires an
 explicit reason in the registry; separate modes remain valid. The registry
-currently accepts `static`, `agentic`, and `agentic-dbg` for run history; it
-does not separately encode the `--dynamic` capability yet. This registry does
+accepts `static`, `agentic`, `agentic-dbg`, and `dynamic` (the detonation
+capability is encoded as its own mode, 2026-11-08). This registry does
 not gate the live pipeline. History attestations apply only to this registry
 and cannot establish that a sample never ran elsewhere.
 
@@ -301,7 +301,14 @@ python -m winre.snapshot_gate marker-create                    # only when prepa
 
 The UI Run page shows the live gate card (mode, marker and control-plane
 ledger) with attest buttons. Hypervisor variables are report-only; snapshot
-restore remains an operator action.
+restore remains an operator action. Admission is gate-bound (2026-11-08):
+the dynamic and agentic-dbg stages are refused with HTTP 412 unless the
+control-plane ledger is clean and the marker armed, and the Run button
+disables while the gate is blocked — the UI cannot submit a run the driver
+would abort. Pack views also render `previous_runs/` archives (prior
+dynamic sections preserved under the mode section) and the effective
+detonation window telemetry (`window`, `window_gate`, `window_stop_reason`
+in the dynamic META) when a behaviour-gated or adaptive run recorded it.
 
 ### Golden image (before the first sample run)
 

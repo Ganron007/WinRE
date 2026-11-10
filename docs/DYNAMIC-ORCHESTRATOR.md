@@ -73,6 +73,13 @@ run's pack section and writes stage and pack manifests. Manifests distinguish
 complete, partial, failed, unavailable, not-applicable, and not-requested
 sources. See [Evidence Packs](EVIDENCE.md) for details.
 
+Procmon summaries are filtered through the Noriben-derived approvelist
+module (`winre/procmon_approvelists.py`, adopted 2026-11-08: compiled
+noise regexes per channel, path generalization, resilient CSV reading), so
+background OS noise is dropped before persistence analysis —
+`winre/procmon_post.py` no longer reports OS Chores (NetworkService Temp,
+Python/WinSxS loads, BAM service creation) as persistence.
+
 WinRE does not restore hypervisor snapshots. After a detonation, restore the
 approved clean snapshot, verify the guest marker, and attest the clean state
 from the separate control plane before another run. Keep the VM on an isolated

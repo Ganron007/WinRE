@@ -8,12 +8,14 @@ WinRE uses deterministic tools to produce evidence. The agentic engine can
 interpret that evidence through an OpenAI-compatible LLM. It does not ask the
 LLM to execute samples or replace deterministic collection.
 
-## Current validation boundary — 2026-11-07
+## Current validation boundary — 2026-11-11
 
-Revision `a35592a` (the 2026-11-07 full review: feature/dependency/docs/UI
-sweeps, UI run-path fixes, JSONL evidence-budget unification) passes the full
-local suite (**873 passed, 3 skipped**). The reference FlareVM (GOLD snapshot
-`GOLD-2026-10-23`) is deployed at parity with the verifier at **0 failures**
+Revision `c43edb5` (the 2026-11-07 full review, then the handoff cycle:
+review items a-h, Decision Briefs 1-4 Option A — host venv, dead local
+dynamic path removed, legacy windbg bridge removed, UI gate binding —
+Noriben Procmon approvelists, and window-telemetry verification) passes the
+full local suite (**889 passed, 4 skipped**). The reference FlareVM (GOLD snapshot
+`GOLD-2026-11-10`, the operator's 2026-11-10 refresh with the current code and tools baked in) is deployed at parity with the verifier at **0 failures**
 and **43/43 required tools**; the single warning is the expected on-demand
 x64dbg MCP listener.
 

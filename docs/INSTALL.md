@@ -14,8 +14,12 @@ overrides for non-default installs (IDA/Malcat especially) are in
 git clone <repo-url> WinRE
 cd WinRE
 
-python -m pip install langchain-openai langgraph langchain-core pydantic flask
-# (flask serves the UI console, winre/ui/app.py — a control-plane component)
+# Preferred: the pinned, tested host stack (2026-11-08 Decision Brief 1):
+powershell -ExecutionPolicy Bypass -File ops\setup_host_venv.ps1
+#   - installs into a venv from requirements-host.txt (langchain stack, flask,
+#     yara/floss/capa) - see docs\PREREQUISITES.md
+# Manual equivalent (unpinned, if you skip the venv):
+# python -m pip install langchain-openai langgraph langchain-core pydantic flask
 # Supplemental static tools use pure Python/pefile; the VM needs pefile, psutil
 # and (for Speakeasy) setuptools<81 pinned (pkg_resources removal):
 python -m pip install pefile psutil "setuptools<81"
