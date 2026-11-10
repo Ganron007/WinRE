@@ -39,7 +39,7 @@ $dotenvVars = @{}
 if (Test-Path $DotEnv) {
     foreach ($ln in Get-Content $DotEnv) {
         if ($ln -match '^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.+?)\s*$') {
-            $dotenvVars[$Matches[1]] = $Matches[2].Trim("'`\"")
+            $dotenvVars[$Matches[1]] = $Matches[2].Trim("'`"")
         }
     }
 }

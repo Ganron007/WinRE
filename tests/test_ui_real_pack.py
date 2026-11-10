@@ -338,3 +338,63 @@ def test_previous_runs_are_detected_and_served_in_ui(tmp_path, monkeypatch):
     # 3. path traversal refused
     r_bad = client.get(f"/packs/{sha}/previous_runs/..%2f../etc/passwd?mode=dynamic")
     assert r_bad.status_code == 400
+
+
+def test_dynamic_window_telemetry_lands_and_renders_in_ui(client):
+    """Deferred check (Item 2): window, window_gate, and window_stop_reason land in META.json and render in UI."""
+    import json
+    import tempfile
+    from pathlib import Path
+    from winre.ui import app as ui_app
+
+    # 1. Real pack check (s17)
+    s17_sha = "7ac7d956469cfa2196356f04f002648326e231cfc52252acc3c23d3698e1ef89"
+    detail = ui_app._pack_detail(s17_sha, mode="dynamic")
+    if detail:
+        dy = detail["views"]["dynamic"]
+        assert dy["ran"] is True
+        meta = dy["meta"]
+        assert "window" in meta
+        assert meta["window"].get("effective_s") == 3.9
+        assert meta["window"].get("requested_s") == 150
+        assert meta["window_stop_reason"] == "detached"
+        assert "window_gate" in meta
+
+        # UI rendering verification
+        page = client.get(f"/packs/{s17_sha}?mode=dynamic").get_data(as_text=True)
+        assert "window <b>3.9s</b> / 150s" in page
+        assert "stop: <b>detached</b>" in page
+
+    # 2. Gate-fired branch verification (synthetic)
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        sha = "f" * 64
+        dyn_dir = tmp_path / sha / "dynamic" / "dynamic"
+        dyn_dir.mkdir(parents=True)
+        (tmp_path / sha / "dynamic" / "META.json").write_text(json.dumps({"sha256": sha, "mode": "dynamic"}), encoding="utf-8")
+        stage_meta = {
+            "ok": True,
+            "max_seconds": 150,
+            "window": {
+                "effective_s": 12.5,
+                "requested_s": 150,
+                "stop_reason": "gate",
+                "gate": {"fired": True, "kind": "network", "api": "connect"},
+            },
+            "window_stop_reason": "gate",
+            "window_gate": {"fired": True, "kind": "network", "api": "connect"},
+        }
+        (dyn_dir / "META.json").write_text(json.dumps(stage_meta), encoding="utf-8")
+
+        old_logs = ui_app.LOGS_DIR
+        try:
+            ui_app.LOGS_DIR = tmp_path
+            d = ui_app._pack_detail(sha, mode="dynamic")
+            assert d is not None
+            c = ui_app.create_app().test_client()
+            res = c.get(f"/packs/{sha}?mode=dynamic").get_data(as_text=True)
+            assert "window <b>12.5s</b> / 150s" in res
+            assert "stop: <b>gate</b>" in res
+            assert "gate: <b>network:connect</b>" in res
+        finally:
+            ui_app.LOGS_DIR = old_logs

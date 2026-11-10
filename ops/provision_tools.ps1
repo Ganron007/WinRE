@@ -45,7 +45,7 @@ $dotenv = @{}
 $dotenvPath = Join-Path $repo ".env"
 if (Test-Path $dotenvPath) {
     foreach ($ln in Get-Content $dotenvPath) {
-        if ($ln -match '^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.+?)\s*$') { $dotenv[$Matches[1]] = $Matches[2].Trim("'`\"") }
+        if ($ln -match '^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.+?)\s*$') { $dotenv[$Matches[1]] = $Matches[2].Trim("'`"") }
     }
 }
 if (-not $FlareHost) { $FlareHost = if ($env:FLARE_HOST) { $env:FLARE_HOST } else { $dotenv["FLARE_HOST"] } }
