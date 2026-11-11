@@ -222,15 +222,21 @@ A deterministic `--mode static` run cannot request `--dynamic` or
 `dynamic/` evidence sections. Each capability is a distinct gated execution;
 restore and attest the clean snapshot between them.
 
-**Snapshot restore is a deliberate OPERATOR action — by design, and it stays
-manual (operator decision 2026-11-11).** WinRE never reverts the hypervisor
-snapshot, and no revert automation will be built into the bridge: the manual
-restore is the supported user flow, and keeping it on the operator preserves
-the trust boundary (no host-side execution path reachable from a driver box).
-An integrated RevAI detonation loop therefore PAUSES between gated
-executions: the RevAI agent finishes a run, records it, and asks the operator
-to restore + the flow re-attests before the next execution. Do not script
-around this; a run whose gate reads `blocked` waits, it does not work around.
+**Snapshot restore is a deliberate OPERATOR action — by design, it is not
+part of the pipeline or the UI (operator decision 2026-11-11).** WinRE never
+reverts the hypervisor snapshot, and no revert automation is built into the
+bridge code. The restore is performed BY the operator layer: either the human
+operator, or the RevAI driver agent acting AS the operator (an agent shell on
+the workstation, where VMware Workstation and `vmrun` live — code running
+inside `.43` cannot revert sibling VMs). The driver agent performs the
+documented restore card: vmrun stop → revertToSnapshot `GOLD-2026-11-10` →
+start → wait for guest SSH → `python -m winre.snapshot_gate attest --action
+verified_clean` → `status` (expect `ledger_clean=true, blocked=false`).
+The attestation is never skippable: the marker proves the snapshot, the
+attestation proves the restore was verified. `ops/reapply_after_revert.ps1`
+(the 5-8 min parity chain) is only needed when parity is in doubt — the
+current GOLD bakes the verified tree. A run whose gate reads `blocked`
+waits; it is never scripted around.
 
 Standalone WinRE dynamic runs use guest FakeNet telemetry and continue when no
 passive sensor is configured. The RevAI bridge adds
