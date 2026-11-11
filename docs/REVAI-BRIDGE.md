@@ -222,6 +222,16 @@ A deterministic `--mode static` run cannot request `--dynamic` or
 `dynamic/` evidence sections. Each capability is a distinct gated execution;
 restore and attest the clean snapshot between them.
 
+**Snapshot restore is a deliberate OPERATOR action — by design, and it stays
+manual (operator decision 2026-11-11).** WinRE never reverts the hypervisor
+snapshot, and no revert automation will be built into the bridge: the manual
+restore is the supported user flow, and keeping it on the operator preserves
+the trust boundary (no host-side execution path reachable from a driver box).
+An integrated RevAI detonation loop therefore PAUSES between gated
+executions: the RevAI agent finishes a run, records it, and asks the operator
+to restore + the flow re-attests before the next execution. Do not script
+around this; a run whose gate reads `blocked` waits, it does not work around.
+
 Standalone WinRE dynamic runs use guest FakeNet telemetry and continue when no
 passive sensor is configured. The RevAI bridge adds
 `--require-external-capture`, so an integrated dynamic run fails before guest
