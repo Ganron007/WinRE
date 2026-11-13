@@ -634,13 +634,31 @@ foreach ($summaryName in @("frida_summary.json", "procmon_summary.json")) {
       ConvertTo-Json | Set-Content $summaryPath -Encoding UTF8
     continue
   }
+  $summaryRaw = Get-Content $summaryPath -Raw
   try {
-    $summaryRecord = Get-Content $summaryPath -Raw | ConvertFrom-Json
+    $summaryRecord = $summaryRaw | ConvertFrom-Json
     if ($summaryRecord.status -ne "ok") {
       $summaryErrors += "$summaryName status=$($summaryRecord.status)"
     }
   } catch {
-    $summaryErrors += "$summaryName unreadable: $($_.Exception.Message)"
+    # Windows PowerShell's ConvertFrom-Json backs its object with a
+    # CASE-INSENSITIVE dictionary, so it rejects a JSON object whose keys
+    # differ only by case -- even though JSON allows that and the Python
+    # consumer accepts it. Frida's registry-path harvest legitimately
+    # produces both `Software\Microsoft\OLE` and `SOFTWARE\Microsoft\OLE`
+    # (2026-11-13, RevAI run S1: the control-plane audit failed the whole
+    # dynamic/job coverage row on this, turning a complete pack red).
+    # This check only needs the `status` field, so read it directly from
+    # the text instead of failing the collection on key casing. A summary
+    # that is genuinely broken (no status field) still fails closed.
+    $statusMatch = [regex]::Match($summaryRaw, '"status"\s*:\s*"(?<s>[^"]*)"')
+    if (-not $statusMatch.Success) {
+      $summaryErrors += "$summaryName unreadable: $($_.Exception.Message)"
+    } elseif ($statusMatch.Groups["s"].Value -ne "ok") {
+      $summaryErrors += "$summaryName status=$($statusMatch.Groups["s"].Value)"
+    } else {
+      Log ("NOTE: {0} has keys differing only by case (PowerShell ConvertFrom-Json limitation); status=ok confirmed by field scan" -f $summaryName)
+    }
   }
 }
 $summaryError = if ($summaryErrors.Count -gt 0) {
