@@ -4,10 +4,10 @@
   <img src="assets/winre-logo.svg" alt="WinRE logo" width="620">
 </p>
 
-> **Project status:** Production-validated. WinRE is a field-proven Windows
-> malware analysis pipeline and the dynamic companion to RevAI. All standalone
-> and integrated execution modes are live-proven with strict snapshot gate
-> enforcement and 0% claim violation rates in standalone audits.
+> **Project status:** Public release. WinRE is an automated Windows
+> malware-analysis pipeline and the dynamic companion to RevAI. It combines
+> deterministic static analysis, optional LLM-assisted investigation, controlled
+> dynamic detonation, and debugger inspection under an audited quality contract.
 
 WinRE is a Windows malware-analysis pipeline built around FlareVM. It combines
 deterministic static analysis, optional LLM-assisted investigation, controlled
@@ -109,17 +109,6 @@ The control plane may run on Windows or Linux and needs Python, OpenSSH client
 tools, and network access to the configured LLM provider when agentic analysis
 is used. See [Prerequisites](docs/PREREQUISITES.md) and
 [Tool Paths](docs/TOOL-PATHS.md) for version and path details.
-
-## Validated Operational Modes & S1 Campaign
-
-WinRE supports both autonomous standalone triage and deep integrated corroboration with [RevAI](https://github.com/Ganron007/RevAI). In the benchmark S1 (`331bcdf17104`) campaign, all operational modes were proven end-to-end:
-
-| Mode | Pipeline Command | Execution Plane | Runtime Findings | Audit Result | Violation Rate |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Standalone Dynamic** | `python -m winre.pipeline <sample> --driver remote --mode agentic --dynamic` | FlareVM detonation (FakeNet, Procmon, Frida, pe-sieve) | 101 Frida events, sample process tree, network sink capture | `all_green: true` (82 claims) | **0.0%** |
-| **Standalone Agentic-DBG** | `python -m winre.pipeline <sample> --driver remote --mode agentic --agentic-dbg` | x64dbg / Malcat / WinDbg MCP servers via `langgraph+dbg` | Entry point & OEP analysis, memory dumps, loop tracing | `all_green: true` (61 claims) | **0.0%** |
-| **RevAI Agentic + WinRE** | `REVAI_WINRE_RUN=1 python3 stage_orchestrator.py` | Integrated FlareVM detonation + RevAI ReAct agent | 599 Frida events, 296 sample-attributed calls, external PCAP | Section manifests verified (RC-74) | **2.3%** |
-| **RevAI Scripted + WinRE**| `REVAI_WINRE_RUN=1 python3 pipeline_single.py` | Integrated FlareVM detonation + deterministic spine | Full 16-section technical dossiers citing runtime execution | Genuine v3 rc=0 (1,491 claims) | **0.47% (All-time low)** |
 
 ## Documentation
 
