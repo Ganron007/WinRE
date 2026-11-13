@@ -45,8 +45,7 @@ names who provides it.
 |---|---|---|---|---|
 | Ghidra 11/12.x + CADRE loader `[ours]` | `C:\ProgramData\chocolatey\lib\ghidra\tools\ghidra_*_PUBLIC` (also `C:\Tools\ghidra_*_PUBLIC`; glob auto-detect) | `GHIDRA_INSTALL_DIR` (pyghidra fast-path) | ghidra_query, ghidra_decompile, signature SQL | deep skips ghidra tools → static weakens, honest skip |
 | capa + mandiant rules `[base]` | `C:\Tools\capa\capa.exe` + `C:\Tools\capa-rules` | — | capability clusters (verdict driver) | capa evidence absent (pip fallback auto-tried) |
-| floss [base]/[setup] | 
-lare-floss pip module (installed offline from staged wheels) or C:\\Tools\\FLOSS\\floss.exe | - | decoded/stack strings | floss evidence absent |
+| floss [base]/[setup] | flare-floss pip module (installed offline from staged wheels) or `C:\Tools\FLOSS\floss.exe` | — | decoded/stack strings | floss evidence absent |
 | Detect It Easy `[base]`/`[stage]` | `C:\Tools\die\diec.exe` | — | packer/compiler taxonomy (decrypt-gate) | taxonomy falls back to entropy-only |
 | yara-x `[base]` | `C:\Tools\yr\yr.exe` or `C:\Tools\yara-x\yr.exe` (both probed) | — | curated-ruleset scan (verdict driver) | yara-hit rule can't fire |
 | curated YARA rules `[setup]` | `C:\Tools\yara-rules` (`*.yar`) | — (path is a module constant in `tools/flare_static_tools.py`; report-side rule matching honors `WINRE_YARA_RULES`, `winre/findings.py`) | family matches | yarascan reports `no rules staged` |

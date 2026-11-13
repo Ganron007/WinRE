@@ -5,7 +5,8 @@
 </p>
 
 > **Project status:** Public release. WinRE is an automated Windows
-> malware-analysis pipeline and the dynamic companion to RevAI. It combines
+> malware-analysis pipeline with autonomous standalone operation and remote-driver
+> support for external control planes (such as RevAI). It combines
 > deterministic static analysis, optional LLM-assisted investigation, controlled
 > dynamic detonation, and debugger inspection under an audited quality contract.
 
@@ -14,14 +15,16 @@ deterministic static analysis, optional LLM-assisted investigation, controlled
 dynamic analysis, and debugger-assisted inspection. The LLM interprets
 tool-produced evidence; it does not execute samples.
 
-WinRE can run with a separate **control plane** and **Windows analysis guest**.
-The control plane hosts the driver, UI, reports, evidence packs, and optional
-LLM connection. The FlareVM guest hosts Windows tooling and sample execution.
-The remote driver communicates with the guest over SSH and MCP and brings the
-resulting evidence back to the control plane for analysis. Keep the guest on
-the private host-only VMnet2 network with internet NAT/bridging removed. The
-guest retains intended access to VMnet2 peers and the workstation; this is not
-a per-guest peer-isolation policy.
+WinRE operates both as an autonomous standalone system and through a remote driver
+that enables external callers and orchestration platforms to drive its analysis and
+detonation pipelines. The architecture separates the **control plane** from the
+**Windows analysis guest**. The control plane hosts the driver, UI, reports,
+evidence packs, and optional LLM connection. The FlareVM guest hosts Windows
+tooling and sample execution. The remote driver communicates with the guest over SSH
+and MCP and brings the resulting evidence back to the control plane for analysis.
+Keep the guest on the private host-only VMnet2 network with internet NAT/bridging
+removed. The guest retains intended access to VMnet2 peers and the workstation; this
+is not a per-guest peer-isolation policy.
 
 ## Analysis modes
 

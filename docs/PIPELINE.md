@@ -22,10 +22,10 @@ warning is the expected on-demand x64dbg MCP listener.
 MATRIX COMPLETE (static, agentic, agentic-dbg, dynamic all green:
 s07, s09, s13, s14, s15, s16, s17); s10 stands at 3/4 (Frida refuses its
 UPX+signed stub — a sample limitation) and s08 at 2/4 (an x64dbg
-EP-breakpoint engine limitation on that module name). Furthermore, all four
-modes of the integrated RevAI ↔ WinRE value campaign have been live-proven
-with clean snapshot restores, achieving 0% violations in standalone modes
-and an all-time low of 0.47% in integrated mode. A supported mode in
+EP-breakpoint engine limitation on that module name). Furthermore, the
+remote-driver interface enabling external platforms (such as RevAI) to trigger
+controlled dynamic detonation and debugger passes over SSH and MCP has been
+validated and live-proven across clean snapshot restore cycles. A supported mode in
 the tables below describes an implemented, sample-proven workflow.
 Maintainers track per-mode release acceptance separately from this operator
 guide.

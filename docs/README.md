@@ -15,7 +15,7 @@ below as needed.
 | [EVIDENCE.md](EVIDENCE.md) | Four evidence sections, manifests, provenance, and `truly_green` |
 | [TOOL-PATHS.md](TOOL-PATHS.md) | Tool-location contract and per-tool env overrides |
 | [SSH-CONTRACT.md](SSH-CONTRACT.md) | SSH/MCP transport contract for remote callers |
-| [REVAI-BRIDGE.md](REVAI-BRIDGE.md) | Wiring the remote driver to a RevAI (or other control-plane) box |
+| [REVAI-BRIDGE.md](REVAI-BRIDGE.md) | Remote driver interface and wiring for external control planes (e.g. RevAI) |
 | [SQL-GHIDRA.md](SQL-GHIDRA.md) | SQL-first Ghidra: `LibGhidraHost` + `ghidrasql` build/run + schema |
 | [SQL-IDA.md](SQL-IDA.md) | SQL-first IDA: `idasql` install/run + schema |
 | [DYNAMIC-ORCHESTRATOR.md](DYNAMIC-ORCHESTRATOR.md) | Pipeline-driven detonation and standalone collection interface |
