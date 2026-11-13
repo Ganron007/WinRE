@@ -82,9 +82,8 @@ WinRE `winre/mcp/x64dbg_client.py` wraps this HTTP — see [`SSH-CONTRACT.md`](S
 > recorded in the evidence. A failed OEP probe produces no reconstructed
 > artifact. Managed (.NET) samples skip the native OEP/unpack path entirely;
 > `dotnet_analyze`, `x64dbg_wpm_dump`, and WinDbg are used instead, and MCP
-> startup waits up to 90 seconds for the plugin to bind. The dynamic OEP/dump step
-> (`orchestrator._x64dbg_oep_dump`) still uses `DumpModule` into
-> `dynamic/x64dbg/dump/`.
+> startup waits up to 90 seconds for the plugin to bind. Dynamic memory dumps
+> from detonation are captured via pe-sieve and procdump into `dynamic/memory/`.
 
 ## 5. Limits
 

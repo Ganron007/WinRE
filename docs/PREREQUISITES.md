@@ -89,17 +89,16 @@ Build/repair details: `docs\SQL-GHIDRA.md` + `docs\SQL-IDA.md`.
 ### Ghidra JDK (required for headless analysis)
 
 Ghidra 12 needs a supported JDK (21). FlareVM 2026 ships OpenJDK 25, which
-makes Ghidra's launcher fail and then hang at its batch \pause\ (every
-\ghidra_query\ burns the full timeout). \install/setup-flarevm.ps1\ detects
-this and pins a supported JDK via \support\\launch.properties(\JAVA_HOME_OVERRIDE=...\), installing \	emurin21\ when chocolatey is
-available; \
-erify-flarevm.ps1\ reports the pin. Manual fix:
+makes Ghidra's launcher fail and then hang at its batch `pause` (every
+`ghidra_query` burns the full timeout). `install/setup-flarevm.ps1` detects
+this and pins a supported JDK via `support\launch.properties` (`JAVA_HOME_OVERRIDE=...`), installing `temurin21` when chocolatey is
+available; `install/verify-flarevm.ps1` reports the pin. Manual fix:
 
-\\powershell
+```powershell
 choco install temurin21 -y
-# then set in <ghidra>\\support\\launch.properties:
-# JAVA_HOME_OVERRIDE=C:\\Program Files\\Eclipse Adoptium\\jdk-21.0.xx-hotspot
-\
+# then set in <ghidra>\support\launch.properties:
+# JAVA_HOME_OVERRIDE=C:\Program Files\Eclipse Adoptium\jdk-21.0.xx-hotspot
+```
 ### Required — free tools (setup FAILS without these)
 
 | Tool | Default location | Source |

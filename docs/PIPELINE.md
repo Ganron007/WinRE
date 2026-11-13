@@ -1,29 +1,31 @@
 # Pipeline
 
 > **Scope:** execution modes, stage order, driver boundaries, and CLI behavior.
-> **Audience:** operators and integrators. WinRE is pre-v1.0; pin a revision
-> when relying on these interfaces.
+> **Audience:** operators and integrators.
 
 WinRE uses deterministic tools to produce evidence. The agentic engine can
 interpret that evidence through an OpenAI-compatible LLM. It does not ask the
 LLM to execute samples or replace deterministic collection.
 
-## Current validation boundary — 2026-11-11
+## Current validation boundary — 2026-11-13
 
-Revision `c43edb5` (the 2026-11-07 full review, then the handoff cycle:
-review items a-h, Decision Briefs 1-4 Option A — host venv, dead local
-dynamic path removed, legacy windbg bridge removed, UI gate binding —
-Noriben Procmon approvelists, and window-telemetry verification) passes the
-full local suite (**889 passed, 4 skipped**). The reference FlareVM (GOLD snapshot
-`GOLD-2026-11-10`, the operator's 2026-11-10 refresh with the current code and tools baked in) is deployed at parity with the verifier at **0 failures**
-and **43/43 required tools**; the single warning is the expected on-demand
-x64dbg MCP listener.
+Revision `b8138b8` (the 2026-11-07 review, handoff cycle items a-h, Decision
+Briefs 1-4 Option A — host venv, dead local dynamic path removed, legacy windbg
+bridge removed, UI gate binding — Noriben Procmon approvelists, window-telemetry
+verification, and the Frida summary key-casing fallback) passes the full local
+suite (**889 passed, 4 skipped**). The reference FlareVM (GOLD snapshot
+`GOLD-2026-11-10`, with current code and tools baked in) is deployed at parity
+with the verifier at **0 failures** and **43/43 required tools**; the single
+warning is the expected on-demand x64dbg MCP listener.
 
 **Standalone validation campaign: COMPLETE.** Seven samples reached 4/4
 MATRIX COMPLETE (static, agentic, agentic-dbg, dynamic all green:
 s07, s09, s13, s14, s15, s16, s17); s10 stands at 3/4 (Frida refuses its
 UPX+signed stub — a sample limitation) and s08 at 2/4 (an x64dbg
-EP-breakpoint engine limitation on that module name). A supported mode in
+EP-breakpoint engine limitation on that module name). Furthermore, all four
+modes of the integrated RevAI ↔ WinRE value campaign have been live-proven
+with clean snapshot restores, achieving 0% violations in standalone modes
+and an all-time low of 0.47% in integrated mode. A supported mode in
 the tables below describes an implemented, sample-proven workflow.
 Maintainers track per-mode release acceptance separately from this operator
 guide.
