@@ -243,10 +243,14 @@ def chat_openai_options(max_tokens: int, base_url: str | None = None) -> dict:
     """LangChain options that retain the documented provider fields on the wire."""
     if not _is_agnes_endpoint(base_url):
         options = {"max_tokens": max_tokens, "timeout": request_timeout()}
-        if _is_meta_endpoint(base_url):
-            meta_fields = _reasoning_field(base_url)
-            if meta_fields:
-                options["extra_body"] = meta_fields
+        # The urllib path sends the configured reasoning field on every
+        # request (`payload.update(_reasoning_field())`); keep the LangChain
+        # path consistent so WINRE_LLM_REASONING is not silently inert here.
+        # Meta's effort field takes the same extra_body merge as any other
+        # generic OpenAI-compatible provider (StepFun included).
+        reasoning_fields = _reasoning_field(base_url)
+        if reasoning_fields:
+            options["extra_body"] = reasoning_fields
         return options
     # ChatOpenAI renames its max_tokens option to max_completion_tokens.
     # Leave that option unset and merge the supported field at the SDK layer.

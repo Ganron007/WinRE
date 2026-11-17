@@ -79,7 +79,7 @@ negotiation with the VM. On import, `winre/envfile.py` loads *that box's*
 WINRE_LLM_BASE_URL=https://<your-provider>/v1
 WINRE_LLM_MODEL=<model-name-your-provider-exposes>
 WINRE_LLM_API_KEY=<key>
-WINRE_LLM_REASONING=enabled       # on the Agnes endpoint; use disabled to turn Thinking off
+WINRE_LLM_REASONING=low          # provider-specific: Agnes enabled|disabled (Thinking switch); StepFun low|medium|high (reasoning_effort; step-5-preview defaults HIGH when unset)
 WINRE_LLM_TIMEOUT=600             # per-request timeout in seconds (default 120)
 WINRE_LLM_TEMPERATURE=<0.0-2.0>   # optional sampling temperature (default: provider default)
 WINRE_VT_API_KEY=<virustotal-key>   # hash-only triage (optional; the legacy VT_API_KEY name is also honored)

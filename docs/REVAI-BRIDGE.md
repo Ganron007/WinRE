@@ -83,7 +83,7 @@ per-driver keypair.
 WINRE_LLM_BASE_URL=https://<your-provider>/v1
 WINRE_LLM_MODEL=<model-name-your-provider-exposes>
 WINRE_LLM_API_KEY=<key>
-WINRE_LLM_REASONING=enabled       # Agnes endpoint: enabled|disabled; effort labels are on aliases
+WINRE_LLM_REASONING=low          # provider-specific: Agnes enabled|disabled; StepFun low|medium|high (step-5-preview defaults to HIGH when unset); generic effort labels map to reasoning_effort
 WINRE_LLM_TIMEOUT=600             # per-request HTTP timeout in seconds (default 120)
 ```
 

@@ -76,10 +76,39 @@ def test_non_agnes_reasoning_contract_is_unchanged(monkeypatch):
     monkeypatch.delenv("WINRE_LLM_TIMEOUT", raising=False)
 
     assert llm_client._reasoning_field() == {"reasoning_effort": "high"}
+    # The urllib path merges _reasoning_field() into every payload; the
+    # LangChain path now carries the same field through extra_body so
+    # WINRE_LLM_REASONING is not silently inert there.
     assert llm_client.chat_openai_options(4096) == {
-        "max_tokens": 4096, "timeout": 120}
+        "max_tokens": 4096, "timeout": 120,
+        "extra_body": {"reasoning_effort": "high"}}
     monkeypatch.setattr(llm_client, "REASONING", "enabled")
     assert llm_client._reasoning_field() == {}
+    assert llm_client.chat_openai_options(4096) == {
+        "max_tokens": 4096, "timeout": 120}
+
+
+def test_stepfun_reasoning_effort_reaches_the_langchain_path(monkeypatch):
+    """StepFun step_plan endpoint: reasoning_effort low/medium/high is the
+    documented Chat Completions control and step-5-preview defaults to HIGH
+    when the field is absent, so the configured effort must never be dropped."""
+    monkeypatch.setattr(llm_client, "BASE_URL",
+                        "https://api.stepfun.ai/step_plan/v1")
+    monkeypatch.delenv("WINRE_LLM_TIMEOUT", raising=False)
+
+    monkeypatch.setattr(llm_client, "REASONING", "low")
+    assert llm_client._reasoning_field() == {"reasoning_effort": "low"}
+    assert llm_client.chat_openai_options(4096) == {
+        "max_tokens": 4096, "timeout": 120,
+        "extra_body": {"reasoning_effort": "low"}}
+    monkeypatch.setattr(llm_client, "REASONING", "medium")
+    assert llm_client._reasoning_field() == {"reasoning_effort": "medium"}
+    monkeypatch.setattr(llm_client, "REASONING", "high")
+    assert llm_client._reasoning_field() == {"reasoning_effort": "high"}
+    # enabled/disabled aliases keep the provider default (no documented off).
+    monkeypatch.setattr(llm_client, "REASONING", "enabled")
+    assert llm_client.chat_openai_options(4096) == {
+        "max_tokens": 4096, "timeout": 120}
 
 
 def test_agnes_output_cap_is_enforced_only_for_agnes(monkeypatch):
