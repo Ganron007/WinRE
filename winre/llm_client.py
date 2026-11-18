@@ -38,6 +38,7 @@ import json
 import hashlib
 import math
 import os
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
@@ -284,16 +285,73 @@ def chat_request_payload(messages: list[dict[str, str]], *, model: str | None = 
     return payload
 
 
+#: The transient empty-response class (see chat_result): bounded same-effort
+#: retries before failing closed.
+_EMPTY_RESPONSE_MAX_RETRIES = 2
+_EMPTY_RESPONSE_BACKOFF_S = 2.0
+
+
+def _response_problem(out: dict[str, Any]) -> str | None:
+    """Classify one chat-completions response for the retry decision.
+
+    ``None``  -- usable: non-empty text content or at least one tool call.
+    ``"empty"`` -- well-formed but carries neither text nor tool calls: the
+        transient provider class, retryable.
+    ``"malformed"`` -- structurally broken (no choices/message, content not
+        text): not retryable, the caller fails closed.
+    """
+    try:
+        choice = out["choices"][0]
+        message = choice["message"]
+    except (KeyError, IndexError, TypeError):
+        return "malformed"
+    content = message.get("content")
+    tool_calls = message.get("tool_calls")
+    if not isinstance(content, str):
+        # None content with tool calls is the normal tool-calling shape.
+        if content is None and isinstance(tool_calls, list) and tool_calls:
+            return None
+        return "malformed"
+    if content.strip():
+        return None
+    if isinstance(tool_calls, list) and tool_calls:
+        return None
+    return "empty"
+
+
 def chat_result(messages: list[dict[str, str]], *, model: str | None = None,
                 timeout: int | None = None, temperature: float | None = None,
                 max_tokens: int = 4000,
                 tools: list[dict[str, Any]] | None = None,
                 tool_choice: str | dict[str, Any] | None = None) -> dict[str, Any]:
-    """One chat completion with usage/finish metadata for auditable callers."""
+    """One chat completion with usage/finish metadata for auditable callers.
+
+    A response carrying NEITHER text NOR tool calls is retried at the same
+    settings before failing: the provider intermittently returns such empty
+    responses and the identical request succeeds on replay (measured on the
+    step_plan endpoint, 2026-11-18: 12 events in one RevAI publish stage;
+    WinRE's claim review failed closed on the same class). The endpoint
+    documents no reasoning off switch, so a bounded same-effort retry is the
+    correct recovery -- mirrors RevAI RC-79. Fail closed after the bound: an
+    empty response must never be accepted as data.
+    """
     payload = chat_request_payload(messages, model=model,
                                    temperature=temperature, max_tokens=max_tokens,
                                    tools=tools, tool_choice=tool_choice)
-    out = _post("/chat/completions", payload, timeout=request_timeout(timeout))
+    timeout_s = request_timeout(timeout)
+    out: dict[str, Any] = {}
+    for attempt in range(_EMPTY_RESPONSE_MAX_RETRIES + 1):
+        out = _post("/chat/completions", payload, timeout=timeout_s)
+        problem = _response_problem(out)
+        if problem is None:
+            break
+        if problem != "empty" or attempt >= _EMPTY_RESPONSE_MAX_RETRIES:
+            raise LLMError(f"LLM response missing content: {out!r:.200}")
+        backoff = _EMPTY_RESPONSE_BACKOFF_S * (2 ** attempt)
+        print(f"[llm_client] attempt {attempt + 1} returned neither text nor "
+              f"tool calls; retrying at the same settings after {backoff:.1f}s",
+              flush=True)
+        time.sleep(backoff)
     try:
         choice = out["choices"][0]
         message = choice["message"]
@@ -303,8 +361,6 @@ def chat_result(messages: list[dict[str, str]], *, model: str | None = None,
             content = ""
         if not isinstance(content, str):
             raise TypeError("assistant content is not text")
-        if not content and not isinstance(tool_calls, list):
-            raise TypeError("assistant response contains neither text nor tool calls")
         return {
             "content": content,
             "tool_calls": tool_calls if isinstance(tool_calls, list) else [],
@@ -317,7 +373,7 @@ def chat_result(messages: list[dict[str, str]], *, model: str | None = None,
                 "payload_sha256": hashlib.sha256(json.dumps(
                     payload, ensure_ascii=False, separators=(",", ":"),
                     default=str).encode("utf-8")).hexdigest(),
-                "timeout_seconds": request_timeout(timeout),
+                "timeout_seconds": timeout_s,
             },
         }
     except (KeyError, IndexError, TypeError) as e:

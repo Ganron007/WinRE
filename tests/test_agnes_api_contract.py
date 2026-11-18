@@ -227,3 +227,87 @@ def test_langchain_serializes_documented_token_field(monkeypatch):
         "model", "messages", "temperature", "top_p", "max_tokens", "stream",
         "tools", "tool_choice", "chat_template_kwargs",
     }
+
+
+# ---------------------------------------------------------------- RC-80
+# The provider intermittently returns a response with neither text nor tool
+# calls (12 events in one RevAI publish stage, 2026-11-18; WinRE's claim
+# review failed closed on the same class). The endpoint documents no
+# reasoning off switch, so a bounded same-effort retry is the correct
+# recovery -- mirrors RevAI RC-79. Fail closed after the bound.
+def test_an_empty_response_is_retried_at_the_same_settings(monkeypatch):
+    posts = []
+
+    def fake_post(path, payload, timeout=120):
+        posts.append(payload)
+        if len(posts) == 1:
+            return {"choices": [{"message": {"role": "assistant", "content": ""},
+                                 "finish_reason": "stop"}], "usage": {}}
+        return {"choices": [{"message": {"role": "assistant",
+                                         "content": '{"ok":true}'},
+                             "finish_reason": "stop"}], "usage": {}}
+
+    monkeypatch.setattr(llm_client, "_post", fake_post)
+    monkeypatch.setattr(llm_client.time, "sleep", lambda *_a: None)
+
+    out = llm_client.chat_result([{"role": "user", "content": "ping"}])
+
+    assert out["content"] == '{"ok":true}'
+    assert len(posts) == 2, "the same-effort retry must fire"
+    # Both attempts send the identical payload (same effort, same settings).
+    assert posts[0] == posts[1]
+
+
+def test_an_always_empty_response_fails_closed_after_the_bound(monkeypatch):
+    posts = []
+
+    def fake_post(path, payload, timeout=120):
+        posts.append(payload)
+        return {"choices": [{"message": {"role": "assistant", "content": ""},
+                             "finish_reason": "stop"}], "usage": {}}
+
+    monkeypatch.setattr(llm_client, "_post", fake_post)
+    monkeypatch.setattr(llm_client.time, "sleep", lambda *_a: None)
+
+    try:
+        llm_client.chat_result([{"role": "user", "content": "ping"}])
+        raise AssertionError("an always-empty response must raise LLMError")
+    except llm_client.LLMError as e:
+        assert "missing content" in str(e)
+    assert len(posts) == llm_client._EMPTY_RESPONSE_MAX_RETRIES + 1, (
+        "the retry bound must hold")
+
+
+def test_a_malformed_response_is_not_retried(monkeypatch):
+    """Structurally broken responses fail closed immediately (no retry)."""
+    posts = []
+
+    def fake_post(path, payload, timeout=120):
+        posts.append(payload)
+        return {"error": {"message": "no choices here"}}
+
+    monkeypatch.setattr(llm_client, "_post", fake_post)
+    monkeypatch.setattr(llm_client.time, "sleep", lambda *_a: None)
+
+    try:
+        llm_client.chat_result([{"role": "user", "content": "ping"}])
+        raise AssertionError("a malformed response must raise LLMError")
+    except llm_client.LLMError:
+        pass
+    assert len(posts) == 1, "a malformed response must not be retried"
+
+
+def test_a_tool_call_response_is_usable_without_text(monkeypatch):
+    posts = []
+
+    def fake_post(path, payload, timeout=120):
+        posts.append(payload)
+        return {"choices": [{"message": {"role": "assistant", "content": None,
+                                         "tool_calls": [{"id": "c1"}]},
+                             "finish_reason": "tool_calls"}], "usage": {}}
+
+    monkeypatch.setattr(llm_client, "_post", fake_post)
+
+    out = llm_client.chat_result([{"role": "user", "content": "ping"}])
+    assert out["tool_calls"] == [{"id": "c1"}]
+    assert len(posts) == 1, "a tool-call response is usable; no retry"
